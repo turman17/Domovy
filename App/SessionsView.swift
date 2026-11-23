@@ -1,11 +1,11 @@
 import DomovyCore
 import SwiftUI
 
-/// A delete request awaiting confirmation: the sessions and one computed plan each.
+/// Sessions to delete. The sheet opens at once and plans them while it shows a spinner.
 struct DeleteRequest: Identifiable {
     let id = UUID()
     let sessions: [Session]
-    let plans: [Plan]
+    let destination: Destination
     /// Selected sessions left out, one line each ("2 live sessions are left alone.").
     var notes: [String] = []
 }
@@ -572,50 +572,19 @@ struct SessionsView: View {
         requestDelete(selectedSessions)
     }
 
-    /// Plans first, then one confirmation sheet. In a batch, live sessions and sessions that
-    /// cannot be planned are left out and the sheet says so; a single one shows why instead.
+    /// Opens the confirmation sheet at once; it plans the sessions while showing a spinner.
+    /// Live sessions and ones still being archived or moved are left out with a note.
     private func requestDelete(_ sessions: [Session]) {
         let candidates = sessions.filter(canDelete)
         guard !candidates.isEmpty else { return }
         // The Trash keeps plaintext until it is emptied; flagged sessions default to the quarantine.
         let flagged = candidates.contains { !library.findings(for: $0).isEmpty }
-        let destination: Destination = flagged ? .quarantine : .trash
-        Task {
-            if candidates.count == 1, sessions.count == 1 {
-                do {
-                    let plan = try await library.deletePlan(for: candidates[0], destination: destination)
-                    deleteRequest = DeleteRequest(sessions: candidates, plans: [plan])
-                } catch {
-                    errorMessage = error.localizedDescription
-                }
-                return
-            }
-            var planned: [Session] = []
-            var plans: [Plan] = []
-            var live = sessions.filter { $0.status == .live }.count
-            let busy = sessions.filter { library.busySessions[$0.id] != nil }.count
-            var failed = 0
-            for session in candidates {
-                do {
-                    let plan = try await library.deletePlan(for: session, destination: destination)
-                    if plan.liveCheck.isLive { live += 1; continue }
-                    if plan.isEmpty { failed += 1; continue }
-                    planned.append(session)
-                    plans.append(plan)
-                } catch {
-                    failed += 1
-                }
-            }
-            var notes: [String] = []
-            if live > 0 { notes.append(Self.leftAlone(live, "live")) }
-            if busy > 0 { notes.append("\(busy) \(busy == 1 ? "session is" : "sessions are") still being archived or moved, and left alone.") }
-            if failed > 0 { notes.append("\(failed) \(failed == 1 ? "session" : "sessions") could not be planned and \(failed == 1 ? "is" : "are") left alone; delete \(failed == 1 ? "it" : "them") one at a time to see why.") }
-            guard !plans.isEmpty else {
-                errorMessage = "None of the selected sessions can be deleted right now. " + notes.joined(separator: " ")
-                return
-            }
-            deleteRequest = DeleteRequest(sessions: planned, plans: plans, notes: notes)
-        }
+        var notes: [String] = []
+        let live = sessions.filter { $0.status == .live }.count
+        if live > 0 { notes.append(Self.leftAlone(live, "live")) }
+        let busy = sessions.filter { $0.status != .live && library.busySessions[$0.id] != nil }.count
+        if busy > 0 { notes.append("\(busy) \(busy == 1 ? "session is" : "sessions are") still being archived or moved, and left alone.") }
+        deleteRequest = DeleteRequest(sessions: candidates, destination: flagged ? .quarantine : .trash, notes: notes)
     }
 }
 

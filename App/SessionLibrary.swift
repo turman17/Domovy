@@ -287,6 +287,21 @@ final class SessionLibrary {
         try await adapter(for: session.agent).deletePlan(for: session, destination: destination)
     }
 
+    /// Delete plans for a batch, in order, each agent asked once for all of its sessions.
+    func deletePlans(for sessions: [Session], destination: Destination) async -> [PlannedSession] {
+        var results: [Session.ID: PlannedSession] = [:]
+        for (agent, group) in Dictionary(grouping: sessions, by: \.agent) {
+            do {
+                for planned in try await adapter(for: agent).deletePlans(for: group, destination: destination) {
+                    results[planned.session.id] = planned
+                }
+            } catch {
+                for session in group { results[session.id] = PlannedSession(session: session, result: .failure(error)) }
+            }
+        }
+        return sessions.compactMap { results[$0.id] }
+    }
+
     /// One archive plan per session; sessions with nothing to do are left out. A batch also
     /// leaves out blocked plans; a single blocked plan stays so the sheet can say why.
     func archivePlans(for sessions: [Session]) async throws -> [Plan] {

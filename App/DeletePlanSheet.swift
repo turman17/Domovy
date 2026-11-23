@@ -2,14 +2,17 @@ import DomovyCore
 import SwiftUI
 
 /// Shows the exact plan before anything moves: every file and index entry, the total, the
-/// destination and the live check, grouped per session for a batch. Return confirms, Escape
-/// cancels.
+/// destination and the live check, one group per session in a batch. Opens at once and plans
+/// while it shows a spinner. Return confirms, Escape cancels.
 struct DeletePlanSheet: View {
     let request: DeleteRequest
 
     @Environment(SessionLibrary.self) private var library
     @Environment(\.dismiss) private var dismiss
-    @State private var plans: [Plan]
+    /// Nil while planning.
+    @State private var plans: [Plan]?
+    /// Sessions the plans left out ("1 live session is left alone.").
+    @State private var dropped: [String] = []
     @State private var destination: Destination
     @State private var failure: String?
     @State private var purgeNow = false
@@ -17,51 +20,112 @@ struct DeletePlanSheet: View {
 
     init(request: DeleteRequest) {
         self.request = request
-        _plans = State(initialValue: request.plans)
-        _destination = State(initialValue: request.plans.first?.destination ?? .trash)
+        _destination = State(initialValue: request.destination)
     }
 
-    private var isBatch: Bool { plans.count > 1 }
-    private var totalBytes: Int64 { plans.reduce(0) { $0 + $1.totalBytes } }
-    private var keepsToolCopies: Bool { plans.contains(where: \.keepsToolCopies) }
-    private var acknowledgements: [String] { Array(Set(plans.compactMap(\.acknowledgement))).sorted() }
-    private var isLive: Bool { plans.contains { $0.liveCheck.isLive } }
-    private var secretCount: Int { request.sessions.reduce(0) { $0 + library.findings(for: $1).count } }
+    private var planned: [Plan] { plans ?? [] }
+    private var isBatch: Bool { request.sessions.count > 1 }
+    private var totalBytes: Int64 { planned.reduce(0) { $0 + $1.totalBytes } }
+    private var keepsToolCopies: Bool { planned.contains(where: \.keepsToolCopies) }
+    private var acknowledgements: [String] { Array(Set(planned.compactMap(\.acknowledgement))).sorted() }
+    private var isLive: Bool { planned.contains { $0.liveCheck.isLive } }
+    private var movesFiles: Bool { planned.contains { !$0.moves.isEmpty } }
+    private var plannedSessions: [Session] {
+        let ids = Set(planned.map(\.sessionID))
+        return request.sessions.filter { ids.contains($0.id) }
+    }
+    private var secretCount: Int { plannedSessions.reduce(0) { $0 + library.findings(for: $1).count } }
 
+    /// Short so it never truncates; the count is in the title.
     private var confirmTitle: String {
-        let what = isBatch ? " \(plans.count) Sessions" : ""
         if purgeNow && keepsToolCopies { return "Delete Now" }
-        if plans.allSatisfy({ (!$0.commands.isEmpty || !$0.databaseEdits.isEmpty) && $0.moves.isEmpty }) { return "Delete" + what }
-        return "Move\(what) to " + (destination == .trash ? "Trash" : "Quarantine")
+        if !movesFiles { return "Delete" }
+        return destination == .trash ? "Move to Trash" : "Move to Quarantine"
     }
 
     private var title: String {
-        isBatch ? "Delete \(plans.count) sessions?" : "Delete session \u{201C}\(request.sessions[0].displayTitle)\u{201D}?"
+        let what = planned.count > 1 || isBatch ? "\(planned.count) sessions" : "\u{201C}\(request.sessions[0].displayTitle)\u{201D}"
+        return movesFiles ? "Move \(what) to \(destination.displayName)?" : "Delete \(what)?"
     }
 
     private var summary: String {
-        guard isBatch else { return plans.first?.summary ?? "" }
-        let moved = plans.reduce(0) { $0 + $1.moves.count }
-        var parts = ["Changes \(plans.count) sessions (\(totalBytes.formatted(.byteCount(style: .file))))."]
-        if moved > 0 { parts.append("Moves \(moved) \(moved == 1 ? "file or folder" : "files and folders") to \(destination.displayName).") }
-        parts.append("Every change is listed below, grouped by session.")
+        guard planned.count > 1 else { return planned.first?.summary ?? "" }
+        let moved = planned.reduce(0) { $0 + $1.moves.count }
+        var parts: [String] = []
+        if moved > 0 { parts.append("Moves \(moved) \(moved == 1 ? "file or folder" : "files and folders") (\(totalBytes.formatted(.byteCount(style: .file)))).") }
+        parts.append("Every change is listed below, one group per session.")
         return parts.joined(separator: " ")
     }
 
     /// One live check per agent: a batch is checked with the same signals for each session.
     private var liveChecks: [Plan] {
-        if let live = plans.first(where: { $0.liveCheck.isLive }) { return [live] }
+        if let live = planned.first(where: { $0.liveCheck.isLive }) { return [live] }
         var seen: Set<AgentKind> = []
-        return plans.filter { seen.insert($0.agent).inserted }
+        return planned.filter { seen.insert($0.agent).inserted }
     }
 
     var body: some View {
+        Group {
+            if plans == nil {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Checking \(isBatch ? "\(request.sessions.count) sessions" : "the session")\u{2026}")
+                        .foregroundStyle(.secondary)
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                }
+                .frame(maxWidth: .infinity, minHeight: 160)
+            } else if planned.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Nothing to delete")
+                        .font(.title3.weight(.semibold))
+                    Text(([failure] + (request.notes + dropped).map(Optional.some)).compactMap { $0 }.joined(separator: " "))
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("OK") { dismiss() }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                }
+            } else {
+                content
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+        .task(id: destination) { await plan() }
+    }
+
+    /// Plans every session in one go. In a batch, live sessions and ones that cannot be planned
+    /// drop out with a note; a single one stays so the sheet can say why.
+    private func plan() async {
+        let results = await library.deletePlans(for: request.sessions, destination: destination)
+        if !isBatch, let result = results.first {
+            switch result.result {
+            case .success(let plan): plans = [plan]
+            case .failure(let error):
+                failure = error.localizedDescription
+                plans = []
+            }
+            return
+        }
+        let ok = results.compactMap(\.plan)
+        let live = ok.filter(\.liveCheck.isLive).count
+        let failed = results.count - ok.count
+        var notes: [String] = []
+        if live > 0 { notes.append("\(live) live \(live == 1 ? "session is" : "sessions are") left alone.") }
+        if failed > 0 { notes.append("\(failed) \(failed == 1 ? "session" : "sessions") could not be planned and \(failed == 1 ? "is" : "are") left alone; delete \(failed == 1 ? "it" : "them") one at a time to see why.") }
+        dropped = notes
+        plans = ok.filter { !$0.liveCheck.isLive && !$0.isEmpty }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
                 .font(.title3.weight(.semibold))
             Text(summary)
                 .foregroundStyle(.secondary)
-            ForEach(request.notes, id: \.self) { note in
+            ForEach(request.notes + dropped, id: \.self) { note in
                 Label(note, systemImage: "info.circle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -69,7 +133,8 @@ struct DeletePlanSheet: View {
             ForEach(liveChecks) { plan in
                 LiveCheckRow(result: plan.liveCheck)
             }
-            RemarksView(remarks: Array(Set(plans.flatMap(\.remarks))).sorted())
+            // In a batch each session's remarks sit in its own group below.
+            if planned.count == 1, let plan = planned.first { RemarksView(remarks: plan.remarks) }
             secretsHint
             changes
             if keepsToolCopies { FreeSpaceNowToggle(isOn: $purgeNow) }
@@ -79,21 +144,6 @@ struct DeletePlanSheet: View {
                     .foregroundStyle(.secondary)
             }
             footer
-        }
-        .padding(20)
-        .frame(width: 560)
-        .onChange(of: destination) { _, newValue in
-            Task {
-                do {
-                    var replanned: [Plan] = []
-                    for session in request.sessions {
-                        replanned.append(try await library.deletePlan(for: session, destination: newValue))
-                    }
-                    plans = replanned
-                } catch {
-                    failure = error.localizedDescription
-                }
-            }
         }
     }
 
@@ -113,8 +163,12 @@ struct DeletePlanSheet: View {
 
     private var changes: some View {
         List {
-            ForEach(plans) { plan in
-                PlanChanges(plan: plan, sessionTitle: isBatch ? title(of: plan) : nil, root: library.root(for: plan.agent), destination: destination)
+            if planned.count == 1, let plan = planned.first {
+                PlanChanges(plan: plan, root: library.root(for: plan.agent), destination: destination)
+            } else {
+                ForEach(planned) { plan in
+                    SessionChanges(plan: plan, session: plannedSessions.first { $0.id == plan.sessionID }, root: library.root(for: plan.agent))
+                }
             }
         }
         .frame(height: 320)
@@ -122,43 +176,42 @@ struct DeletePlanSheet: View {
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private func title(of plan: Plan) -> String {
-        request.sessions.first { $0.id == plan.sessionID }?.displayTitle ?? plan.sessionID
-    }
-
     private var footer: some View {
         HStack(spacing: 8) {
-            Text("Destination:")
             Picker("Destination", selection: $destination) {
                 Text("Trash").tag(Destination.trash)
                 Text("Domovy quarantine").tag(Destination.quarantine)
             }
             .labelsHidden()
             .fixedSize()
+            .help("Where the files go")
             SizeText(bytes: totalBytes)
                 .foregroundStyle(.secondary)
-            Spacer()
+                .lineLimit(1)
+            Spacer(minLength: 8)
             Button("Cancel") { dismiss() }
                 .keyboardShortcut(.cancelAction)
+                .fixedSize()
             Button(confirmTitle, action: execute)
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
+                .fixedSize()
                 // With a kept copy the delete stays undoable; red only once it is for good.
                 .tint(!keepsToolCopies || purgeNow ? .red : nil)
-                .disabled(isLive || plans.isEmpty || plans.contains(where: \.isEmpty) || (!acknowledgements.isEmpty && !acknowledged))
+                .disabled(isLive || planned.isEmpty || planned.contains(where: \.isEmpty) || (!acknowledgements.isEmpty && !acknowledged))
         }
     }
 
     /// Closes the sheet at once; the delete runs in the background and ends in a toast.
     private func execute() {
-        let plans = plans.map { plan in
+        let plans = planned.map { plan in
             var plan = plan
             plan.isAcknowledged = acknowledged
             return plan
         }
-        let sessions = request.sessions
+        let sessions = plannedSessions
         let purge = purgeNow && keepsToolCopies
-        let moves = plans.contains { !$0.moves.isEmpty }
+        let moves = movesFiles
         let n = plans.count
         let what = n == 1 ? "1 session" : "\(n) sessions"
         library.runInBackground(
@@ -172,15 +225,12 @@ struct DeletePlanSheet: View {
     }
 }
 
-/// One plan's rows: the agent's commands, database rows, moved files and index entries.
-/// In a batch every section header starts with the session's title.
+/// One plan's rows in the single-session sheet: the agent's commands, database rows, moved
+/// files and index entries, each kind under its own header.
 private struct PlanChanges: View {
     let plan: Plan
-    let sessionTitle: String?
     let root: URL
     let destination: Destination
-
-    private var prefix: String { sessionTitle.map { "\u{201C}\($0)\u{201D} · " } ?? "" }
 
     private var abbreviatedRoot: String {
         "~/" + relativePath(root, under: root.deletingLastPathComponent())
@@ -189,26 +239,83 @@ private struct PlanChanges: View {
     var body: some View {
         CommandsSection(commands: plan.commands)
         DatabaseEditSection(edits: plan.databaseEdits)
-        if !plan.moves.isEmpty || sessionTitle == nil {
-            Section(prefix + "\(plan.agent.displayName) · \(abbreviatedRoot) · moved to \(destination.displayName)") {
-                ForEach(plan.moves, id: \.source) { move in
-                    ChangeRow(
-                        symbol: move.kind == .folder ? "folder" : "doc",
-                        path: relativePath(move.source, under: root) + (move.kind == .folder ? "/" : ""),
-                        note: move.note,
-                        size: move.sizeBytes.formatted(.byteCount(style: .file))
-                    )
-                }
+        Section("\(plan.agent.displayName) · \(abbreviatedRoot) · moved to \(destination.displayName)") {
+            ForEach(plan.moves, id: \.source) { move in
+                MoveRow(move: move, root: root)
             }
         }
         if !plan.indexEdits.isEmpty || !plan.registryRemovals.isEmpty {
-            Section(prefix + "Index entries · edited in place, backup kept") {
+            Section("Index entries · edited in place, backup kept") {
                 ForEach(plan.indexEdits, id: \.file) { edit in
                     ChangeRow(symbol: "list.bullet.rectangle", path: relativePath(edit.file, under: root), note: edit.note, size: "–")
                 }
                 RegistryRemovalRows(removals: plan.registryRemovals)
             }
         }
+    }
+}
+
+/// One session of a batch: a header that tells sessions apart (title, project, when), its own
+/// remarks, then every change it makes.
+private struct SessionChanges: View {
+    let plan: Plan
+    let session: Session?
+    let root: URL
+
+    private var header: String {
+        guard let session else { return plan.sessionID }
+        return [
+            "\u{201C}\(session.displayTitle)\u{201D}",
+            session.projectName ?? session.agent.displayName,
+            session.lastActive.formatted(.relative(presentation: .named)),
+        ].joined(separator: " · ")
+    }
+
+    var body: some View {
+        Section {
+            ForEach(plan.remarks, id: \.self) { remark in
+                Label(remark, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(plan.commands, id: \.self) { command in
+                ChangeRow(symbol: "terminal", path: command.commandLine, note: command.note,
+                          size: command.sizeBytes > 0 ? command.sizeBytes.formatted(.byteCount(style: .file)) : "–")
+            }
+            ForEach(plan.databaseEdits.filter { !$0.isEmpty }, id: \.database) { edit in
+                ForEach(edit.rows, id: \.key) { rows in
+                    ChangeRow(symbol: "tablecells", path: "\(edit.database.lastPathComponent): \(rows.isPrefix ? "\(rows.key)\u{2026}" : rows.key)",
+                              note: "\(rows.note) · \(rows.count) \(rows.count == 1 ? "row" : "rows") deleted in place, copy kept",
+                              size: rows.bytes.formatted(.byteCount(style: .file)))
+                }
+            }
+            ForEach(plan.moves, id: \.source) { move in
+                MoveRow(move: move, root: root)
+            }
+            ForEach(plan.indexEdits, id: \.file) { edit in
+                ChangeRow(symbol: "list.bullet.rectangle", path: relativePath(edit.file, under: root), note: edit.note + " · edited in place, backup kept", size: "–")
+            }
+            RegistryRemovalRows(removals: plan.registryRemovals)
+        } header: {
+            Text(header)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(header)
+        }
+    }
+}
+
+private struct MoveRow: View {
+    let move: FileMove
+    let root: URL
+
+    var body: some View {
+        ChangeRow(
+            symbol: move.kind == .folder ? "folder" : "doc",
+            path: relativePath(move.source, under: root) + (move.kind == .folder ? "/" : ""),
+            note: move.note,
+            size: move.sizeBytes.formatted(.byteCount(style: .file))
+        )
     }
 }
 
