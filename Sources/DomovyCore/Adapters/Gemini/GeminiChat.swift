@@ -105,7 +105,7 @@ enum GeminiChat {
     /// JSON objects of each line; a cut-off last line is skipped. A whole-JSON chat (older
     /// versions) is one object.
     private static func records(in data: Data, complete: Bool) -> [[String: Any]] {
-        var lines = data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true)
+        var lines = JSONLines.nonEmptyLines(data)
         if !complete, data.last != UInt8(ascii: "\n"), !lines.isEmpty { lines.removeLast() }
         let objects = lines.compactMap { try? JSONSerialization.jsonObject(with: Data($0)) as? [String: Any] }
         if objects.isEmpty, complete, let whole = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -146,7 +146,7 @@ enum GeminiChat {
     }
 
     private static func clean(_ text: String) -> String? {
-        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        let firstLine = text.split(maxSplits: 1, whereSeparator: \.isNewline).first.map(String.init) ?? text
         let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         return trimmed.count > maxTitleLength ? String(trimmed.prefix(maxTitleLength - 1)) + "\u{2026}" : trimmed

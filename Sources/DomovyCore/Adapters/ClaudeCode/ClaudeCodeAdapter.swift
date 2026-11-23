@@ -70,15 +70,29 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         case .ready, .readOnly: break
         }
         let settings = ClaudeCodeSettings.load(from: layout.settings)
-        let desktop = desktopSnapshot()
-        var result: [Session] = []
+        let shared = SharedFiles(desktop: desktopSnapshot(), history: historyLines(), security: FileSystem.children(of: layout.security))
+        var found: [(id: String, transcript: URL, slug: URL, artifacts: [Artifact])] = []
         for slug in FileSystem.children(of: layout.projects) where FileSystem.isDirectory(slug) {
-            for entry in FileSystem.children(of: slug) {
+            let entries = FileSystem.children(of: slug)
+            var setAside: [String: [URL]] = [:]
+            for entry in entries {
+                if let id = ClaudeCodeLayout.sessionID(ofSetAsideCopyNamed: entry.lastPathComponent) { setAside[id, default: []].append(entry) }
+            }
+            for entry in entries {
                 guard let id = ClaudeCodeLayout.sessionID(ofTranscriptNamed: entry.lastPathComponent) else { continue }
-                result.append(await makeSession(id: id, transcript: entry, slug: slug, settings: settings, desktop: desktop))
+                let artifacts = collectArtifacts(id: id, transcript: entry, setAside: setAside[id] ?? [], shared: shared)
+                found.append((id, entry, slug, artifacts))
             }
         }
-        return result.sorted { $0.lastActive > $1.lastActive }
+        // One read of the liveness files and one open-file question for the whole listing.
+        let markers = liveness.readMarkers()
+        let holders = await openHandleHolders(of: found.map { $0.artifacts.map(\.url) }, checker: liveness.openHandles)
+        return zip(found, holders).map { item, holders in
+            let live = liveness.result(markerReasons: liveness.markerReasons(sessionID: item.id, markers: markers), holders: holders)
+            return makeSession(id: item.id, transcript: item.transcript, slug: item.slug, artifacts: item.artifacts, live: live,
+                               settings: settings, desktop: shared.desktop)
+        }
+        .sorted { $0.lastActive > $1.lastActive }
     }
 
     public func artifacts(of session: Session) async throws -> [Artifact] {
@@ -209,14 +223,13 @@ public struct ClaudeCodeAdapter: AgentAdapter {
 
     // MARK: Building sessions
 
-    private func makeSession(id: String, transcript: URL, slug: URL, settings: ClaudeCodeSettings, desktop: ClaudeDesktopRegistry.Snapshot) async -> Session {
+    private func makeSession(id: String, transcript: URL, slug: URL, artifacts: [Artifact], live: LiveCheckResult,
+                             settings: ClaudeCodeSettings, desktop: ClaudeDesktopRegistry.Snapshot) -> Session {
         let header = ClaudeCodeTranscript.readHeader(of: transcript)
-        let artifacts = collectArtifacts(id: id, transcript: transcript, desktop: desktop)
         let link = Self.newest(desktop.byCLISessionID[id] ?? []).map { DesktopLink(file: $0.file, title: $0.title, isArchived: $0.isArchived) }
         let size = artifacts.reduce(0) { $0 + $1.sizeBytes }
         let lastActive = FileSystem.modificationDate(of: transcript) ?? .distantPast
         let expiresAt = lastActive.addingTimeInterval(TimeInterval(settings.cleanupPeriodDays) * 86_400)
-        let live = await liveness.check(sessionID: id, artifactURLs: artifacts.map(\.url))
 
         let archived = APFSCompression.isCompressed(transcript)
 
@@ -263,6 +276,31 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     /// Every file, folder and index entry that belongs to one session. Protected paths
     /// (`memory/`, `plugins/`, ...) are never visited.
     func collectArtifacts(id: String, transcript: URL, desktop: ClaudeDesktopRegistry.Snapshot = .empty) -> [Artifact] {
+        let slug = transcript.deletingLastPathComponent()
+        let setAside = FileSystem.children(of: slug).filter { ClaudeCodeLayout.sessionID(ofSetAsideCopyNamed: $0.lastPathComponent) == id }
+        let shared = SharedFiles(desktop: desktop, history: historyLines(), security: FileSystem.children(of: layout.security))
+        return collectArtifacts(id: id, transcript: transcript, setAside: setAside, shared: shared)
+    }
+
+    /// What every session's artifacts are looked up in. A listing reads it once for all its
+    /// sessions; artifacts, live checks and plans read it fresh for the one session they need.
+    struct SharedFiles {
+        let desktop: ClaudeDesktopRegistry.Snapshot
+        /// `history.jsonl` lines by lowercased session id.
+        let history: [String: HistoryLines]
+        /// The `security/` folder's files.
+        let security: [URL]
+    }
+
+    /// Zero-based line numbers of one session in `history.jsonl` and their bytes.
+    struct HistoryLines {
+        var indices: [Int] = []
+        var bytes: Int64 = 0
+    }
+
+    /// `collectArtifacts` with the session's set-aside copies (`.orphaned-*`, `.superseded-*`
+    /// next to the transcript) and the shared files already read.
+    private func collectArtifacts(id: String, transcript: URL, setAside: [URL], shared: SharedFiles) -> [Artifact] {
         var artifacts: [Artifact] = []
         func add(_ url: URL, _ kind: Artifact.Kind, _ note: String) {
             guard FileSystem.exists(url), !layout.isProtected(url) else { return }
@@ -272,7 +310,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         let slug = transcript.deletingLastPathComponent()
         add(transcript, .file, ArtifactNote.transcript)
         add(slug.appendingPathComponent(id, isDirectory: true), .folder, ArtifactNote.companions)
-        for sibling in FileSystem.children(of: slug) where ClaudeCodeLayout.sessionID(ofSetAsideCopyNamed: sibling.lastPathComponent) == id {
+        for sibling in setAside {
             add(sibling, .file, ArtifactNote.setAside)
         }
         add(layout.fileHistory.appendingPathComponent(id, isDirectory: true), .folder, ArtifactNote.checkpoints)
@@ -280,14 +318,14 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         add(layout.devMods.appendingPathComponent(id, isDirectory: true), .folder, "Development modifications")
         let env = layout.sessionEnv.appendingPathComponent(id)
         add(env, FileSystem.isDirectory(env) ? .folder : .file, "Session environment")
-        for file in FileSystem.children(of: layout.security) where file.lastPathComponent.hasPrefix("security_warnings_state_\(id).") {
+        for file in shared.security where file.lastPathComponent.hasPrefix("security_warnings_state_\(id).") {
             add(file, .file, "Security warning state")
         }
-        if let edit = historyEdit(for: id) {
+        if let edit = historyEdit(for: id, in: shared.history) {
             artifacts.append(Artifact(url: edit.file, kind: .indexEntry, sizeBytes: edit.removedBytes, note: edit.note,
                                       match: IndexMatch(key: edit.matchKey, value: edit.matchValue)))
         }
-        for entry in desktop.byCLISessionID[id] ?? [] {
+        for entry in shared.desktop.byCLISessionID[id] ?? [] {
             artifacts.append(Artifact(url: entry.file, kind: .indexEntry, sizeBytes: entry.sizeBytes, note: ArtifactNote.desktopEntry))
         }
         return artifacts
@@ -295,19 +333,34 @@ public struct ClaudeCodeAdapter: AgentAdapter {
 
     /// Lines of `history.jsonl` that reference the session, or `nil` when there are none.
     private func historyEdit(for id: String) -> IndexEdit? {
-        guard let data = try? Data(contentsOf: layout.history) else { return nil }
-        let split = JSONLines.split(data)
-        let indices = JSONLines.indices(in: split.lines, where: "sessionId", equals: id)
-        guard !indices.isEmpty else { return nil }
-        let bytes = indices.reduce(Int64(0)) { $0 + Int64(split.lines[$1].count) + 1 }
+        historyEdit(for: id, in: historyLines())
+    }
+
+    private func historyEdit(for id: String, in history: [String: HistoryLines]) -> IndexEdit? {
+        guard let lines = history[id.lowercased()], !lines.indices.isEmpty else { return nil }
+        let indices = lines.indices
         return IndexEdit(
             file: layout.history,
             lineNumbers: indices,
             matchKey: "sessionId",
             matchValue: id,
-            removedBytes: bytes,
+            removedBytes: lines.bytes,
             note: "\(indices.count) \(indices.count == 1 ? "entry" : "entries") in history.jsonl; the file itself stays"
         )
+    }
+
+    /// Every line of `history.jsonl` by the session it references, parsed once. Lines match
+    /// as in `JSONLines.indices`: `sessionId` equal ignoring case.
+    private func historyLines() -> [String: HistoryLines] {
+        guard let data = try? Data(contentsOf: layout.history) else { return [:] }
+        var result: [String: HistoryLines] = [:]
+        for (index, line) in JSONLines.split(data).lines.enumerated() {
+            guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let id = (object["sessionId"] as? String)?.lowercased() else { continue }
+            result[id, default: HistoryLines()].indices.append(index)
+            result[id, default: HistoryLines()].bytes += Int64(line.count) + 1
+        }
+        return result
     }
 
     func requireWritable() throws {

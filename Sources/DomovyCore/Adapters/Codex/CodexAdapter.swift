@@ -59,11 +59,13 @@ public struct CodexAdapter: AgentAdapter {
     public func sessions() async throws -> [Session] {
         if case .notInstalled = layout.probe() { throw AdapterError.notInstalled(kind) }
         let index = CodexIndex.load(layout)
-        var result: [Session] = []
-        for (id, files) in groupedRollouts() {
-            result.append(await makeSession(id: id, files: files, index: index))
+        let groups = Array(groupedRollouts())
+        // One open-file question for the whole listing.
+        let holders = await openHandleHolders(of: groups.map { livenessURLs(id: $0.key, files: $0.value) }, checker: openHandles)
+        return zip(groups, holders).map { group, holders in
+            makeSession(id: group.key, files: group.value, index: index, live: liveness(id: group.key, holders: holders))
         }
-        return result.sorted { $0.lastActive > $1.lastActive }
+        .sorted { $0.lastActive > $1.lastActive }
     }
 
     public func artifacts(of session: Session) async throws -> [Artifact] {
@@ -203,7 +205,7 @@ public struct CodexAdapter: AgentAdapter {
 
     // MARK: Building sessions
 
-    private func makeSession(id: String, files: [URL], index: CodexIndex) async -> Session {
+    private func makeSession(id: String, files: [URL], index: CodexIndex, live: LiveCheckResult) -> Session {
         let main = Self.primary(of: files)
         let header = CodexRollout.readHeader(of: main)
         let thread = index.threads[id]
@@ -212,7 +214,6 @@ public struct CodexAdapter: AgentAdapter {
             + (index.sessionIndexLines[id]?.bytes ?? 0) + (index.historyLines[id]?.bytes ?? 0)
         let lastActive = files.compactMap(FileSystem.modificationDate).max() ?? .distantPast
         let archived = FileSystem.relativePath(of: main, under: layout.archivedSessions) != nil
-        let live = await liveness(id: id, files: files)
         return Session(
             id: id,
             agent: kind,
@@ -285,10 +286,20 @@ public struct CodexAdapter: AgentAdapter {
 
     /// Live when a process holds a rollout or the thread's writer lock open.
     private func liveness(id: String, files: [URL]) async -> LiveCheckResult {
+        liveness(id: id, holders: await openHandles.holders(of: livenessURLs(id: id, files: files)))
+    }
+
+    /// The session's rollouts and its writer lock: what a live check asks about.
+    private func livenessURLs(id: String, files: [URL]) -> [URL] {
+        files + [layout.writerLock(for: id)]
+    }
+
+    /// The live check from the holders of the session's files (`nil`: the check could not run).
+    private func liveness(id: String, holders: [OpenHandleHolder]?) -> LiveCheckResult {
         let lock = layout.writerLock(for: id)
         var reasons: [String] = []
         let status: LiveCheckResult.OpenHandleStatus
-        if let holders = await openHandles.holders(of: files + [lock]) {
+        if let holders {
             status = holders.isEmpty ? .clear : .open
             var seen = Set<Int32>()
             let lockPaths = Set([lock.path, lock.resolvingSymlinksInPath().path])

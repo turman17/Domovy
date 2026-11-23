@@ -22,7 +22,7 @@ enum CodexRollout {
 
         var header = Header()
         var firstResponsePrompt: String?
-        for line in data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true) {
+        for line in JSONLines.nonEmptyLines(data) {
             guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
             let (type, payload) = unwrap(record)
             switch type {
@@ -133,7 +133,7 @@ enum CodexRollout {
 
     /// First line, trimmed, at most `maxTitleLength` characters.
     static func cleanTitle(_ text: String) -> String? {
-        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        let firstLine = text.split(maxSplits: 1, whereSeparator: \.isNewline).first.map(String.init) ?? text
         let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if trimmed.count > maxTitleLength { return String(trimmed.prefix(maxTitleLength - 1)) + "\u{2026}" }

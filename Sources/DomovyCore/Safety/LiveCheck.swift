@@ -84,7 +84,56 @@ func matchOpenPaths(_ holders: [OpenHandleHolder], against urls: [URL]) -> [Open
             free(real)
         }
     }
-    return holders.filter { holder in
-        paths.contains { holder.path == $0 || holder.path.hasPrefix($0 + "/") }
+    guard !paths.isEmpty else { return [] }
+    // A few URLs (one session's) are compared directly. For many (a whole listing's), the
+    // holder's path and each folder above it are looked up instead, so a snapshot of thousands
+    // of open files is matched in one pass however many URLs are asked for.
+    if paths.count <= 16 {
+        let folders = paths.map { $0 + "/" }
+        return holders.filter { holder in
+            paths.contains(holder.path) || folders.contains { holder.path.hasPrefix($0) }
+        }
     }
+    return holders.filter { holder in
+        let path = holder.path
+        if paths.contains(path) { return true }
+        var end = path.endIndex
+        while let slash = path[..<end].lastIndex(of: "/") {
+            if paths.contains(String(path[..<slash])) { return true }
+            end = slash
+        }
+        return false
+    }
+}
+
+/// Open-file holders for many sessions at once, for listing them: the checker is asked once
+/// for every session's files instead of once per session, and each session gets the holders a
+/// question of its own would have got (`nil` when the check could not run). Sessions with a
+/// file large enough to be mapped are asked about together, so the checker looks at mapped
+/// files exactly where a single question would. Plans ask the checker themselves.
+func openHandleHolders(of groups: [[URL]], checker: any OpenHandleChecker) async -> [[OpenHandleHolder]?] {
+    var result = [[OpenHandleHolder]?](repeating: nil, count: groups.count)
+    var plain: [Int] = []
+    var mapped: [Int] = []
+    var empty: [Int] = []
+    for (index, urls) in groups.enumerated() {
+        if urls.isEmpty {
+            empty.append(index)
+        } else if urls.contains(where: LibprocOpenHandleChecker.mayBeMapped) {
+            mapped.append(index)
+        } else {
+            plain.append(index)
+        }
+    }
+    for batch in [plain, mapped] where !batch.isEmpty {
+        let holders = await checker.holders(of: batch.flatMap { groups[$0] })
+        for index in batch {
+            result[index] = holders.map { matchOpenPaths($0, against: groups[index]) }
+        }
+    }
+    if !empty.isEmpty {
+        let holders = await checker.holders(of: [])
+        for index in empty { result[index] = holders }
+    }
+    return result
 }

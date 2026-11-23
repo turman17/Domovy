@@ -20,7 +20,7 @@ struct ClaudeCodeTranscript: Sendable {
 
         var header = Header()
         var customTitle: String?
-        for line in data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true) {
+        for line in JSONLines.nonEmptyLines(data) {
             guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
             if header.cwd == nil, let cwd = object["cwd"] as? String, !cwd.isEmpty {
                 header.cwd = cwd
@@ -61,7 +61,7 @@ struct ClaudeCodeTranscript: Sendable {
     }
 
     private static func clean(_ text: String) -> String? {
-        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        let firstLine = text.split(maxSplits: 1, whereSeparator: \.isNewline).first.map(String.init) ?? text
         let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if trimmed.count > maxTitleLength {

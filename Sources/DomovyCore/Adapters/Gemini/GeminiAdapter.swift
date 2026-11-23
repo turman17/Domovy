@@ -62,15 +62,25 @@ public struct GeminiAdapter: AgentAdapter {
         let groups = GeminiChatGroup.groups(in: projects)
         let grouped = Set(groups.flatMap { $0.members.map(\.chat.file) })
         let ids = Self.sessionIDs(projects.flatMap(\.chats).filter { !grouped.contains($0.file) })
-        var result: [Session] = []
+        // Artifacts first, so one open-file question covers the whole listing.
+        var rows: [(artifacts: [Artifact], make: (LiveCheckResult) -> Session)] = []
         for project in projects {
             let due = project.dueForSweep(settings)
             for chat in project.chats where !grouped.contains(chat.file) {
-                result.append(await makeSession(chat, id: ids[chat.file] ?? chat.file.lastPathComponent, project: project, settings: settings, due: due[chat.file]))
+                let artifacts = collectArtifacts(chat, in: project)
+                let id = ids[chat.file] ?? chat.file.lastPathComponent
+                rows.append((artifacts.filter { $0.kind != .indexEntry }, { live in
+                    makeSession(chat, id: id, project: project, artifacts: artifacts, live: live, settings: settings, due: due[chat.file])
+                }))
             }
         }
-        for group in groups { result.append(await makeSession(group, settings: settings)) }
-        return result.sorted { $0.lastActive > $1.lastActive }
+        for group in groups {
+            let artifacts = collectArtifacts(group)
+            rows.append((artifacts, { live in makeSession(group, artifacts: artifacts, live: live, settings: settings) }))
+        }
+        let holders = await openHandleHolders(of: rows.map { $0.artifacts.map(\.url) }, checker: openHandles)
+        return zip(rows, holders).map { row, holders in row.make(liveness(holders: holders)) }
+            .sorted { $0.lastActive > $1.lastActive }
     }
 
     public func artifacts(of session: Session) async throws -> [Artifact] {
@@ -158,10 +168,9 @@ public struct GeminiAdapter: AgentAdapter {
         return result
     }
 
-    private func makeSession(_ chat: GeminiProject.Chat, id: String, project: GeminiProject, settings: GeminiSettings, due: String?) async -> Session {
-        let artifacts = collectArtifacts(chat, in: project)
+    private func makeSession(_ chat: GeminiProject.Chat, id: String, project: GeminiProject, artifacts: [Artifact], live: LiveCheckResult,
+                             settings: GeminiSettings, due: String?) -> Session {
         let size = artifacts.filter { $0.kind != .indexEntry }.reduce(Int64(0)) { $0 + $1.sizeBytes }
-        let live = await liveness(artifacts.filter { $0.kind != .indexEntry }.map(\.url))
         let archived = APFSCompression.isCompressed(chat.file)
         let expiresAt: Date? = due != nil ? chat.lastActive : settings.maxAge.map { chat.lastActive.addingTimeInterval($0) }
         let status: Session.Status
@@ -191,9 +200,7 @@ public struct GeminiAdapter: AgentAdapter {
 
     /// One row for a group of empty chats. Gemini CLI removes chats without messages at its next
     /// start in their project, so the row is expiring unless the sweep is off.
-    private func makeSession(_ group: GeminiChatGroup, settings: GeminiSettings) async -> Session {
-        let artifacts = collectArtifacts(group)
-        let live = await liveness(artifacts.map(\.url))
+    private func makeSession(_ group: GeminiChatGroup, artifacts: [Artifact], live: LiveCheckResult, settings: GeminiSettings) -> Session {
         let lastActive = group.newest?.chat.lastActive ?? .distantPast
         let swept = settings.isEnabled
         return Session(
@@ -268,9 +275,14 @@ public struct GeminiAdapter: AgentAdapter {
     /// Live when a process holds one of the session's files open. Gemini CLI appends to its chat
     /// without keeping it open, so delete also requires Gemini CLI to be quit.
     private func liveness(_ urls: [URL]) async -> LiveCheckResult {
+        liveness(holders: await openHandles.holders(of: urls))
+    }
+
+    /// The live check from the holders of the session's files (`nil`: the check could not run).
+    private func liveness(holders: [OpenHandleHolder]?) -> LiveCheckResult {
         var reasons: [String] = []
         let status: LiveCheckResult.OpenHandleStatus
-        if let holders = await openHandles.holders(of: urls) {
+        if let holders {
             status = holders.isEmpty ? .clear : .open
             var seen = Set<Int32>()
             for holder in holders where seen.insert(holder.pid).inserted {

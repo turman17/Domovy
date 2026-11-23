@@ -8,38 +8,74 @@ struct ClaudeCodeLiveness: Sendable {
     let openHandles: any OpenHandleChecker
     let processes: any ProcessProbe
 
-    func check(sessionID: String, artifactURLs: [URL]) async -> LiveCheckResult {
-        var reasons: [String] = []
-        var signals: [String] = []
+    /// The liveness files as they are now: one marker per running CLI, one per roster worker.
+    struct Markers: Sendable {
+        struct Marker: Sendable {
+            /// `sessions/<pid>.json`, or `nil` for a roster worker.
+            let file: URL?
+            /// Lowercased.
+            let sessionID: String
+            let pid: Int32?
+        }
 
-        signals.append("sessions/*.json")
+        let sessions: [Marker]
+        let workers: [Marker]
+    }
+
+    func check(sessionID: String, artifactURLs: [URL]) async -> LiveCheckResult {
+        let reasons = markerReasons(sessionID: sessionID, markers: readMarkers())
+        return result(markerReasons: reasons, holders: await openHandles.holders(of: artifactURLs))
+    }
+
+    /// Reads `sessions/*.json` and `daemon/roster.json`. A listing reads them once for all its
+    /// sessions; a single check reads them fresh.
+    func readMarkers() -> Markers {
+        var sessions: [Markers.Marker] = []
         for file in FileSystem.children(of: layout.sessions) where file.pathExtension == "json" {
-            guard let object = Self.readJSON(file), let id = object["sessionId"] as? String, id.lowercased() == sessionID else { continue }
+            guard let object = Self.readJSON(file), let id = object["sessionId"] as? String else { continue }
             let pid = Self.pid(object["pid"]) ?? Int32(file.deletingPathExtension().lastPathComponent)
-            if let pid, !processes.isRunning(pid) {
-                Log.liveness.info("Ignoring stale marker \(file.lastPathComponent, privacy: .private): pid \(pid, privacy: .public) is gone")
+            sessions.append(.init(file: file, sessionID: id.lowercased(), pid: pid))
+        }
+        var workers: [Markers.Marker] = []
+        if let roster = Self.readJSON(layout.daemonRoster), let all = roster["workers"] as? [String: Any] {
+            for case let worker as [String: Any] in all.values {
+                guard let id = worker["sessionId"] as? String else { continue }
+                workers.append(.init(file: nil, sessionID: id.lowercased(), pid: Self.pid(worker["pid"])))
+            }
+        }
+        return Markers(sessions: sessions, workers: workers)
+    }
+
+    /// Reasons the liveness files give for `sessionID`; markers of a gone pid are stale.
+    func markerReasons(sessionID: String, markers: Markers) -> [String] {
+        var reasons: [String] = []
+        for marker in markers.sessions where marker.sessionID == sessionID {
+            let name = marker.file?.lastPathComponent ?? ""
+            if let pid = marker.pid, !processes.isRunning(pid) {
+                Log.liveness.info("Ignoring stale marker \(name, privacy: .private): pid \(pid, privacy: .public) is gone")
                 continue
             }
-            let pidText = pid.map { " (pid \($0))" } ?? ""
+            let pidText = marker.pid.map { " (pid \($0))" } ?? ""
             reasons.append("Claude Code reports this session as running\(pidText). Quit that Claude Code session first.")
-            Log.liveness.info("Session \(sessionID, privacy: .public) is live via \(file.lastPathComponent, privacy: .private)")
+            Log.liveness.info("Session \(sessionID, privacy: .public) is live via \(name, privacy: .private)")
         }
-
-        signals.append("daemon/roster.json")
-        if let roster = Self.readJSON(layout.daemonRoster), let workers = roster["workers"] as? [String: Any] {
-            for case let worker as [String: Any] in workers.values {
-                guard let id = worker["sessionId"] as? String, id.lowercased() == sessionID else { continue }
-                if let pid = Self.pid(worker["pid"]), !processes.isRunning(pid) {
-                    Log.liveness.info("Ignoring stale roster worker: pid \(pid, privacy: .public) is gone")
-                    continue
-                }
-                reasons.append("A Claude Code background worker is attached to this session. Stop it with `claude rm` first.")
+        for worker in markers.workers where worker.sessionID == sessionID {
+            if let pid = worker.pid, !processes.isRunning(pid) {
+                Log.liveness.info("Ignoring stale roster worker: pid \(pid, privacy: .public) is gone")
+                continue
             }
+            reasons.append("A Claude Code background worker is attached to this session. Stop it with `claude rm` first.")
         }
+        return reasons
+    }
 
-        signals.append("open file handles")
+    /// The check's result from the marker reasons and the open-file holders (`nil`: the
+    /// handle check could not run).
+    func result(markerReasons: [String], holders: [OpenHandleHolder]?) -> LiveCheckResult {
+        var reasons = markerReasons
+        let signals = ["sessions/*.json", "daemon/roster.json", "open file handles"]
         let status: LiveCheckResult.OpenHandleStatus
-        if let holders = await openHandles.holders(of: artifactURLs) {
+        if let holders {
             status = holders.isEmpty ? .clear : .open
             var seen = Set<Int32>()
             for holder in holders where seen.insert(holder.pid).inserted {
@@ -48,7 +84,6 @@ struct ClaudeCodeLiveness: Sendable {
         } else {
             status = .unavailable
         }
-
         return LiveCheckResult(isLive: !reasons.isEmpty, reasons: reasons, checkedSignals: signals, openHandles: status)
     }
 
