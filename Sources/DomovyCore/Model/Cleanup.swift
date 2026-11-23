@@ -10,12 +10,16 @@ public enum CleanupID: String, CaseIterable, Codable, Sendable {
     case codexLogs = "codex-logs"
     case codexLargeRollouts = "codex-large-rollouts"
     case codexWorktrees = "codex-worktrees"
+    case ollamaOrphanBlobs = "ollama-orphan-blobs"
+    case huggingFaceDetached = "huggingface-detached-revisions"
 
     public var agent: AgentKind {
         switch self {
         case .claudeDesktopVM, .claudeDesktopCaches: .claudeDesktop
         case .claudeCodeAgentSDK, .claudeCodeWorktrees: .claudeCode
         case .codexLogs, .codexLargeRollouts, .codexWorktrees: .codex
+        case .ollamaOrphanBlobs: .ollama
+        case .huggingFaceDetached: .huggingFace
         }
     }
 
@@ -32,6 +36,8 @@ public enum CleanupID: String, CaseIterable, Codable, Sendable {
         case .codexLogs: "Remove the Codex logs database?"
         case .codexLargeRollouts: "Compress large Codex rollouts?"
         case .codexWorktrees: "Remove merged Codex worktrees?"
+        case .ollamaOrphanBlobs: "Remove orphaned Ollama blobs?"
+        case .huggingFaceDetached: "Remove detached Hugging Face revisions?"
         }
     }
 
@@ -40,7 +46,7 @@ public enum CleanupID: String, CaseIterable, Codable, Sendable {
         switch self {
         case .claudeDesktopVM, .claudeCodeWorktrees, .codexWorktrees: "Review\u{2026}"
         case .codexLargeRollouts: "Compress\u{2026}"
-        case .claudeDesktopCaches, .claudeCodeAgentSDK, .codexLogs: "Clean Up\u{2026}"
+        case .claudeDesktopCaches, .claudeCodeAgentSDK, .codexLogs, .ollamaOrphanBlobs, .huggingFaceDetached: "Clean Up\u{2026}"
         }
     }
 
@@ -54,6 +60,8 @@ public enum CleanupID: String, CaseIterable, Codable, Sendable {
         case .codexLogs: "the Codex logs database"
         case .codexLargeRollouts: "the large Codex rollouts"
         case .codexWorktrees: "the Codex worktrees"
+        case .ollamaOrphanBlobs: "the orphaned Ollama blobs"
+        case .huggingFaceDetached: "the detached Hugging Face revisions"
         }
     }
 }
@@ -94,6 +102,7 @@ public struct CleanupPlan: Identifiable, Hashable, Sendable {
     /// "Moves 3 folders (6.3 MB) to the Trash. You can undo this."
     public var summary: String {
         if isBlocked { return "Nothing will change yet. " + plan.liveCheck.reasons.joined(separator: " ") }
+        if !plan.commands.isEmpty { return plan.commands.map(\.note).joined(separator: " ") + (plan.isPermanent ? "" : " You can undo this.") }
         if cleanup.compresses {
             guard !plan.compressions.isEmpty else { return "Nothing to compress: every large rollout is already compressed or in use." }
             let n = plan.compressions.count
@@ -124,6 +133,10 @@ public enum CleanupError: Error, LocalizedError, Hashable, Sendable {
     /// Something started using the files after the plan was made.
     case inUse(reasons: [String])
     case notFound(CleanupID)
+    /// A model the user named is not in its store (any more).
+    case modelNotFound(String)
+    /// The store's layout is not one Domovy knows, so it changes nothing.
+    case unknownLayout(String)
 
     public var errorDescription: String? {
         switch self {
@@ -131,6 +144,10 @@ public enum CleanupError: Error, LocalizedError, Hashable, Sendable {
             "Nothing was changed. " + reasons.joined(separator: " ")
         case .notFound(let id):
             "There is nothing to clean up for \(id.rawValue) at this location."
+        case .modelNotFound(let name):
+            "No local model called \(name) was found. List them with domo models."
+        case .unknownLayout(let reason):
+            "Nothing was changed. " + reason
         }
     }
 }

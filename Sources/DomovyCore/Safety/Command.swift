@@ -20,6 +20,9 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
     public let sizeBytes: Int64
     /// What undo runs to reverse this command (e.g. `codex unarchive <uuid>`).
     public let undo: [PlannedCommand]
+    /// The tool deletes for good and Domovy keeps no copy (`ollama rm`, `hf cache rm`): the
+    /// undo entry is marked irreversible, and the sheet says so before it runs.
+    public let isPermanent: Bool
 
     public init(
         executable: URL,
@@ -30,7 +33,8 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
         indexLinesBeforeRun: [IndexEdit] = [],
         verifications: [Verification] = [],
         sizeBytes: Int64 = 0,
-        undo: [PlannedCommand] = []
+        undo: [PlannedCommand] = [],
+        isPermanent: Bool = false
     ) {
         self.executable = executable
         self.arguments = arguments
@@ -41,11 +45,35 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
         self.verifications = verifications
         self.sizeBytes = sizeBytes
         self.undo = undo
+        self.isPermanent = isPermanent
     }
 
     /// `codex delete --force 01a1...`, for display.
     public var commandLine: String {
         ([executable.lastPathComponent] + arguments).joined(separator: " ")
+    }
+}
+
+extension PlannedCommand {
+    private enum CodingKeys: String, CodingKey {
+        case executable, arguments, environment, note, copiesBeforeRun, indexLinesBeforeRun, verifications, sizeBytes, undo, isPermanent
+    }
+
+    /// Undo entries written before `isPermanent` existed decode as reversible.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            executable: try c.decode(URL.self, forKey: .executable),
+            arguments: try c.decode([String].self, forKey: .arguments),
+            environment: try c.decodeIfPresent([String: String].self, forKey: .environment) ?? [:],
+            note: try c.decode(String.self, forKey: .note),
+            copiesBeforeRun: try c.decodeIfPresent([URL].self, forKey: .copiesBeforeRun) ?? [],
+            indexLinesBeforeRun: try c.decodeIfPresent([IndexEdit].self, forKey: .indexLinesBeforeRun) ?? [],
+            verifications: try c.decodeIfPresent([Verification].self, forKey: .verifications) ?? [],
+            sizeBytes: try c.decodeIfPresent(Int64.self, forKey: .sizeBytes) ?? 0,
+            undo: try c.decodeIfPresent([PlannedCommand].self, forKey: .undo) ?? [],
+            isPermanent: try c.decodeIfPresent(Bool.self, forKey: .isPermanent) ?? false
+        )
     }
 }
 
@@ -55,6 +83,18 @@ public enum Verification: Hashable, Codable, Sendable {
     case linesGone(file: URL, key: String, value: String)
     case rowsGone(database: URL, table: String, column: String, value: String)
     case fileAppears(directory: URL, nameContaining: String)
+    /// Several files that should be gone, reported as one line: "2 of 3 layers of qwen3:14b
+    /// (9.3 GB) are still in blobs/."
+    case filesGone([URL], what: String)
+
+    /// The files this check expects to be gone; they must not be open when the command runs.
+    var urls: [URL] {
+        switch self {
+        case .fileGone(let url): [url]
+        case .filesGone(let urls, _): urls
+        case .linesGone, .rowsGone, .fileAppears: []
+        }
+    }
 
     /// `nil` when the check passes, otherwise a user-explainable leftover.
     func leftover() -> String? {
@@ -71,6 +111,12 @@ public enum Verification: Hashable, Codable, Sendable {
         case .fileAppears(let directory, let fragment):
             let found = FileSystem.children(of: directory).contains { $0.lastPathComponent.contains(fragment) }
             return found ? nil : "Nothing for this session appeared in \(directory.lastPathComponent)/."
+        case .filesGone(let urls, let what):
+            let left = urls.filter { FileSystem.exists($0) }
+            guard let first = left.first else { return nil }
+            let bytes = CleanupPlan.bytes(DiskUsage.measure(left).allocated)
+            let place = first.deletingLastPathComponent().lastPathComponent
+            return "\(left.count) of \(urls.count) \(what) (\(bytes)) \(left.count == 1 ? "is" : "are") still in \(place)/."
         }
     }
 }

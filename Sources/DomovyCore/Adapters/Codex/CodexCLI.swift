@@ -35,55 +35,21 @@ public struct CodexCLI: Hashable, Codable, Sendable {
         return FileManager.default.isExecutableFile(atPath: stub.path) ? .executable(stub) : .none
     }
 
-    /// First executable `codex` in `$PATH` or the usual install folders. Apps started from
-    /// Finder get a minimal `$PATH`, so Homebrew and npm locations are checked explicitly.
+    /// First executable `codex` in `$PATH` or the usual install folders.
     static func locate(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let path = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        let extra = ["/opt/homebrew/bin", "/usr/local/bin", "\(home)/.local/bin", "\(home)/.npm-global/bin", "\(home)/.bun/bin"]
-        for directory in path + extra {
-            let candidate = URL(fileURLWithPath: directory).appendingPathComponent("codex")
-            if FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
-        }
-        return nil
+        ExternalTool.locate("codex", environment: environment)
     }
 
     /// Reads `codex --help` (with `CODEX_HOME` set to the adapter root) and looks for the
     /// `delete` and `archive` subcommands.
     static func probe(_ executable: URL, codexHome: URL) -> CodexCLI? {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else { return nil }
-        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("domovy-codex-help-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: scratch) }
-        guard let help = try? helpText(executable, codexHome: codexHome, scratch: scratch) else {
+        guard let help = ExternalTool.output(executable, ["--help"], environment: ["CODEX_HOME": codexHome.path]), help.status == 0 else {
             Log.adapter.info("codex --help failed; using the file fallback")
             return nil
         }
-        let commands = Set(help.split(separator: "\n").compactMap { line -> String? in
-            guard line.hasPrefix("  "), !line.hasPrefix("   ") else { return nil }
-            return line.split(separator: " ").first.map(String.init)
-        })
+        let commands = ExternalTool.subcommands(in: help.stdout)
         return CodexCLI(executable: executable, supportsDelete: commands.contains("delete"), supportsArchive: commands.contains("archive"))
-    }
-
-    private static func helpText(_ executable: URL, codexHome: URL, scratch: URL) throws -> String {
-        let fm = FileManager.default
-        fm.createFile(atPath: scratch.path, contents: nil)
-        let out = try FileHandle(forWritingTo: scratch)
-        defer { try? out.close() }
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = ["--help"]
-        process.environment = ProcessInfo.processInfo.environment.merging(["CODEX_HOME": codexHome.path]) { _, new in new }
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = out
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        let deadline = Date().addingTimeInterval(10)
-        while process.isRunning, Date() < deadline { usleep(20_000) }
-        if process.isRunning { process.terminate() }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw CocoaError(.executableLoad) }
-        return (try? String(contentsOf: scratch, encoding: .utf8)) ?? ""
     }
 }
 

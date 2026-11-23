@@ -164,6 +164,11 @@ public struct Executor: Sendable {
             }
         }
 
+        // A permanent tool command with nothing kept or moved leaves nothing to put back.
+        if plan.commands.contains(where: \.isPermanent), entry.moved.isEmpty, entry.indexRestores.isEmpty,
+           entry.undoCommands.isEmpty, entry.registryRestores.isEmpty {
+            entry.irreversible = true
+        }
         try undoLog.write(entry)
         return entry
     }

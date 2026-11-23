@@ -30,6 +30,9 @@ public struct Footprint: Hashable, Codable, Sendable {
         case cleanUpOrphans
         /// A guided cleanup plan (Disk screen, `domo clean <id>`).
         case cleanup(CleanupID)
+        /// One local model, removed through the model plan (Disk screen, `domo models rm <id>`).
+        /// The value is `LocalModel.id`; the model itself is in `Footprint.models`.
+        case removeModel(String)
     }
 
     public struct Category: Identifiable, Hashable, Codable, Sendable {
@@ -82,11 +85,20 @@ public struct Footprint: Hashable, Codable, Sendable {
     public let agent: AgentKind
     public let root: URL
     public let categories: [Category]
+    /// Local model stores only: every model, with its date. Each also has a category row.
+    public let models: [LocalModel]
 
-    public init(agent: AgentKind, root: URL, categories: [Category]) {
+    public init(agent: AgentKind, root: URL, categories: [Category], models: [LocalModel] = []) {
         self.agent = agent
         self.root = root
         self.categories = categories
+        self.models = models
+    }
+
+    /// The model a `.removeModel` row stands for.
+    public func model(for category: Category) -> LocalModel? {
+        guard case .removeModel(let id) = category.guidance else { return nil }
+        return models.first { $0.id == id }
     }
 
     public var totalBytes: Int64 {

@@ -15,6 +15,11 @@ public enum FootprintScanner {
         [ClaudeDesktopFootprint(home: home), CursorFootprint(home: home)]
     }
 
+    /// The local model stores: Ollama, LM Studio, Hugging Face.
+    public static func modelStores(_ stores: ModelStores) -> [any FootprintProvider] {
+        [OllamaFootprint(stores: stores), LMStudioFootprint(stores: stores), HuggingFaceFootprint(stores: stores)]
+    }
+
     public static func scan(_ providers: [any FootprintProvider]) async -> Result {
         let outcomes = await withTaskGroup(of: (Int, Footprint?, String?).self) { group in
             for (index, provider) in providers.enumerated() {

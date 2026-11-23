@@ -108,7 +108,7 @@ struct FootprintBuilder {
         FileSystem.children(of: folder).filter { !isClaimed($0) }
     }
 
-    func build() -> Footprint {
-        Footprint(agent: agent, root: root, categories: categories)
+    func build(models: [LocalModel] = []) -> Footprint {
+        Footprint(agent: agent, root: root, categories: categories, models: models)
     }
 }

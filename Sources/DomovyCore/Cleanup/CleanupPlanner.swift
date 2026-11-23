@@ -11,33 +11,51 @@ public struct CleanupPlanner: Sendable {
     public let codexRoot: URL
     /// `~/Library/Application Support/Claude`.
     public let desktopSupport: URL
+    /// Ollama, LM Studio and Hugging Face. `nil`: model cleanups report nothing to do.
+    public let models: ModelStores?
 
     let openHandles: any OpenHandleChecker
     let processes: any RunningProcessLister
     let git: GitWorktreeInspector
+    /// Which `ollama` and `hf` a model plan may run. Tests and `.devhome` pass stubs.
+    let ollamaCLI: ToolChoice
+    let huggingFaceCLI: ToolChoice
+    let now: @Sendable () -> Date
 
     public init(
         claudeCodeRoot: URL,
         codexRoot: URL,
         desktopSupport: URL,
+        models: ModelStores? = nil,
+        ollamaCLI: ToolChoice = .none,
+        huggingFaceCLI: ToolChoice = .none,
         openHandles: any OpenHandleChecker = LibprocOpenHandleChecker(),
         processes: any RunningProcessLister = LibprocProcessLister(),
-        git: GitWorktreeInspector = GitWorktreeInspector()
+        git: GitWorktreeInspector = GitWorktreeInspector(),
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.claudeCodeRoot = claudeCodeRoot.standardizedFileURL
         self.codexRoot = codexRoot.standardizedFileURL
         self.desktopSupport = desktopSupport.standardizedFileURL
+        self.models = models
+        self.ollamaCLI = ollamaCLI
+        self.huggingFaceCLI = huggingFaceCLI
         self.openHandles = openHandles
         self.processes = processes
         self.git = git
+        self.now = now
     }
 
-    /// The agents' usual places below a home directory.
-    public init(home: URL, openHandles: any OpenHandleChecker = LibprocOpenHandleChecker(), processes: any RunningProcessLister = LibprocProcessLister()) {
+    /// The agents' usual places below a home directory. A custom home (a fixture, `.devhome`)
+    /// ignores `OLLAMA_MODELS` and friends and runs only stub CLIs from `<home>/bin`.
+    public init(home: URL, isCustomHome: Bool = true, openHandles: any OpenHandleChecker = LibprocOpenHandleChecker(), processes: any RunningProcessLister = LibprocProcessLister()) {
         self.init(
             claudeCodeRoot: home.appendingPathComponent(".claude", isDirectory: true),
             codexRoot: home.appendingPathComponent(".codex", isDirectory: true),
             desktopSupport: home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true),
+            models: ModelStores.at(home: home, isCustomHome: isCustomHome),
+            ollamaCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "ollama", override: "DOMOVY_OLLAMA_CLI"),
+            huggingFaceCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "hf", override: "DOMOVY_HF_CLI"),
             openHandles: openHandles,
             processes: processes
         )
@@ -65,6 +83,8 @@ public struct CleanupPlanner: Sendable {
         case .codexLargeRollouts: try await largeRolloutsPlan()
         case .codexWorktrees: try await worktreesPlan(.codexWorktrees, folders: codexWorktreeFolders(), destination: destination)
         case .claudeCodeWorktrees: try await worktreesPlan(.claudeCodeWorktrees, folders: claudeCodeWorktreeFolders(), destination: destination)
+        case .ollamaOrphanBlobs: try await ollamaOrphansPlan(destination: destination)
+        case .huggingFaceDetached: try await detachedRevisionsPlan(destination: destination)
         }
     }
 
@@ -117,22 +137,37 @@ public struct CleanupPlanner: Sendable {
         hasConsequences: Bool,
         destination: Destination
     ) async -> CleanupPlan {
+        let plan = await fileMovePlan(agent: id.agent, label: id.rawValue, items: items, matchers: matchers, remarks: remarks, destination: destination)
+        return CleanupPlan(cleanup: id, plan: plan, excluded: excluded, hasConsequences: hasConsequences)
+    }
+
+    /// The `Plan` behind `movePlan`, also used by model removals. `label` becomes the plan's
+    /// session id, which the undo toast reads.
+    func fileMovePlan(
+        agent: AgentKind,
+        label: String,
+        items: [(url: URL, note: String)],
+        matchers: [ProcessMatcher],
+        remarks: [String],
+        extraReasons: [String] = [],
+        destination: Destination
+    ) async -> Plan {
         let moves = items.map { item in
             FileMove(source: item.url, kind: FileSystem.isDirectory(item.url) ? .folder : .file,
                      sizeBytes: DiskUsage.measure(item.url).allocated, note: item.note)
         }
         let check = await openFileCheck(moves.map(\.source))
         let blocking = processes.blockingReasons(matchers)
-        let reasons = blocking + check.reasons
+        let reasons = extraReasons + blocking + check.reasons
         let liveCheck = LiveCheckResult(
             isLive: !reasons.isEmpty,
             reasons: reasons,
             checkedSignals: ["open file handles"] + matchers.map { "\($0.appName) processes" },
             openHandles: check.status
         )
-        let plan = Plan(
-            agent: id.agent,
-            sessionID: id.rawValue,
+        return Plan(
+            agent: agent,
+            sessionID: label,
             action: .delete,
             destination: destination,
             moves: moves,
@@ -141,7 +176,6 @@ public struct CleanupPlanner: Sendable {
             mustNotBeRunning: matchers,
             liveCheck: liveCheck
         )
-        return CleanupPlan(cleanup: id, plan: plan, excluded: excluded, hasConsequences: hasConsequences)
     }
 
     func requireExisting(_ urls: [URL], _ id: CleanupID) throws -> [URL] {

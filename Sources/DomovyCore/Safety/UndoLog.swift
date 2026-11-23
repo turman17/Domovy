@@ -87,17 +87,20 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
     public var secretFindingCount = 0
     /// When Purge originals deleted this entry's quarantined files; it cannot be undone after.
     public var originalsPurgedAt: Date?
+    /// A permanent tool command ran (`ollama rm`) and nothing else moved: there is nothing to
+    /// put back. Kept in the log as a record; never offered for undo.
+    public var irreversible = false
 
     public var isUndone: Bool { undoneAt != nil }
     /// Still pending and its files are still there to put back.
-    public var isUndoable: Bool { undoneAt == nil && originalsPurgedAt == nil }
+    public var isUndoable: Bool { undoneAt == nil && originalsPurgedAt == nil && !irreversible }
 }
 
 extension UndoEntry {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, planID, batchID, action, agent, sessionID, destination
         case moved, indexRestores, compressed, undoCommands, mustNotBeRunning, leftovers, undoneAt, failure
-        case redacted, secretFindingCount, originalsPurgedAt, registryRestores
+        case redacted, secretFindingCount, originalsPurgedAt, registryRestores, irreversible
     }
 
     /// Entries written by older versions lack the newer fields; they decode with empty defaults.
@@ -125,6 +128,7 @@ extension UndoEntry {
         secretFindingCount = try c.decodeIfPresent(Int.self, forKey: .secretFindingCount) ?? 0
         originalsPurgedAt = try c.decodeIfPresent(Date.self, forKey: .originalsPurgedAt)
         registryRestores = try c.decodeIfPresent([RegistryRestore].self, forKey: .registryRestores) ?? []
+        irreversible = try c.decodeIfPresent(Bool.self, forKey: .irreversible) ?? false
     }
 }
 
