@@ -140,7 +140,8 @@ Each agent is one adapter. It implements: list sessions, list a session's artifa
 **Cursor**
 - Chats are rows in `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (`composerData:`, `bubbleId:`, `checkpointId:`, `messageRequestContext:`, `agentKv:`). The chat list is `composer.composerHeaders` (Cursor 3.0+).
 - CLI chats: `~/.cursor/chats/<hash>/<uuid>/`.
-- v1 is read-only: show sizes and guide the user to "Developer: Delete Old Chats" and "Developer: GC Agent KV Blobs". Writing to the database comes later, only with Cursor quit and a backup made first.
+- Verified on a real (pre-3.0) install, read-only and in place (2026-11-23): tables `ItemTable` and `cursorDiskKV` (`key TEXT UNIQUE, value BLOB`, JSON text values); per-chat keys `composerData:<id>` and `<prefix>:<id>:<item>` for `bubbleId`, `checkpointId`, `messageRequestContext`, `codeBlockDiff`, `codeBlockPartialInlineDiffFates`; helper processes `Cursor Helper (…)`. `composer.composerHeaders`, `agentKv:` and CLI chats were not on that install (assumed).
+- Delete (v0.5) is the first SQLite write in Domovy: only with Cursor fully quit and nothing holding `state.vscdb`, `-wal` or `-shm` open; clone the database into the quarantine; `BEGIN IMMEDIATE`, delete exactly the chat's rows and cut its entry out of `composer.composerHeaders` byte for byte, `COMMIT`; `PRAGMA integrity_check` or the clone goes back. Never VACUUM; Cursor reclaims the space itself or with "Developer: GC Agent KV Blobs". Undo puts the clone back only while the file is unchanged since (the user accepts that explicitly). A chat also listed in a pre-3.0 workspace database is refused. CLI chats move to the Trash and archive with APFS compression; editor chats have no archive.
 
 **Later adapters**
 - Gemini CLI: `~/.gemini/tmp/<project>/{chats,logs,tool-outputs,checkpoints}`, `~/.gemini/history/<project>` (`<project>` from `projects.json`; older versions used a hash). Official `--delete-session` also deletes chats sharing the id's first 8 characters and runs the retention sweep first, which deletes other chats for good (verified 0.43.0), so Domovy never runs it and moves the files itself. Empty chats sharing one id (the a2a server's, 427 here) are one row.
@@ -223,7 +224,7 @@ DomovyCore        Swift package, no UI
 | Deleting user data by mistake | Dry-run plans, quarantine, undo log, never touching live sessions, a test suite on fixture homes |
 | Storage formats change with agent updates | Adapters behind a versioned protocol; detect unknown layouts and fall back to read-only |
 | Vendors add native delete or retention controls | Cross-agent view, disk and archive features remain; be first and best |
-| Editing app databases corrupts them | Prefer official CLIs, require the owning app to be quit, back up before writing, Cursor read-only in v1 |
+| Editing app databases corrupts them | Prefer official CLIs, require the owning app to be quit and nothing holding the file open, clone it first, one transaction, integrity check with automatic restore, never VACUUM (Cursor) |
 | Secrets left in the Trash | Offer "delete now" for sessions flagged by the secret scan, and say clearly that the Trash still holds plaintext |
 | Unsigned app looks unsafe | Notarize; publish the source and reproducible builds |
 
@@ -235,6 +236,9 @@ DomovyCore        Swift package, no UI
 - [ ] libproc API for open file handles per path, without root.
 - [ ] Does APFS compression of a `.jsonl` file survive Claude Code appending to it? It decompresses on write, which is fine for cold sessions only.
 - [ ] Codex screenshot duplicates and Cursor `.pack` files: no sources yet.
+- [x] Cursor `state.vscdb` schema, per-chat key shapes and helper process names, read-only in place (verified 2026-11-23 on a pre-3.0 install; see docs/research/agent_storage_formats.md).
+- [ ] Cursor 3.0+: `composer.composerHeaders` shape, `agentKv:` key shapes, the main process name, and whether a chat deleted this way stays deleted after Cursor restarts. Check on a current install with a throwaway chat.
+- [ ] Cursor CLI: `~/.cursor/chats/<hash>/<id>/store.db` `meta` format and the `cursor-agent` process name. Not installed here.
 - [x] Ollama store and Hugging Face hub cache layouts, taken from a real install (verified 2026-11-23; see docs/research/agent_storage_formats.md).
 - [ ] LM Studio model layout and process names; `hf cache rm` / `hf cache prune` argument forms; the Ollama server's process name and `ollama ps` output while a model is loaded.
 - [x] Gemini CLI layout, chat format, `--delete-session` semantics and retention defaults, taken from a real install and its source (verified 2026-11-23; see docs/research/agent_storage_formats.md).
