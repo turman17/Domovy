@@ -49,6 +49,9 @@ public struct Footprint: Hashable, Codable, Sendable {
         /// One line explaining the disposition.
         public let note: String
         public let guidance: Guidance?
+        /// Steps in the agent itself, shown under the note when `guidance` is something else
+        /// (Cursor's chats: managed in Sessions, and Cursor's own Delete Old Chats).
+        public let advice: String?
 
         public var id: String { name }
 
@@ -66,7 +69,8 @@ public struct Footprint: Hashable, Codable, Sendable {
             logicalBytes: Int64? = nil,
             disposition: Disposition,
             note: String,
-            guidance: Guidance? = nil
+            guidance: Guidance? = nil,
+            advice: String? = nil
         ) {
             self.name = name
             self.url = url
@@ -76,6 +80,7 @@ public struct Footprint: Hashable, Codable, Sendable {
             self.disposition = disposition
             self.note = note
             self.guidance = guidance
+            self.advice = advice
         }
 
         /// What Finder should select: a handful of covered items, or else the folder itself.

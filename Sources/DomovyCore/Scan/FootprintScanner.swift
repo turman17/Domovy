@@ -12,7 +12,7 @@ public enum FootprintScanner {
 
     /// The measuring-only providers for agents without a session adapter yet.
     public static func measuredOnly(home: URL) -> [any FootprintProvider] {
-        [ClaudeDesktopFootprint(home: home), CursorFootprint(home: home)]
+        [ClaudeDesktopFootprint(home: home)]
     }
 
     /// The local model stores: Ollama, LM Studio, Hugging Face.

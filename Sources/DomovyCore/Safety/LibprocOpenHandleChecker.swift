@@ -53,11 +53,21 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         return Int64(values.fileSize ?? 0) >= mappedFileThreshold
     }
 
+    /// Every process that holds one of `urls` open right now, mapped files included, without the
+    /// cache; `nil` when that could not be checked. For the executor, right before it writes.
+    static func currentHolders(of urls: [URL]) -> [OpenHandleHolder]? {
+        guard !urls.isEmpty else { return [] }
+        guard let snapshot = takeSnapshot(), let mapped = takeMappedSnapshot() else { return nil }
+        var matches = matchOpenPaths(snapshot, against: urls)
+        for holder in matchOpenPaths(mapped, against: urls) where !matches.contains(holder) { matches.append(holder) }
+        return matches
+    }
+
     // MARK: libproc
 
     /// Every regular-file vnode open by a process we are allowed to inspect, or `nil` when
     /// the process list itself could not be read.
-    private static func takeSnapshot() -> [OpenHandleHolder]? {
+    static func takeSnapshot() -> [OpenHandleHolder]? {
         guard let pids = listPIDs() else {
             Log.liveness.error("proc_listpids failed: \(String(cString: strerror(errno)), privacy: .public)")
             return nil

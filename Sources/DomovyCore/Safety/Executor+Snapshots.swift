@@ -26,9 +26,19 @@ extension Executor {
     /// earlier command of the same plan are not cloned again. Refuses the command when a clone
     /// cannot be made.
     func takeSnapshots(for command: PlannedCommand, entry: inout UndoEntry) throws {
+        try takeSnapshots(of: command.snapshotsBeforeRun, entry: &entry,
+                          failure: "\(command.commandLine) did not run") { source, reason in
+            ExecutorError.copyFailed(source, command: command.commandLine, reason: reason)
+        }
+    }
+
+    /// Clones `files` before something rewrites them in place (a command, or Domovy's own
+    /// database edit). `refusal` builds the error thrown when a clone cannot be made.
+    func takeSnapshots(of files: [URL], entry: inout UndoEntry, failure: String,
+                       refusal: (URL, String) -> ExecutorError) throws {
         let taken = Set(entry.snapshots.map(\.original))
         let folder = quarantineDirectory.appendingPathComponent(entry.id.uuidString, isDirectory: true)
-        for source in command.snapshotsBeforeRun.map(\.standardizedFileURL) where !taken.contains(source) {
+        for source in files.map(\.standardizedFileURL) where !taken.contains(source) {
             let compared = !source.lastPathComponent.hasSuffix("-shm")
             guard FileSystem.itemExists(source) else {
                 entry.snapshots.append(.init(original: source, copy: nil, metadata: [], before: nil, after: nil, isCompared: compared))
@@ -44,10 +54,10 @@ extension Executor {
             } catch {
                 for item in entry.snapshots { if let copy = item.copy { try? fileManager.removeItem(at: copy) } }
                 entry.snapshots = []
-                entry.failure = "\(command.commandLine) did not run: no copy of \(source.lastPathComponent)"
+                entry.failure = "\(failure): no copy of \(source.lastPathComponent)"
                 try undoLog.write(entry)
                 Log.executor.error("Could not keep a copy of \(source.path, privacy: .private): \(error.localizedDescription, privacy: .public)")
-                throw ExecutorError.copyFailed(source, command: command.commandLine, reason: error.localizedDescription)
+                throw refusal(source, error.localizedDescription)
             }
         }
     }

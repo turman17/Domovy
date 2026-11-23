@@ -65,7 +65,8 @@ struct FootprintBuilder {
         reveal url: URL? = nil,
         _ disposition: Footprint.Disposition,
         _ note: String,
-        guidance: Footprint.Guidance? = nil
+        guidance: Footprint.Guidance? = nil,
+        advice: String? = nil
     ) {
         let present = items.map(\.standardizedFileURL).filter { FileSystem.exists($0) && !claimed.contains($0.path) }
         claim(present)
@@ -80,7 +81,8 @@ struct FootprintBuilder {
             logicalBytes: usage.logical,
             disposition: disposition,
             note: note,
-            guidance: guidance
+            guidance: guidance,
+            advice: advice
         ))
     }
 
@@ -89,9 +91,10 @@ struct FootprintBuilder {
         _ item: URL,
         _ disposition: Footprint.Disposition,
         _ note: String,
-        guidance: Footprint.Guidance? = nil
+        guidance: Footprint.Guidance? = nil,
+        advice: String? = nil
     ) {
-        add(name, [item], disposition, note, guidance: guidance)
+        add(name, [item], disposition, note, guidance: guidance, advice: advice)
     }
 
     /// Adds a category for a measured part of some files (one table's share of a database).

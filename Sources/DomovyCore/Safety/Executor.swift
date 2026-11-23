@@ -19,6 +19,10 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
     case nothingToKeep(command: String)
     case needsAcknowledgement(String)
     case changedSinceCommand(URL, agent: String)
+    case snapshotFailed(URL, reason: String)
+    case filesOpen(reasons: [String])
+    case databaseEditFailed(URL, reason: String)
+    case integrityCheckFailed(URL, problems: [String], restored: Bool)
 
     public var errorDescription: String? {
         switch self {
@@ -58,6 +62,16 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
             "Nothing was changed: this needs your explicit OK first. \(text)"
         case .changedSinceCommand(let url, let agent):
             "\(agent) changed \(url.lastPathComponent) after the delete, so putting the old copy back would lose those changes. This delete can no longer be undone; Domovy's copy stays in its quarantine until you purge it."
+        case .snapshotFailed(let url, let reason):
+            "Domovy could not keep a copy of \(url.lastPathComponent) (\(reason)), so it changed nothing."
+        case .filesOpen(let reasons):
+            "Nothing was changed. " + reasons.joined(separator: " ")
+        case .databaseEditFailed(let url, let reason):
+            "Could not edit \(url.lastPathComponent): \(reason). Nothing in it was changed."
+        case .integrityCheckFailed(let url, let problems, let restored):
+            restored
+                ? "\(url.lastPathComponent) failed SQLite's integrity check after the edit (\(problems.first ?? "no answer")), so Domovy put its copy of the database back. Nothing was changed."
+                : "\(url.lastPathComponent) failed SQLite's integrity check after the edit (\(problems.first ?? "no answer")), and Domovy could not put its copy back. The copy is in Domovy's quarantine; quit the app and use Undo, or replace the file with it."
         }
     }
 }
@@ -70,6 +84,7 @@ public struct Executor: Sendable {
     let runner: any CommandRunner
     let processes: any RunningProcessLister
     let copier: QuarantineCopier
+    let integrity: any DatabaseIntegrityChecker
     let now: @Sendable () -> Date
     var fileManager: FileManager { .default }
 
@@ -80,11 +95,13 @@ public struct Executor: Sendable {
     ///   - runner: runs agent commands such as `codex delete`; tests point plans at a stub executable.
     ///   - processes: checks right before execution that apps a plan must not run alongside are quit.
     ///   - copier: keeps copies of what a tool command deletes; tests make it fail on purpose.
+    ///   - integrity: checks a database after Domovy edited it; tests make it fail on purpose.
     public init(
         storeRoot: URL,
         runner: any CommandRunner = ProcessCommandRunner(),
         processes: any RunningProcessLister = LibprocProcessLister(),
         copier: QuarantineCopier = .system,
+        integrity: any DatabaseIntegrityChecker = SQLiteIntegrityChecker(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.storeRoot = storeRoot.standardizedFileURL
@@ -92,6 +109,7 @@ public struct Executor: Sendable {
         self.runner = runner
         self.processes = processes
         self.copier = copier
+        self.integrity = integrity
         self.now = now
     }
 
@@ -140,6 +158,9 @@ public struct Executor: Sendable {
         try undoLog.write(entry)
         for command in plan.commands {
             try run(command, entry: &entry)
+        }
+        for edit in plan.databaseEdits where !edit.isEmpty {
+            try editDatabase(edit, entry: &entry)
         }
         if plan.action == .archive { return try compress(plan, entry: entry) }
         if plan.action == .redact { return try redact(plan, entry: entry) }
@@ -384,7 +405,9 @@ public struct Executor: Sendable {
         }
         entry.undoCommands = []
 
-        // Databases a command rewrote in place, only if nothing wrote to them since.
+        // Databases a command rewrote in place, only if nothing wrote to them since and nothing
+        // holds them open now.
+        try requireNotOpen(entry.snapshots.map(\.original))
         do {
             try restoreSnapshots(&entry)
         } catch let error as ExecutorError {

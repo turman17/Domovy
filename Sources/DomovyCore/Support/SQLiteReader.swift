@@ -2,7 +2,8 @@ import Foundation
 import SQLite3
 
 /// Read-only access to an agent's SQLite database through the system `libsqlite3`.
-/// Opens with `SQLITE_OPEN_READONLY` only; there is no code path that writes (safety rule 4).
+/// Opens with `SQLITE_OPEN_READONLY` only and never writes (safety rule 4); the one write path
+/// is `SQLiteWriter`, which only the executor uses.
 /// Row contents read here may hold user text: callers show it, never log it.
 final class SQLiteReader {
     private let db: OpaquePointer

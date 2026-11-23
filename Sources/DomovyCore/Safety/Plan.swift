@@ -115,6 +115,9 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     public let compressions: [FileCompression]
     /// The agent's own commands, run before any move or edit (e.g. `codex delete`).
     public let commands: [PlannedCommand]
+    /// Rows Domovy deletes from an app's database itself, after the commands and before any
+    /// move (Cursor's `state.vscdb`, which has no command for one chat).
+    public let databaseEdits: [DatabaseEdit]
     /// Files a redaction rewrites, with every value it replaces.
     public let redactions: [FileRedaction]
     /// Findings a redaction leaves alone, each with the reason.
@@ -147,6 +150,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         registryRemovals: [RegistryRemoval] = [],
         compressions: [FileCompression] = [],
         commands: [PlannedCommand] = [],
+        databaseEdits: [DatabaseEdit] = [],
         redactions: [FileRedaction] = [],
         skippedSecrets: [SkippedSecret] = [],
         remarks: [String] = [],
@@ -165,6 +169,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         self.registryRemovals = registryRemovals
         self.compressions = compressions
         self.commands = commands
+        self.databaseEdits = databaseEdits
         self.redactions = redactions
         self.skippedSecrets = skippedSecrets
         self.remarks = remarks
@@ -177,6 +182,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         moves.reduce(0) { $0 + $1.sizeBytes } + indexEdits.reduce(0) { $0 + $1.removedBytes }
             + registryRemovals.reduce(0) { $0 + $1.sizeBytes }
             + compressions.reduce(0) { $0 + $1.sizeBytes } + commands.reduce(0) { $0 + $1.sizeBytes }
+            + databaseEdits.reduce(0) { $0 + $1.sizeBytes }
     }
 
     /// Estimated on-disk bytes of the compressed files after an archive.
@@ -197,6 +203,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
 
     public var isEmpty: Bool {
         moves.isEmpty && indexEdits.isEmpty && registryRemovals.isEmpty && compressions.isEmpty && commands.isEmpty && redactions.isEmpty
+            && databaseEdits.allSatisfy(\.isEmpty)
     }
 
     /// Values a redaction replaces, across all files.
@@ -241,6 +248,11 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         if !registryRemovals.isEmpty {
             let n = registryRemovals.count
             parts.append("takes \(n) \(n == 1 ? "entry" : "entries") off Claude Desktop's session list")
+        }
+        for edit in databaseEdits where !edit.isEmpty {
+            let n = edit.rowCount
+            let list = edit.listRemovals.isEmpty ? "" : " and takes it off \(agent.displayName)'s chat list"
+            parts.append("deletes \(n) \(n == 1 ? "row" : "rows") (\(formatter.string(fromByteCount: edit.sizeBytes))) from \(edit.database.lastPathComponent)\(list), keeping a copy of the whole database first")
         }
         guard !parts.isEmpty || !commands.isEmpty else { return remarks.first ?? "Nothing to do." }
         let rest = parts.isEmpty ? "" : parts.joined(separator: " and ") + ". "

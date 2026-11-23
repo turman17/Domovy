@@ -86,6 +86,9 @@ public protocol RunningProcessLister: Sendable {
     /// Paths of the regular files `pid` holds open: empty when it holds none or has exited,
     /// `nil` when they could not be read.
     func openFiles(of pid: Int32) -> [String]?
+    /// Every process holding one of `urls` (or something below them) open, mapped files
+    /// included: empty when none does, `nil` when that could not be checked.
+    func holders(of urls: [URL]) -> [OpenHandleHolder]?
 }
 
 extension RunningProcessLister {
@@ -148,6 +151,10 @@ public struct LibprocProcessLister: RunningProcessLister {
         return fds.filter { $0.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) }
             .compactMap { LibprocOpenHandleChecker.vnodePath(pid: pid, fd: $0.proc_fd) }
     }
+
+    public func holders(of urls: [URL]) -> [OpenHandleHolder]? {
+        LibprocOpenHandleChecker.currentHolders(of: urls)
+    }
 }
 
 /// Fixed answers, for tests and previews.
@@ -173,5 +180,14 @@ public struct FixedProcessLister: RunningProcessLister {
 
     public func openFiles(of pid: Int32) -> [String]? {
         unreadable.contains(pid) ? nil : openFiles[pid] ?? []
+    }
+
+    /// Unsure when any pid cannot be read.
+    public func holders(of urls: [URL]) -> [OpenHandleHolder]? {
+        guard unreadable.isEmpty else { return nil }
+        let all = openFiles.sorted { $0.key < $1.key }.flatMap { pid, paths in
+            paths.map { OpenHandleHolder(pid: pid, processName: processes?.first { $0.pid == pid }?.name ?? "pid \(pid)", path: $0) }
+        }
+        return matchOpenPaths(all, against: urls)
     }
 }

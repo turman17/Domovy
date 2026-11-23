@@ -36,3 +36,22 @@ public struct TranscriptMask: Sendable {
         return text.isEmpty ? "[secret]" : text
     }
 }
+
+extension TranscriptMask {
+    /// Masks possible secrets in text read from a database row (Cursor's chats), where there
+    /// are no scan findings by line to apply: the rules run on the text itself, and each value
+    /// is replaced by its masked preview before the text is shown.
+    final class TextMasker {
+        private let matcher = SecretMatcher()
+
+        func mask(_ text: String) -> String {
+            var bytes = [UInt8](text.utf8)
+            let matches = matcher.matches(in: Data(bytes))
+            guard !matches.isEmpty else { return text }
+            for match in matches.sorted(by: { $0.range.lowerBound > $1.range.lowerBound }) where match.range.upperBound <= bytes.count {
+                bytes.replaceSubrange(match.range, with: Array(match.preview.utf8))
+            }
+            return String(decoding: bytes, as: UTF8.self)
+        }
+    }
+}
