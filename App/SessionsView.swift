@@ -77,7 +77,11 @@ struct SessionsView: View {
     }
 
     private var canDeleteSelection: Bool {
-        selectedSessions.contains { $0.status != .live }
+        selectedSessions.contains(where: canDelete)
+    }
+
+    private func canDelete(_ session: Session) -> Bool {
+        session.status != .live && library.busySessions[session.id] == nil
     }
 
     private var canArchiveSelection: Bool {
@@ -86,6 +90,7 @@ struct SessionsView: View {
 
     private func canArchive(_ session: Session) -> Bool {
         session.status != .live && !session.isArchived && session.canArchive && library.readOnlyAgents[session.agent] == nil
+            && library.busySessions[session.id] == nil
     }
 
     /// One retention banner per agent whose sweep is about to take sessions.
@@ -255,7 +260,16 @@ struct SessionsView: View {
             .customizationID("size")
             TableColumn("Status", value: \.statusSortKey) { row in
                 HStack(spacing: 6) {
-                    StatusLabel(session: row.session)
+                    if let status = library.busySessions[row.id] {
+                        Label {
+                            Text(status)
+                        } icon: {
+                            ProgressView().controlSize(.mini)
+                        }
+                        .foregroundStyle(.secondary)
+                    } else {
+                        StatusLabel(session: row.session)
+                    }
                     SecretMarker(count: row.secretCount)
                 }
             }
@@ -283,7 +297,6 @@ struct SessionsView: View {
     /// Right-click menu, like the Finder's. Destructive items still open their plan sheet first.
     @ViewBuilder
     private func rowMenu(for session: Session) -> some View {
-        let isLive = session.status == .live
         Button("Quick Look", systemImage: "eye") { previewSession = session }
         Button("Get Info", systemImage: "info.circle") { infoSession = session }
         Button("Show in Finder", systemImage: "folder") { revealInFinder(session) }
@@ -317,7 +330,7 @@ struct SessionsView: View {
             selection = [session.id]
             requestDelete([session])
         }
-        .disabled(isLive)
+        .disabled(!canDelete(session))
     }
 
     /// Right-click menu on several rows: actions that make sense for all of them at once.
@@ -332,7 +345,7 @@ struct SessionsView: View {
         Button("Archive \(n) Sessions\u{2026}", systemImage: "archivebox") { requestArchiveBatch(sessions) }
             .disabled(!sessions.contains(where: canArchive))
         Button("Move \(n) Sessions to Trash\u{2026}", systemImage: "trash") { requestDelete(sessions) }
-            .disabled(!sessions.contains { $0.status != .live })
+            .disabled(!sessions.contains(where: canDelete))
     }
 
     @ToolbarContentBuilder
@@ -343,6 +356,16 @@ struct SessionsView: View {
                     .labelStyle(.titleAndIcon)
                     .foregroundStyle(.secondary)
                     .help("Reading the fake home in .devhome, not your real one.")
+            }
+        }
+        if let activity = library.backgroundActivity {
+            ToolbarItem {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(activity)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
             }
         }
         ToolbarItem {
@@ -479,27 +502,11 @@ struct SessionsView: View {
     }
 
     /// Plans first, then the confirmation sheet. Sessions with nothing to compress drop out.
+    /// Opens the confirmation sheet at once; it plans the sessions while showing a spinner.
     private func requestArchive(_ sessions: [Session], notes: [String] = []) {
-        Task {
-            do {
-                let plans = try await library.archivePlans(for: sessions)
-                guard !plans.isEmpty else {
-                    errorMessage = sessions.count == 1 && sessions[0].agent == .codex
-                        ? "Nothing to archive: this session is already in Codex's archive or has nothing to compress."
-                        : "Nothing to compress: \(sessions.count == 1 ? "this session's files are" : "these sessions' files are") already compressed or too small to gain from it."
-                    return
-                }
-                let planned = Set(plans.map(\.sessionID))
-                var notes = notes
-                let dropped = sessions.count - planned.count
-                if dropped > 0, sessions.count > 1 {
-                    notes.append("\(dropped) \(dropped == 1 ? "session has" : "sessions have") nothing to compress or became live, and \(dropped == 1 ? "is" : "are") left alone.")
-                }
-                archiveRequest = ArchiveRequest(sessions: sessions.filter { planned.contains($0.id) }, plans: plans, notes: notes)
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
+        let sessions = sessions.filter { library.busySessions[$0.id] == nil }
+        guard !sessions.isEmpty else { return }
+        archiveRequest = ArchiveRequest(sessions: sessions, notes: notes)
     }
 
     private func requestRedact() {
@@ -530,7 +537,7 @@ struct SessionsView: View {
     /// Plans first, then one confirmation sheet. In a batch, live sessions and sessions that
     /// cannot be planned are left out and the sheet says so; a single one shows why instead.
     private func requestDelete(_ sessions: [Session]) {
-        let candidates = sessions.filter { $0.status != .live }
+        let candidates = sessions.filter(canDelete)
         guard !candidates.isEmpty else { return }
         // The Trash keeps plaintext until it is emptied; flagged sessions default to the quarantine.
         let flagged = candidates.contains { !library.findings(for: $0).isEmpty }
@@ -547,7 +554,8 @@ struct SessionsView: View {
             }
             var planned: [Session] = []
             var plans: [Plan] = []
-            var live = sessions.count - candidates.count
+            var live = sessions.filter { $0.status == .live }.count
+            let busy = sessions.filter { library.busySessions[$0.id] != nil }.count
             var failed = 0
             for session in candidates {
                 do {
@@ -562,6 +570,7 @@ struct SessionsView: View {
             }
             var notes: [String] = []
             if live > 0 { notes.append(Self.leftAlone(live, "live")) }
+            if busy > 0 { notes.append("\(busy) \(busy == 1 ? "session is" : "sessions are") still being archived or moved, and left alone.") }
             if failed > 0 { notes.append("\(failed) \(failed == 1 ? "session" : "sessions") could not be planned and \(failed == 1 ? "is" : "are") left alone; delete \(failed == 1 ? "it" : "them") one at a time to see why.") }
             guard !plans.isEmpty else {
                 errorMessage = "None of the selected sessions can be deleted right now. " + notes.joined(separator: " ")

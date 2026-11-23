@@ -1,12 +1,11 @@
 import DomovyCore
 import SwiftUI
 
-/// Archive requests awaiting confirmation: one plan per session, sessions with nothing to
-/// compress already left out.
+/// Sessions to archive. The sheet opens at once and plans them while it shows a spinner;
+/// sessions with nothing to compress drop out there.
 struct ArchiveRequest: Identifiable {
     let id = UUID()
     let sessions: [Session]
-    let plans: [Plan]
     /// Selected sessions left out, one line each ("2 live sessions are left alone.").
     var notes: [String] = []
 }
@@ -18,24 +17,40 @@ struct ArchivePlanSheet: View {
 
     @Environment(SessionLibrary.self) private var library
     @Environment(\.dismiss) private var dismiss
-    @State private var isExecuting = false
+    /// Nil while planning.
+    @State private var plans: [Plan]?
     @State private var failure: String?
 
-    private var files: [FileCompression] { request.plans.flatMap(\.compressions) }
+    private var planned: [Plan] { plans ?? [] }
+    private var files: [FileCompression] { planned.flatMap(\.compressions) }
     private var before: Int64 { files.reduce(0) { $0 + $1.sizeBytes } }
     private var after: Int64 { files.reduce(0) { $0 + $1.estimatedBytes } }
-    private var isBatch: Bool { request.plans.count > 1 }
-    private var commandCount: Int { request.plans.reduce(0) { $0 + $1.commands.count } }
-    private var isBlocked: Bool { request.plans.contains { $0.liveCheck.isLive } }
-    private var expiringCount: Int { request.sessions.filter { $0.status == .expiring }.count }
+    private var isBatch: Bool { planned.count > 1 }
+    private var commandCount: Int { planned.reduce(0) { $0 + $1.commands.count } }
+    private var isBlocked: Bool { planned.contains { $0.liveCheck.isLive } }
+    private var plannedSessions: [Session] {
+        let ids = Set(planned.map(\.sessionID))
+        return request.sessions.filter { ids.contains($0.id) }
+    }
+    private var expiringCount: Int { plannedSessions.filter { $0.status == .expiring }.count }
+
+    /// Sessions the plans left out, said once the plans are in.
+    private var notes: [String] {
+        var notes = request.notes
+        let dropped = request.sessions.count - plannedSessions.count
+        if plans != nil, request.sessions.count > 1, dropped > 0, !planned.isEmpty {
+            notes.append("\(dropped) \(dropped == 1 ? "session has" : "sessions have") nothing to compress or became live, and \(dropped == 1 ? "is" : "are") left alone.")
+        }
+        return notes
+    }
 
     private var title: String {
-        guard !isBatch, let session = request.sessions.first else { return "Archive \(request.plans.count) sessions?" }
+        guard !isBatch, let session = plannedSessions.first ?? request.sessions.first else { return "Archive \(planned.count) sessions?" }
         return "Archive \u{201C}\(session.displayTitle)\u{201D}?"
     }
 
     private var summary: String {
-        guard isBatch else { return request.plans.first?.summary ?? "Nothing to compress." }
+        guard isBatch else { return planned.first?.summary ?? "Nothing to compress." }
         let n = files.count
         var parts: [String] = []
         if n > 0 {
@@ -48,17 +63,64 @@ struct ArchivePlanSheet: View {
     }
 
     var body: some View {
+        Group {
+            if plans == nil {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Checking \(request.sessions.count == 1 ? "the session" : "\(request.sessions.count) sessions")\u{2026}")
+                        .foregroundStyle(.secondary)
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                }
+                .frame(maxWidth: .infinity, minHeight: 160)
+            } else if planned.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Nothing to archive")
+                        .font(.title3.weight(.semibold))
+                    Text(failure ?? nothingText)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("OK") { dismiss() }
+                            .keyboardShortcut(.defaultAction)
+                    }
+                }
+            } else {
+                content
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+        .task {
+            do {
+                plans = try await library.archivePlans(for: request.sessions)
+            } catch {
+                failure = error.localizedDescription
+                plans = []
+            }
+        }
+    }
+
+    private var nothingText: String {
+        let sessions = request.sessions
+        let text = sessions.count == 1 && sessions[0].agent == .codex
+            ? "This session is already in Codex's archive or has nothing to compress."
+            : "\(sessions.count == 1 ? "This session's files are" : "These sessions' files are") already compressed or too small to gain from it."
+        return ([text] + request.notes).joined(separator: " ")
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
                 .font(.title3.weight(.semibold))
             Text(summary)
                 .foregroundStyle(.secondary)
-            ForEach(request.notes, id: \.self) { note in
+            ForEach(notes, id: \.self) { note in
                 Label(note, systemImage: "info.circle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            if let plan = request.plans.first, !isBatch {
+            if let plan = planned.first, !isBatch {
                 LiveCheckRow(result: plan.liveCheck)
                 RemarksView(remarks: plan.remarks.filter { $0 != summary })
             }
@@ -77,13 +139,11 @@ struct ArchivePlanSheet: View {
             }
             footer
         }
-        .padding(20)
-        .frame(width: 560)
     }
 
     private var changes: some View {
         List {
-            ForEach(request.plans) { plan in
+            ForEach(planned) { plan in
                 CommandsSection(commands: plan.commands)
                 if !plan.compressions.isEmpty {
                     Section(sectionTitle(plan)) {
@@ -123,23 +183,24 @@ struct ArchivePlanSheet: View {
             Spacer()
             Button("Cancel") { dismiss() }
                 .keyboardShortcut(.cancelAction)
-            Button(isBatch ? "Archive \(request.plans.count)" : "Archive", action: execute)
+            Button(isBatch ? "Archive \(planned.count)" : "Archive", action: execute)
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .disabled((files.isEmpty && commandCount == 0) || isBlocked || isExecuting)
+                .disabled((files.isEmpty && commandCount == 0) || isBlocked)
         }
     }
 
+    /// Closes the sheet at once; the archive runs in the background and ends in a toast.
     private func execute() {
-        isExecuting = true
-        Task {
-            do {
-                try await library.archive(request.plans)
-                dismiss()
-            } catch {
-                failure = error.localizedDescription
-                isExecuting = false
-            }
+        let plans = planned
+        let n = plans.count
+        library.runInBackground(
+            "Archiving \(n == 1 ? "1 session" : "\(n) sessions")\u{2026}",
+            status: "Archiving\u{2026}",
+            sessions: plans.map(\.sessionID)
+        ) { [library] in
+            try await library.archive(plans)
         }
+        dismiss()
     }
 }

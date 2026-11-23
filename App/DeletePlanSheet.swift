@@ -11,7 +11,6 @@ struct DeletePlanSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var plans: [Plan]
     @State private var destination: Destination
-    @State private var isExecuting = false
     @State private var failure: String?
     @State private var purgeNow = false
     @State private var acknowledged = false
@@ -146,26 +145,30 @@ struct DeletePlanSheet: View {
                 .buttonStyle(.borderedProminent)
                 // With a kept copy the delete stays undoable; red only once it is for good.
                 .tint(!keepsToolCopies || purgeNow ? .red : nil)
-                .disabled(isLive || plans.isEmpty || plans.contains(where: \.isEmpty) || isExecuting || (!acknowledgements.isEmpty && !acknowledged))
+                .disabled(isLive || plans.isEmpty || plans.contains(where: \.isEmpty) || (!acknowledgements.isEmpty && !acknowledged))
         }
     }
 
+    /// Closes the sheet at once; the delete runs in the background and ends in a toast.
     private func execute() {
-        isExecuting = true
         let plans = plans.map { plan in
             var plan = plan
             plan.isAcknowledged = acknowledged
             return plan
         }
-        Task {
-            do {
-                try await library.execute(plans, for: request.sessions, purgeNow: purgeNow && keepsToolCopies)
-                dismiss()
-            } catch {
-                failure = error.localizedDescription
-                isExecuting = false
-            }
+        let sessions = request.sessions
+        let purge = purgeNow && keepsToolCopies
+        let moves = plans.contains { !$0.moves.isEmpty }
+        let n = plans.count
+        let what = n == 1 ? "1 session" : "\(n) sessions"
+        library.runInBackground(
+            moves ? "Moving \(what) to \(destination.displayName)\u{2026}" : "Deleting \(what)\u{2026}",
+            status: moves ? "Moving\u{2026}" : "Deleting\u{2026}",
+            sessions: plans.map(\.sessionID)
+        ) { [library] in
+            try await library.execute(plans, for: sessions, purgeNow: purge)
         }
+        dismiss()
     }
 }
 

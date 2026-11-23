@@ -62,8 +62,15 @@ final class SessionLibrary {
     /// Agents Domovy only reads, with the reason (Antigravity for now).
     private(set) var readOnlyAgents: [AgentKind: String] = [:]
     var toast: Toast?
-    /// Failure of an action started from the menu (⌘Z), shown by the sessions view.
+    /// Failure of an action started from the menu (⌘Z) or running in the background, shown
+    /// by the sessions view.
     var actionError: String?
+    /// Sessions an archive or delete is working on in the background, with what is happening
+    /// ("Archiving…"). They are not offered for another action until it finishes.
+    private(set) var busySessions: [Session.ID: String] = [:]
+    /// The background action running now, for the toolbar ("Archiving 3 sessions…").
+    private(set) var backgroundActivity: String?
+    private var backgroundJob: Task<Void, Never>?
     /// The main window's undo manager. Domovy actions go on the same stack as text edits, so
     /// ⌘Z in the search field undoes typing and ⌘Z elsewhere undoes the last Domovy action.
     weak var undoManager: UndoManager?
@@ -341,6 +348,26 @@ final class SessionLibrary {
         await reload()
     }
 
+    /// Runs a confirmed action without holding the sheet open. Jobs run one after another, so
+    /// two never write the undo log at once; the executor still checks each session is not
+    /// in use right before touching it.
+    func runInBackground(_ activity: String, status: String, sessions ids: [Session.ID], _ work: @escaping @MainActor () async throws -> Void) {
+        for id in ids { busySessions[id] = status }
+        let previous = backgroundJob
+        backgroundJob = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            backgroundActivity = activity
+            do {
+                try await work()
+            } catch {
+                actionError = error.localizedDescription
+            }
+            for id in ids { busySessions[id] = nil }
+            backgroundActivity = nil
+        }
+    }
+
     /// "Free the space now": purges the copies Domovy kept for `entries` right after the tool
     /// command ran. Returns what to tell the user; a failure leaves the copies and says so.
     func purgeKeptCopies(_ entries: [UndoEntry]) async -> String {
@@ -382,6 +409,8 @@ final class SessionLibrary {
     /// Reverts one Domovy action, newest entry first. Called by ⌘Z and by the toast.
     func undo(_ action: UndoAction) async throws {
         undoManager?.removeAllActions(withTarget: action)
+        // An archive or delete still running in the background finishes first.
+        await backgroundJob?.value
         let executor = self.executor
         // The executor reads each entry again from disk: `domo` or another undo may have
         // undone one of them since, which is skipped rather than undone twice.
