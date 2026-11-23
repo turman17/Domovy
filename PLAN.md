@@ -119,7 +119,7 @@ Each agent is one adapter. It implements: list sessions, list a session's artifa
 - Local bloat seen: `security/agent-sdk-venv` 360 MB; the largest transcripts are 30–86 MB.
 
 **Claude Desktop** (`~/Library/Application Support/Claude`)
-- Registry: `claude-code-sessions/**/local_*.json` (`cliSessionId`, `isArchived`). The app overwrites edits to these files unless it is fully quit, so require Desktop to be quit before editing them.
+- Registry: `claude-code-sessions/<uuid>/<uuid>/local_<uuid>.json` (`cliSessionId`, `isArchived`, `title`, `priorCliSessionIds`; verified). The app overwrites edits to these files unless it is fully quit, so require Desktop to be quit before editing them.
 - Cowork data: `local-agent-mode-sessions/` (`audit.jsonl`, `scheduled-tasks.json`).
 - VM: `vm_bundles/claudevm.bundle` (`rootfs.img` 10 GiB, `rootfs.img.zst`, `sessiondata.img`).
 - Electron caches: `Cache/`, `Code Cache/`, `GraphiteDawnCache/`.
@@ -230,7 +230,7 @@ DomovyCore        Swift package, no UI
 ## 11. Verify before coding
 
 - [ ] Claude Desktop: does the VM bundle download again after deletion, and what exactly is lost? No official Anthropic statement was found.
-- [ ] Claude Desktop registry JSON format, taken from a real install (field names currently come from user reports).
+- [x] Claude Desktop registry JSON format, taken from a real install (verified 2026-11-23; see docs/research/agent_storage_formats.md).
 - [ ] Codex: do `codex delete` and `codex archive` clean `state_5.sqlite` and `session_index.jsonl` in the current version? Test on a throwaway session.
 - [ ] libproc API for open file handles per path, without root.
 - [ ] Does APFS compression of a `.jsonl` file survive Claude Code appending to it? It decompresses on write, which is fine for cold sessions only.
