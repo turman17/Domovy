@@ -84,7 +84,11 @@ public struct GeminiAdapter: AgentAdapter {
     }
 
     public func artifacts(of session: Session) async throws -> [Artifact] {
-        switch try locate(session) {
+        artifacts(of: try locate(session))
+    }
+
+    private func artifacts(of target: Target) -> [Artifact] {
+        switch target {
         case .chat(let project, let chat): collectArtifacts(chat, in: project)
         case .group(let group): collectArtifacts(group)
         }
@@ -96,19 +100,56 @@ public struct GeminiAdapter: AgentAdapter {
 
     /// Moves the chat and what Gemini CLI keys by its id (or every chat of a group).
     public func deletePlan(for session: Session, destination: Destination = .trash) async throws -> Plan {
-        let target = try locate(session)
-        try requireWritable()
-        let files = try await artifacts(of: session).filter { $0.kind != .indexEntry }
-        for artifact in files where layout.isProtected(artifact.url) { throw AdapterError.protectedPathInPlan(artifact.url) }
-        let live = await planCheck(files.map(\.url))
-        let remarks: [String]
-        switch target {
-        case .chat(let project, let chat): remarks = sharedRemarks(chat, in: project)
-        case .group(let group): remarks = groupRemarks(group)
+        guard let planned = await deletePlans(for: [session], destination: destination).first else {
+            throw AdapterError.sessionNotFound(session.id)
         }
-        let moves = files.map { FileMove(source: $0.url, kind: $0.kind, sizeBytes: $0.sizeBytes, note: $0.note) }
-        return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: moves, indexEdits: [],
-                    remarks: remarks, mustNotBeRunning: [Self.processMatcher], liveCheck: live, scope: self.scope)
+        return try planned.result.get()
+    }
+
+    /// A batch reads each project folder once, asks one open-file question for every chat and
+    /// checks for Gemini CLI once. Each plan gets exactly what its own question would have got;
+    /// the executor checks again right before it moves anything.
+    public func deletePlans(for sessions: [Session], destination: Destination) async -> [PlannedSession] {
+        do {
+            try requireWritable()
+        } catch {
+            return sessions.map { PlannedSession(session: $0, result: .failure(error)) }
+        }
+        let lookup = TargetLookup(layout: layout)
+        var found: [(session: Session, target: Target, files: [Artifact])?] = []
+        var failures: [Session.ID: any Error] = [:]
+        for session in sessions {
+            do {
+                let target = try locate(session, in: lookup)
+                let files = artifacts(of: target).filter { $0.kind != .indexEntry }
+                for artifact in files where layout.isProtected(artifact.url) { throw AdapterError.protectedPathInPlan(artifact.url) }
+                found.append((session, target, files))
+            } catch {
+                failures[session.id] = error
+                found.append(nil)
+            }
+        }
+        let located = found.compactMap { $0 }
+        let holders = await openHandleHolders(of: located.map { $0.files.map(\.url) }, checker: openHandles)
+        let blocking = processes.blockingReasons([Self.processMatcher])
+        var plans: [Session.ID: Plan] = [:]
+        for (item, holders) in zip(located, holders) {
+            let base = liveness(holders: holders)
+            let live = LiveCheckResult(isLive: base.isLive || !blocking.isEmpty, reasons: base.reasons + blocking,
+                                       checkedSignals: base.checkedSignals + ["Gemini CLI processes"], openHandles: base.openHandles)
+            let remarks: [String]
+            switch item.target {
+            case .chat(let project, let chat): remarks = sharedRemarks(chat, in: project)
+            case .group(let group): remarks = groupRemarks(group)
+            }
+            let moves = item.files.map { FileMove(source: $0.url, kind: $0.kind, sizeBytes: $0.sizeBytes, note: $0.note) }
+            plans[item.session.id] = Plan(agent: kind, sessionID: item.session.id, action: .delete, destination: destination, moves: moves,
+                                          indexEdits: [], remarks: remarks, mustNotBeRunning: [Self.processMatcher], liveCheck: live, scope: self.scope)
+        }
+        return sessions.map { session in
+            if let plan = plans[session.id] { return PlannedSession(session: session, result: .success(plan)) }
+            return PlannedSession(session: session, result: .failure(failures[session.id] ?? AdapterError.sessionNotFound(session.id)))
+        }
     }
 
     /// Compresses the chat and its bulky companions in place with APFS transparent compression.
@@ -294,13 +335,6 @@ public struct GeminiAdapter: AgentAdapter {
         return LiveCheckResult(isLive: !reasons.isEmpty, reasons: reasons, checkedSignals: ["open file handles"], openHandles: status)
     }
 
-    private func planCheck(_ urls: [URL]) async -> LiveCheckResult {
-        let base = await liveness(urls)
-        let blocking = processes.blockingReasons([Self.processMatcher])
-        return LiveCheckResult(isLive: base.isLive || !blocking.isEmpty, reasons: base.reasons + blocking,
-                               checkedSignals: base.checkedSignals + ["Gemini CLI processes"], openHandles: base.openHandles)
-    }
-
     // MARK: Guards
 
     enum Target {
@@ -308,12 +342,33 @@ public struct GeminiAdapter: AgentAdapter {
         case group(GeminiChatGroup)
     }
 
+    /// Project folders and chat groups read on first use, then shared by every session of a
+    /// batch. Lives for one call only, so a plan never sees an older read than its batch.
+    private final class TargetLookup {
+        let layout: GeminiLayout
+        private lazy var registry = layout.registry()
+        private var projects: [URL: GeminiProject] = [:]
+        private(set) lazy var groups: [GeminiChatGroup] = GeminiChatGroup.groups(in: layout.projectFolders().map(project(in:)))
+
+        init(layout: GeminiLayout) { self.layout = layout }
+
+        func project(in folder: URL) -> GeminiProject {
+            let key = folder.standardizedFileURL
+            if let project = projects[key] { return project }
+            let project = GeminiProject(folder: key, registry: registry)
+            projects[key] = project
+            return project
+        }
+    }
+
     private func locate(_ session: Session) throws -> Target {
+        try locate(session, in: TargetLookup(layout: layout))
+    }
+
+    private func locate(_ session: Session, in lookup: TargetLookup) throws -> Target {
         guard session.agent == kind else { throw AdapterError.sessionNotFound(session.id) }
         if session.memberCount > 1 || session.id.hasSuffix(GeminiChatGroup.idSuffix) {
-            let registry = layout.registry()
-            let projects = layout.projectFolders().map { GeminiProject(folder: $0, registry: registry) }
-            if let group = GeminiChatGroup.groups(in: projects).first(where: { $0.id == session.id }) { return .group(group) }
+            if let group = lookup.groups.first(where: { $0.id == session.id }) { return .group(group) }
             if session.memberCount > 1 { throw AdapterError.sessionNotFound(session.id) }
         }
         let file = session.transcriptURL.standardizedFileURL
@@ -321,7 +376,7 @@ public struct GeminiAdapter: AgentAdapter {
         guard FileSystem.relativePath(of: file, under: layout.tmp) != nil, FileSystem.exists(file) else {
             throw AdapterError.sessionNotFound(session.id)
         }
-        let project = GeminiProject(folder: folder, registry: layout.registry())
+        let project = lookup.project(in: folder)
         guard let chat = project.chats.first(where: { $0.file == file }) else { throw AdapterError.sessionNotFound(session.id) }
         return .chat(project, chat)
     }

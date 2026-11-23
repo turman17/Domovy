@@ -43,6 +43,19 @@ public enum AdapterError: Error, LocalizedError, Hashable, Sendable {
 }
 
 /// One adapter per agent. Adapters take an injected root and never assume `~`.
+/// One session of a batch and its plan, or why it could not be planned.
+public struct PlannedSession: Sendable {
+    public let session: Session
+    public let result: Result<Plan, any Error>
+
+    public init(session: Session, result: Result<Plan, any Error>) {
+        self.session = session
+        self.result = result
+    }
+
+    public var plan: Plan? { try? result.get() }
+}
+
 public protocol AgentAdapter: FootprintProvider {
     var kind: AgentKind { get }
     /// The agent's config directory (e.g. `<home>/.claude`).
@@ -57,6 +70,9 @@ public protocol AgentAdapter: FootprintProvider {
     func artifacts(of session: Session) async throws -> [Artifact]
     func liveCheck(_ session: Session) async throws -> LiveCheckResult
     func deletePlan(for session: Session, destination: Destination) async throws -> Plan
+    /// Delete plans for several sessions of this agent, in order. One session that cannot be
+    /// planned does not stop the others; its error is in its result.
+    func deletePlans(for sessions: [Session], destination: Destination) async -> [PlannedSession]
     func archivePlan(for session: Session) async throws -> Plan
     /// The first `limit` messages of the conversation, for display only. Values of `findings`
     /// in the transcript are replaced by their masked previews before anything is parsed.
@@ -69,6 +85,20 @@ extension AgentAdapter {
     /// The first `limit` messages, unmasked.
     public func transcript(of session: Session, limit: Int) async throws -> Transcript {
         try await transcript(of: session, limit: limit, masking: [])
+    }
+
+    /// One plan at a time. Adapters whose plans read shared files override this to read them
+    /// once per batch.
+    public func deletePlans(for sessions: [Session], destination: Destination) async -> [PlannedSession] {
+        var planned: [PlannedSession] = []
+        for session in sessions {
+            do {
+                planned.append(PlannedSession(session: session, result: .success(try await deletePlan(for: session, destination: destination))))
+            } catch {
+                planned.append(PlannedSession(session: session, result: .failure(error)))
+            }
+        }
+        return planned
     }
 
     /// Delete plan with the default, reversible destination.
