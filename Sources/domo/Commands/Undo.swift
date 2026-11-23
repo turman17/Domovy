@@ -15,7 +15,8 @@ struct Undo: AsyncParsableCommand {
         do {
             if list {
                 let entries = try executor.undoLog.entries()
-                guard !entries.isEmpty else {
+                let records = ProcessActionLog(storeRoot: executor.storeRoot).records()
+                guard !entries.isEmpty || !records.isEmpty else {
                     print("No undo entries.")
                     return
                 }
@@ -29,7 +30,15 @@ struct Undo: AsyncParsableCommand {
                         e.isUndone ? "undone" : e.originalsPurgedAt != nil ? "purged" : e.irreversible ? "permanent" : (e.failure == nil ? "done" : "partial"),
                     ]
                 }
-                print(Format.table(rows, header: ["ENTRY", "WHEN", "AGENT", "SESSION", "CHANGES", "STATE"]))
+                if !rows.isEmpty { print(Format.table(rows, header: ["ENTRY", "WHEN", "AGENT", "SESSION", "CHANGES", "STATE"])) }
+                if !records.isEmpty {
+                    // Records only: Resume reverts a freeze; a quit cannot be undone.
+                    let processRows = records.map { r in
+                        [Format.relative(r.date), r.action.title.lowercased(), r.agent?.displayName ?? "unknown", "\(r.rootName) (pid \(r.rootPID))", r.summary]
+                    }
+                    print((rows.isEmpty ? "" : "\nProcess actions (records; not undone by `domo undo`):\n")
+                          + Format.table(processRows, header: ["WHEN", "ACTION", "AGENT", "PROCESS", "RESULT"]))
+                }
                 return
             }
             for entry in try executor.undoLatestBatch() {

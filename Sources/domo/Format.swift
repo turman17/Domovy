@@ -10,6 +10,30 @@ enum Format {
         return formatter.string(fromByteCount: count)
     }
 
+    /// Memory sizes count in binary units, as Activity Monitor does.
+    static func memory(_ count: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: count, countStyle: .memory)
+    }
+
+    static func state(_ node: ProcessNode) -> String {
+        var parts: [String] = []
+        if node.isFrozen { parts.append("frozen") }
+        if node.isOrphan { parts.append("orphan") }
+        if node.isGrowing { parts.append("growing" + (node.growthBytes.map { " +\(memory($0))" } ?? "")) }
+        if node.refusal != nil, parts.isEmpty { parts.append("protected") }
+        return parts.isEmpty ? "running" : parts.joined(separator: ", ")
+    }
+
+    static func processPlan(_ plan: ProcessActionPlan) -> String {
+        var lines = ["\(plan.action.title) \(plan.rootName)", ""]
+        for target in plan.targets {
+            lines.append("  \(String(target.pid).padding(toLength: 8, withPad: " ", startingAt: 0)) \((target.footprintBytes.map(memory) ?? "–").padding(toLength: 10, withPad: " ", startingAt: 0)) \(target.name)")
+        }
+        lines.append("")
+        lines.append(plan.summary)
+        return lines.joined(separator: "\n")
+    }
+
     static func relative(_ date: Date, now: Date = Date()) -> String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
