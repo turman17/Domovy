@@ -37,6 +37,9 @@ struct SessionsView: View {
     @State private var redactRequest: RedactRequest?
     @State private var purgeRequest: PurgeRequest?
     @State private var showsFlaggedOnly = false
+    /// The popover's filter for a moment after it arrives, so the sidebar switch it causes
+    /// does not reset it.
+    @State private var requestedFilter: StatusFilter?
     @State private var errorMessage: String?
 
     /// Every session as a row, text formatted once per reload or scan, so scrolling draws
@@ -186,10 +189,21 @@ struct SessionsView: View {
                 library.actionError = nil
             }
         }
+        .onChange(of: agentFilter) {
+            // A filter left over from another agent's "Review" would show an empty table,
+            // unless the popover asked for this filter as it switched the sidebar.
+            statusFilter = requestedFilter ?? .all
+            showsFlaggedOnly = false
+        }
         .onChange(of: library.requestedFilter) { _, requested in
             if let requested {
-                statusFilter = requested
                 library.requestedFilter = nil
+                statusFilter = requested
+                requestedFilter = requested
+                Task {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    requestedFilter = nil
+                }
             }
         }
         .task(id: library.toast?.id) {
@@ -444,6 +458,19 @@ struct SessionsView: View {
         return "Move this session to the Trash (⌘⌫)"
     }
 
+    /// "No Antigravity sessions expire soon": what the filters left out, in plain words.
+    private var filteredEmptyTitle: String {
+        let agent = agentFilter.map { "\($0.displayName) " } ?? ""
+        if showsFlaggedOnly { return "Nothing flagged by the secret scan" }
+        return switch statusFilter {
+        case .all: "No \(agent)sessions"
+        case .idle: "No idle \(agent)sessions"
+        case .live: "No \(agent)sessions are live"
+        case .expiring: "No \(agent)sessions expire soon"
+        case .archived: "No archived \(agent)sessions"
+        }
+    }
+
     @ViewBuilder
     private var emptyState: some View {
         if library.sessions.isEmpty && !library.isLoading {
@@ -453,7 +480,18 @@ struct SessionsView: View {
                 description: Text(library.errorMessage ?? "No agent sessions in this home folder. The house is in order.")
             )
         } else if rows.isEmpty && !library.isLoading {
-            ContentUnavailableView.search(text: search.isEmpty ? statusFilter.rawValue : search)
+            if !search.isEmpty {
+                ContentUnavailableView.search(text: search)
+            } else {
+                ContentUnavailableView {
+                    Label(filteredEmptyTitle, systemImage: "line.3.horizontal.decrease.circle")
+                } actions: {
+                    Button("Show All Sessions") {
+                        statusFilter = .all
+                        showsFlaggedOnly = false
+                    }
+                }
+            }
         }
     }
 
