@@ -235,4 +235,6 @@ DomovyCore        Swift package, no UI
 - [ ] libproc API for open file handles per path, without root.
 - [ ] Does APFS compression of a `.jsonl` file survive Claude Code appending to it? It decompresses on write, which is fine for cold sessions only.
 - [ ] Codex screenshot duplicates and Cursor `.pack` files: no sources yet.
+- [x] Ollama store and Hugging Face hub cache layouts, taken from a real install (verified 2026-11-23; see docs/research/agent_storage_formats.md).
+- [ ] LM Studio model layout and process names; `hf cache rm` / `hf cache prune` argument forms; the Ollama server's process name and `ollama ps` output while a model is loaded.
 - [x] Name: Domovy (домовий, the Ukrainian house spirit who keeps the home in order). CLI: `domo`.
