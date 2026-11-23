@@ -74,11 +74,12 @@ struct DeletePlanSheet: View {
                     )
                 }
             }
-            if !plan.indexEdits.isEmpty {
+            if !plan.indexEdits.isEmpty || !plan.registryRemovals.isEmpty {
                 Section("Index entries · edited in place, backup kept") {
                     ForEach(plan.indexEdits, id: \.file) { edit in
                         ChangeRow(symbol: "list.bullet.rectangle", path: relativePath(edit.file, under: root), note: edit.note, size: "–")
                     }
+                    RegistryRemovalRows(removals: plan.registryRemovals)
                 }
             }
         }
@@ -123,6 +124,22 @@ struct DeletePlanSheet: View {
                 failure = error.localizedDescription
                 isExecuting = false
             }
+        }
+    }
+}
+
+/// Claude Desktop registry entries a plan removes, with their path under Application Support.
+struct RegistryRemovalRows: View {
+    let removals: [RegistryRemoval]
+
+    var body: some View {
+        ForEach(removals, id: \.file) { removal in
+            ChangeRow(
+                symbol: "macwindow",
+                path: "Claude/" + relativePath(removal.file, under: removal.file.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()),
+                note: removal.note,
+                size: removal.sizeBytes.formatted(.byteCount(style: .file))
+            )
         }
     }
 }
@@ -206,6 +223,7 @@ struct LiveCheckRow: View {
         if result.checkedSignals.contains("daemon/roster.json") { parts.append("not in Claude's session roster") }
         if result.checkedSignals.contains("thread-writer-locks") { parts.append("Codex does not have it open") }
         if result.checkedSignals.contains("Codex processes") { parts.append("Codex is not running") }
+        if result.checkedSignals.contains("Claude Desktop processes") { parts.append("Claude Desktop is not running") }
         return parts.joined(separator: ", ") + ". Checked just now."
     }
 

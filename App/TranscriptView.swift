@@ -17,6 +17,12 @@ struct TranscriptView: View {
                     ForEach(transcript.messages) { message in
                         MessageView(message: message)
                     }
+                    if transcript.hiddenLineCount > 0 {
+                        Label("\(transcript.hiddenLineCount) \(transcript.hiddenLineCount == 1 ? "line is" : "lines are") hidden: \(transcript.hiddenLineCount == 1 ? "it holds" : "they hold") a possible secret Domovy cannot mask.", systemImage: "key")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
                     if transcript.isTruncated {
                         Text("Showing the first \(transcript.messages.count) messages.")
                             .font(.caption)
@@ -41,7 +47,8 @@ struct TranscriptView: View {
             }
             .padding(16)
         }
-        .task(id: session.id) {
+        // Read again when a scan finds or clears secrets, so the masks follow the findings.
+        .task(id: "\(session.id)#\(library.findings(for: session).map(\.id).joined(separator: ","))") {
             transcript = nil
             failure = nil
             do {

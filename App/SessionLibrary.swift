@@ -75,6 +75,8 @@ final class SessionLibrary {
     var secretScanTask: Task<Void, Never>?
     /// Actions on the undo stack, so a purge can take the ones it ended off it.
     var registeredUndoActions: [UndoAction] = []
+    /// Orphans and duplicates of Claude Code and Claude Desktop, for the Disk screen.
+    var orphanReport: OrphanReport = .empty
 
     let claudeCode: ClaudeCodeAdapter
     let codex: CodexAdapter
@@ -153,7 +155,10 @@ final class SessionLibrary {
                 failures.append(error.localizedDescription)
             }
         }
+        let claudeCode = self.claudeCode
+        let orphans = Task.detached { await claudeCode.orphanReport() }
         let measured = await measuring.value
+        orphanReport = await orphans.value
         failures += measured.failures
         sessions = found.sorted { $0.lastActive > $1.lastActive }
         footprints = measured.footprints
@@ -162,8 +167,9 @@ final class SessionLibrary {
         lastScan = Date()
     }
 
+    /// The conversation for the preview, with the values of scan findings masked.
     func transcript(of session: Session) async throws -> Transcript {
-        try await adapter(for: session.agent).transcript(of: session, limit: 200)
+        try await adapter(for: session.agent).transcript(of: session, limit: 200, masking: findings(for: session))
     }
 
     func artifacts(of session: Session) async throws -> [Artifact] {
@@ -238,7 +244,12 @@ final class SessionLibrary {
             try action.entries.reversed().filter { !$0.isUndone }.map { try executor.undo($0) }
         }.value
         let titles = Set(restored.map(\.sessionID)).compactMap { id in sessions.first { $0.id == id }?.displayTitle }
-        let what = titles.count == 1 ? "\u{201C}\(titles[0])\u{201D}" : "\(restored.count) sessions"
+        let what: String
+        if let scope = restored.first.flatMap({ OrphanScope(rawValue: $0.sessionID) }) {
+            what = scope == .orphans ? "the orphans" : "the duplicates"
+        } else {
+            what = titles.count == 1 ? "\u{201C}\(titles[0])\u{201D}" : "\(restored.count) sessions"
+        }
         let verb = switch action.entries.first?.action {
         case .archive: "Decompressed"
         case .redact: "Put back the original of"
@@ -278,6 +289,12 @@ final class SessionLibrary {
 
 extension Session {
     var displayTitle: String { title ?? "Untitled session" }
+
+    /// "Also in Claude Desktop's session list (archived there)."
+    var desktopHelp: String? {
+        guard let desktop else { return nil }
+        return "Also in Claude Desktop's session list" + (desktop.isArchived ? ", archived there." : ".")
+    }
     var sortProject: String { projectName ?? "" }
 
     /// Whole days until the agent's sweep, for the status column and warnings.

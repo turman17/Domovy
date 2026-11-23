@@ -88,3 +88,27 @@ if [ ! -f "$DEV/.secrets-seeded" ]; then
   age 2 "$A"; age 26 "$C"; age 2 "$X"
   touch "$DEV/.secrets-seeded"
 fi
+if [ ! -f "$DEV/.desktop-seeded" ]; then
+  # Claude Desktop registry with the verified layout: a linked session, an entry whose
+  # transcript is gone, a doubled entry, and a conversation Desktop continued under a new id.
+  REG="$SUPPORT/Claude/claude-code-sessions"
+  rm -rf "$REG"
+  cp -Rp "$ROOT/Tests/Fixtures/claude-desktop/1.0/claude-code-sessions" "$REG"
+  E="$REG/3f6e1a2b-0c4d-4e5f-8a9b-1c2d3e4f5a6b/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+  PRIOR="99999999-9999-4999-8999-999999999999"
+  sed "s/\"priorCliSessionIds\": \[\]/\"priorCliSessionIds\": [\"$PRIOR\"]/" "$E/local_5e1d2f3a-0000-4000-8000-000000000001.json" > "$E/tmp.json"
+  mv "$E/tmp.json" "$E/local_5e1d2f3a-0000-4000-8000-000000000001.json"
+  P="$DEV/.claude/projects/-Users-dev-code-orbit-api"
+  head -n 4 "$P/aaaaaaaa-1111-4111-8111-111111111111.jsonl" | sed "s/aaaaaaaa-1111-4111-8111-111111111111/$PRIOR/g" > "$P/$PRIOR.jsonl"
+  age() { touch -t "$(date -v-"$1"d +%Y%m%d%H%M)" "$2"; }
+  for f in "$E"/local_*.json; do age 2 "$f"; done
+  age 1 "$E/local_5e1d2f3a-0000-4000-8000-000000000003.json"
+  age 6 "$P/$PRIOR.jsonl"
+  age 9 "$P/aaaaaaaa-1111-4111-8111-111111111111.orphaned-20261101-x7q2k.jsonl"
+  age 9 "$P/aaaaaaaa-1111-4111-8111-111111111111.jsonl.superseded-20261101-120000"
+  # A prompt with a synthetic key in history.jsonl, for the history scan.
+  OAI="sk-""proj-FAKEa1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuV"
+  H="$DEV/.claude/history.jsonl"
+  printf '%s\n' "{\"display\":\"Run the evals with $OAI\",\"pastedContents\":{},\"timestamp\":1763629300000,\"project\":\"/Users/dev/code/orbit-api\",\"sessionId\":\"aaaaaaaa-1111-4111-8111-111111111111\"}" >> "$H"
+  touch "$DEV/.desktop-seeded"
+fi

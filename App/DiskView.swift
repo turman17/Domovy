@@ -3,12 +3,15 @@ import DomovyCore
 import SwiftUI
 
 /// Disk: where every agent's bytes are, each category marked safe / consequences / keep.
-/// Read-only in this version: rows reveal files in Finder or lead to the Sessions list.
+/// Rows reveal files in Finder or lead to the Sessions list; orphans and duplicates have a
+/// cleanup plan of their own.
 struct DiskView: View {
     /// Switches the sidebar to Sessions, filtered by this agent.
     let onOpenSessions: (AgentKind) -> Void
 
     @Environment(SessionLibrary.self) private var library
+    @State private var orphanRequest: OrphanRequest?
+    @State private var errorMessage: String?
 
     /// Largest agent first, matching the breakdown bar and its legend.
     private var ordered: [Footprint] {
@@ -29,8 +32,11 @@ struct DiskView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 24) {
                         breakdown
+                        if !library.orphanReport.isEmpty {
+                            OrphansSection(report: library.orphanReport, onCleanUp: requestCleanUp)
+                        }
                         ForEach(ordered, id: \.agent) { footprint in
-                            AgentFootprintSection(footprint: footprint, onOpenSessions: onOpenSessions)
+                            AgentFootprintSection(footprint: footprint, onOpenSessions: onOpenSessions, onCleanUp: { requestCleanUp(.orphans) })
                         }
                     }
                     .padding(.horizontal, 24)
@@ -40,6 +46,50 @@ struct DiskView: View {
         }
         .navigationTitle("Disk")
         .navigationSubtitle(library.footprints.isEmpty ? "" : subtitle)
+        .overlay(alignment: .bottom) { toastOverlay }
+        .sheet(item: $orphanRequest) { request in
+            OrphanPlanSheet(request: request)
+        }
+        .alert("Something went wrong", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "")
+        }
+        .task(id: library.toast?.id) {
+            guard library.toast != nil else { return }
+            try? await Task.sleep(for: .seconds(8))
+            withAnimation { library.toast = nil }
+        }
+    }
+
+    /// Plans first, then the confirmation sheet.
+    private func requestCleanUp(_ scope: OrphanScope) {
+        Task {
+            do {
+                let plan = try await library.orphanPlan(scope, destination: .trash)
+                guard !plan.isEmpty else {
+                    errorMessage = plan.remarks.first ?? "Nothing to clean up: \(scope == .orphans ? library.orphanReport.orphanSummary : library.orphanReport.duplicateSummary)"
+                    return
+                }
+                orphanRequest = OrphanRequest(scope: scope, plan: plan)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var toastOverlay: some View {
+        if let toast = library.toast {
+            UndoToast(toast: toast) {
+                Task {
+                    guard let action = toast.undo else { return }
+                    do { try await library.undo(action) } catch { errorMessage = error.localizedDescription }
+                }
+            }
+            .padding(.bottom, 16)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 
     private var breakdown: some View {
@@ -83,6 +133,7 @@ struct DiskView: View {
 private struct AgentFootprintSection: View {
     let footprint: Footprint
     let onOpenSessions: (AgentKind) -> Void
+    let onCleanUp: () -> Void
 
     /// Removable categories first, largest first; what the agent needs comes last.
     private var rows: [Footprint.Category] {
@@ -108,7 +159,7 @@ private struct AgentFootprintSection: View {
             VStack(spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, category in
                     if index > 0 { Divider() }
-                    CategoryRow(category: category, agent: footprint.agent, onOpenSessions: onOpenSessions)
+                    CategoryRow(category: category, agent: footprint.agent, onOpenSessions: onOpenSessions, onCleanUp: onCleanUp)
                 }
             }
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
@@ -121,6 +172,7 @@ private struct CategoryRow: View {
     let category: Footprint.Category
     let agent: AgentKind
     let onOpenSessions: (AgentKind) -> Void
+    let onCleanUp: () -> Void
 
     private var instructions: String? {
         if case .instructions(let text) = category.guidance { return text }
@@ -169,6 +221,10 @@ private struct CategoryRow: View {
         if category.guidance == .manageInSessions {
             Button("Open Sessions") { onOpenSessions(agent) }
                 .help("Delete or archive \(agent.displayName) sessions one by one")
+        } else if category.guidance == .cleanUpOrphans {
+            Button("Clean Up\u{2026}", action: onCleanUp)
+                .buttonStyle(.borderedProminent)
+                .help("Shows every folder first. Moves them to the Trash; you can undo this.")
         } else {
             Button("Show in Finder", action: reveal)
                 .help((category.url.path as NSString).abbreviatingWithTildeInPath)

@@ -158,13 +158,15 @@ struct SessionsView: View {
         Table(visible, selection: $selection, sortOrder: $sortOrder) {
             TableColumn("Title", value: \.displayTitle) { Text($0.displayTitle).lineLimit(1) }
                 .width(min: 180, ideal: 320)
-            TableColumn("Agent", value: \.agent.displayName) { session in
+            TableColumn("Agent", value: \.agentLabel) { session in
                 HStack(spacing: 6) {
                     AgentGlyph(agent: session.agent)
-                    Text(session.agent.displayName)
+                    Text(session.agentLabel)
+                        .lineLimit(1)
                 }
+                .help(session.desktopHelp ?? session.agent.displayName)
             }
-            .width(min: 100, ideal: 120)
+            .width(min: 100, ideal: 150)
             TableColumn("Project", value: \.sortProject) { Text($0.projectName ?? "—").foregroundStyle(.secondary) }
                 .width(min: 80, ideal: 100)
             TableColumn("Last active", value: \.lastActive) { RelativeDateText(date: $0.lastActive).foregroundStyle(.secondary) }

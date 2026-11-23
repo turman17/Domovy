@@ -76,6 +76,12 @@ struct SessionInspector: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .help("\(session.sizeBytes.formatted()) bytes")
+            if let desktop = session.desktop {
+                Label(desktop.isArchived ? "In Claude Desktop, archived there" : "In Claude Desktop's session list", systemImage: "macwindow")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("Deleting this session also takes it off Claude Desktop's list. Claude Desktop must be quit for that.")
+            }
         }
     }
 
