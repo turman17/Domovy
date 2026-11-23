@@ -17,6 +17,10 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
     public let copiesBeforeRun: [URL]
     /// Index lines the command removes. Domovy records them first, so undo can reinsert them.
     public let indexLinesBeforeRun: [IndexEdit]
+    /// Files the command rewrites in place, such as OpenCode's `opencode.db` with its `-wal` and
+    /// `-shm`. Domovy clones them first; undo puts the clones back only while the files are
+    /// exactly as the command left them, because anything written since would be lost.
+    public let snapshotsBeforeRun: [URL]
     /// Checked after the command; whatever is still there is reported as a leftover.
     public let verifications: [Verification]
     /// Logical bytes the command removes or moves.
@@ -35,6 +39,7 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
         note: String,
         copiesBeforeRun: [URL] = [],
         indexLinesBeforeRun: [IndexEdit] = [],
+        snapshotsBeforeRun: [URL] = [],
         verifications: [Verification] = [],
         sizeBytes: Int64 = 0,
         undo: [PlannedCommand] = [],
@@ -47,6 +52,7 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
         self.note = note
         self.copiesBeforeRun = copiesBeforeRun
         self.indexLinesBeforeRun = indexLinesBeforeRun
+        self.snapshotsBeforeRun = snapshotsBeforeRun
         self.verifications = verifications
         self.sizeBytes = sizeBytes
         self.undo = undo
@@ -61,7 +67,7 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
 
 extension PlannedCommand {
     private enum CodingKeys: String, CodingKey {
-        case executable, arguments, environment, workingDirectory, note, copiesBeforeRun, indexLinesBeforeRun, verifications, sizeBytes, undo, isPermanent
+        case executable, arguments, environment, workingDirectory, note, copiesBeforeRun, indexLinesBeforeRun, snapshotsBeforeRun, verifications, sizeBytes, undo, isPermanent
     }
 
     /// Undo entries written before `isPermanent` existed decode as reversible.
@@ -75,6 +81,7 @@ extension PlannedCommand {
             note: try c.decode(String.self, forKey: .note),
             copiesBeforeRun: try c.decodeIfPresent([URL].self, forKey: .copiesBeforeRun) ?? [],
             indexLinesBeforeRun: try c.decodeIfPresent([IndexEdit].self, forKey: .indexLinesBeforeRun) ?? [],
+            snapshotsBeforeRun: try c.decodeIfPresent([URL].self, forKey: .snapshotsBeforeRun) ?? [],
             verifications: try c.decodeIfPresent([Verification].self, forKey: .verifications) ?? [],
             sizeBytes: try c.decodeIfPresent(Int64.self, forKey: .sizeBytes) ?? 0,
             undo: try c.decodeIfPresent([PlannedCommand].self, forKey: .undo) ?? [],

@@ -124,6 +124,13 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     public var secretFindingCount = 0
     /// Consequences the user should know before confirming ("3 rows stay in state_5.sqlite").
     public let remarks: [String]
+    /// A consequence the user must accept explicitly before the plan runs, e.g. that undo
+    /// stops working once OpenCode writes to its database again. The executor refuses the plan
+    /// until `isAcknowledged` is set.
+    public let acknowledgement: String?
+    /// Set by the caller once the user accepted `acknowledgement` (a checkbox in the sheet,
+    /// `--accept-limited-undo` in the CLI).
+    public var isAcknowledged = false
     /// Apps that must not run while this plan executes; the executor checks again right before.
     public let mustNotBeRunning: [ProcessMatcher]
     public let liveCheck: LiveCheckResult
@@ -143,6 +150,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         redactions: [FileRedaction] = [],
         skippedSecrets: [SkippedSecret] = [],
         remarks: [String] = [],
+        acknowledgement: String? = nil,
         mustNotBeRunning: [ProcessMatcher] = [],
         liveCheck: LiveCheckResult
     ) {
@@ -160,6 +168,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         self.redactions = redactions
         self.skippedSecrets = skippedSecrets
         self.remarks = remarks
+        self.acknowledgement = acknowledgement
         self.mustNotBeRunning = mustNotBeRunning
         self.liveCheck = liveCheck
     }
@@ -179,6 +188,11 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     /// space comes back only once that copy is purged.
     public var keepsToolCopies: Bool {
         commands.contains { !Executor.filesToKeep($0).isEmpty }
+    }
+
+    /// The user still has to accept `acknowledgement` before the plan may run.
+    public var needsAcknowledgement: Bool {
+        acknowledgement != nil && !isAcknowledged
     }
 
     public var isEmpty: Bool {
@@ -231,7 +245,8 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         guard !parts.isEmpty || !commands.isEmpty else { return remarks.first ?? "Nothing to do." }
         let rest = parts.isEmpty ? "" : parts.joined(separator: " and ") + ". "
         let prefix = commandText.isEmpty ? "" : commandText + " "
-        return prefix + rest.prefix(1).uppercased() + rest.dropFirst() + "You can undo this."
+        let undo = acknowledgement == nil ? "You can undo this." : "You can undo this only until \(agent.displayName) changes its files again."
+        return prefix + rest.prefix(1).uppercased() + rest.dropFirst() + undo
     }
 
     /// The quarantine sentence is required wording: the user must know the plaintext stays.

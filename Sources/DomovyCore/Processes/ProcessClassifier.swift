@@ -39,11 +39,18 @@ enum ProcessClassifier {
         if AntigravityAdapter.processMatcher.matches(name) { return .antigravity }
         // `gemini`, lowercase only: Google's `Gemini` chat app is not Gemini CLI.
         if name == "gemini" { return .gemini }
+        // The installed OpenCode binary is `opencode` (verified, 1.18.30).
+        if lower == "opencode" { return .openCode }
+        // Copilot CLI's native binary, lowercase only (assumed).
+        if name == "copilot" { return .copilot }
         guard interpreters.contains(lower), let arguments = arguments() else { return nil }
         // Claude Code installed with npm runs as `node …/@anthropic-ai/claude-code/cli.js`.
         if arguments.contains(where: { $0.contains("@anthropic-ai/claude-code") }) { return .claudeCode }
         // Gemini CLI runs as `node …/@google/gemini-cli/bundle/gemini.js` (verified, Homebrew).
         if arguments.contains(where: { $0.contains("@google/gemini-cli") }) { return .gemini }
+        // npm installs, both assumed: `node …/opencode-ai/…` and `node …/@github/copilot/…`.
+        if arguments.contains(where: { $0.contains("/opencode-ai/") }) { return .openCode }
+        if arguments.contains(where: { $0.contains("@github/copilot") }) { return .copilot }
         return nil
     }
 
@@ -56,6 +63,8 @@ enum ProcessClassifier {
         if path.contains("/.cursor/") || path.contains("/Cursor.app/") { return .cursor }
         if path.contains("/.gemini/antigravity") || path.contains("/Antigravity.app/") { return .antigravity }
         if path.contains("/.gemini/") || path.contains("/gemini-cli/") { return .gemini }
+        if path.contains("/.opencode/") || path.contains("/.local/share/opencode/") || path.contains("/opencode-ai/") { return .openCode }
+        if path.contains("/.copilot/") || path.contains("/@github/copilot/") { return .copilot }
         return nil
     }
 

@@ -37,6 +37,9 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
     /// Why an expiring session is at risk when the agent's rule is not a date, e.g.
     /// "Antigravity keeps the newest 500 conversations; this is number 487."
     public let retentionNote: String?
+    /// Chats shown as this one row: Gemini CLI's a2a server writes hundreds of empty chats under
+    /// one session id. 1 for an ordinary session.
+    public let memberCount: Int
 
     public init(
         id: String,
@@ -50,7 +53,8 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         transcriptURL: URL,
         isArchived: Bool = false,
         desktop: DesktopLink? = nil,
-        retentionNote: String? = nil
+        retentionNote: String? = nil,
+        memberCount: Int = 1
     ) {
         self.id = id
         self.agent = agent
@@ -64,6 +68,7 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         self.isArchived = isArchived
         self.desktop = desktop
         self.retentionNote = retentionNote
+        self.memberCount = memberCount
     }
 
     /// "Claude Code · Desktop" when Claude Desktop lists the session too.

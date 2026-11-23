@@ -2,14 +2,14 @@ import DomovyCore
 import Foundation
 
 /// A throwaway home with `.gemini` copied from `Tests/Fixtures/gemini/<version>/`, real project
-/// folders under `<base>/code` (Gemini CLI runs from them), and the stub CLI at `<base>/bin/gemini`.
+/// folders under `<base>/code`. Domovy never runs Gemini CLI, so there is no stub.
 final class GeminiFixtureHome: Sendable {
     enum IDs {
         static let idle = "e1e1e1e1-1111-4111-8111-111111111111"
         static let digit = "7d7d7d7d-2222-4222-8222-222222222222"
         static let old = "e3e3e3e3-3333-4333-8333-333333333333"
-        /// Gemini CLI's a2a server reuses one id; Domovy appends the chat's time.
-        static let a2aFirst = "a2a-server-2026-11-18t07-44"
+        /// Gemini CLI's a2a server reuses one id for empty chats; Domovy shows them as one row.
+        static let a2aGroup = "a2a-server-empty"
     }
 
     static let idleChat = "tmp/orbit-api/chats/session-2026-11-20T09-15-e1e1e1e1.jsonl"
@@ -20,7 +20,6 @@ final class GeminiFixtureHome: Sendable {
 
     let home: URL
     let storeRoot: URL
-    let stub: URL
     /// `<base>/code/orbit-api`, the project the orbit-api chats belong to.
     let project: URL
     var geminiDirectory: URL { home.appendingPathComponent(".gemini", isDirectory: true) }
@@ -30,7 +29,6 @@ final class GeminiFixtureHome: Sendable {
         let base = fm.temporaryDirectory.appendingPathComponent("domovy-gemini-tests-\(UUID().uuidString)", isDirectory: true)
         home = base.appendingPathComponent("home", isDirectory: true)
         storeRoot = base.appendingPathComponent("store", isDirectory: true)
-        stub = base.appendingPathComponent("bin/gemini")
         project = base.appendingPathComponent("code/orbit-api", isDirectory: true)
         try fm.createDirectory(at: home, withIntermediateDirectories: true)
         let fixtures = FixtureHome.fixturesRoot.appendingPathComponent("gemini", isDirectory: true)
@@ -43,9 +41,6 @@ final class GeminiFixtureHome: Sendable {
             let text = try String(contentsOf: url(file), encoding: .utf8).replacingOccurrences(of: "/Users/dev/code", with: code)
             try text.write(to: url(file), atomically: true, encoding: .utf8)
         }
-        try fm.createDirectory(at: stub.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try fm.copyItem(at: fixtures.appendingPathComponent("stub-gemini.sh"), to: stub)
-        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
 
         let day: TimeInterval = 86_400
         try setDate(Self.idleChat, now.addingTimeInterval(-2 * day))
@@ -58,15 +53,14 @@ final class GeminiFixtureHome: Sendable {
         try? FileManager.default.removeItem(at: home.deletingLastPathComponent())
     }
 
-    /// Deterministic: no libproc, no running Gemini CLI, the stub CLI unless told otherwise.
+    /// Deterministic: no libproc, no running Gemini CLI.
     func adapter(
-        cli: ToolChoice? = nil,
         openHandles: any OpenHandleChecker = UnavailableOpenHandleChecker(),
         running: [RunningProcess]? = [],
         arguments: [Int32: [String]] = [:],
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> GeminiAdapter {
-        GeminiAdapter(geminiHome: geminiDirectory, cli: cli ?? .executable(stub), openHandles: openHandles,
+        GeminiAdapter(geminiHome: geminiDirectory, openHandles: openHandles,
                       processes: FixedProcessLister(running, arguments: arguments), now: now)
     }
 
@@ -88,10 +82,6 @@ final class GeminiFixtureHome: Sendable {
 
     func setDate(_ relative: String, _ date: Date) throws {
         try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: url(relative).path)
-    }
-
-    func stubInvocations() -> [String] {
-        ((try? String(contentsOf: url(".stub-gemini.log"), encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
     }
 }
 

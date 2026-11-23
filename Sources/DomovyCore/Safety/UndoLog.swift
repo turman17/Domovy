@@ -69,6 +69,23 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
         public let modificationTime: FileTime?
     }
 
+    /// A file an agent command rewrote in place (OpenCode's `opencode.db`), cloned before it ran.
+    /// Undo puts the clone back only while the file is exactly as the command left it.
+    public struct SnapshotItem: Codable, Sendable, Hashable {
+        public let original: URL
+        /// The clone in the quarantine; `nil` when the file did not exist before the command.
+        public let copy: URL?
+        /// Modes and times of the original before the command.
+        public let metadata: [KeptFileMetadata]
+        /// The file before the command, to tell whether the command changed anything.
+        public let before: FileFingerprint?
+        /// The file right after the command; `nil` when it left none.
+        public var after: FileFingerprint?
+        /// Compared on undo. SQLite's `-shm` index changes whenever anything reads the database,
+        /// so it is put back but never compared.
+        public let isCompared: Bool
+    }
+
     public let id: UUID
     public let createdAt: Date
     public let planID: UUID
@@ -102,6 +119,8 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
     public var irreversible = false
     /// Things the user should know about how it ran, e.g. a full copy instead of a clone.
     public var notes: [String] = []
+    /// Files an agent command rewrote in place, with the clones taken before it ran.
+    public var snapshots: [SnapshotItem] = []
 
     public var isUndone: Bool { undoneAt != nil }
     /// Still pending and its files are still there to put back.
@@ -112,7 +131,7 @@ extension UndoEntry {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, planID, batchID, action, agent, sessionID, destination
         case moved, indexRestores, compressed, undoCommands, mustNotBeRunning, leftovers, undoneAt, failure
-        case redacted, secretFindingCount, originalsPurgedAt, registryRestores, irreversible, notes
+        case redacted, secretFindingCount, originalsPurgedAt, registryRestores, irreversible, notes, snapshots
     }
 
     /// Entries written by older versions lack the newer fields; they decode with empty defaults.
@@ -142,6 +161,7 @@ extension UndoEntry {
         registryRestores = try c.decodeIfPresent([RegistryRestore].self, forKey: .registryRestores) ?? []
         irreversible = try c.decodeIfPresent(Bool.self, forKey: .irreversible) ?? false
         notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
+        snapshots = try c.decodeIfPresent([SnapshotItem].self, forKey: .snapshots) ?? []
     }
 }
 

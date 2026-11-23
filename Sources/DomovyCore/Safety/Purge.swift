@@ -48,7 +48,16 @@ extension Executor {
     /// Computing the plan changes nothing.
     public func purgePlan(_ reasons: Set<PurgeItem.Reason> = Set(PurgeItem.Reason.allCases)) throws -> PurgePlan {
         var items: [PurgeItem] = []
-        for entry in try undoLog.entries() where entry.isUndoable {
+        for entry in try undoLog.entries() {
+            // Database copies of an entry whose undo is no longer possible still take space.
+            if reasons.contains(.toolCopy), entry.undoneAt == nil, entry.originalsPurgedAt == nil {
+                for item in entry.snapshots {
+                    guard let copy = item.copy, isInQuarantine(copy), FileSystem.itemExists(copy) else { continue }
+                    items.append(PurgeItem(entryID: entry.id, agent: entry.agent, sessionID: entry.sessionID, file: copy,
+                                           originalPath: item.original, sizeBytes: FileSystem.size(of: copy), reason: .toolCopy))
+                }
+            }
+            guard entry.isUndoable else { continue }
             if reasons.contains(.redactedOriginal), entry.action == .redact {
                 for item in entry.redacted where isInQuarantine(item.original) && FileSystem.exists(item.original) {
                     items.append(PurgeItem(entryID: entry.id, agent: entry.agent, sessionID: entry.sessionID, file: item.original,

@@ -1,0 +1,3 @@
+{"type":"session.start","data":{"sessionId":"c0c0c0c0-1111-4111-8111-111111111111","version":1,"producer":"copilot-agent","copilotVersion":"0.0.360","startTime":"2026-11-20T09:15:00.000Z","context":{"cwd":"/Users/dev/code/orbit-api","gitRoot":"/Users/dev/code/orbit-api","branch":"main"}},"id":"e1","timestamp":"2026-11-20T09:15:00.000Z","parentId":null}
+{"type":"user.message","data":{"content":"Write a migration for the uploads table","attachments":[]},"id":"e2","timestamp":"2026-11-20T09:15:05.000Z","parentId":"e1"}
+{"type":"assistant.message","data":{"content":"I'll add a migration that creates the uploads table.","toolRequests":[{"toolCallId":"t1","name":"create","arguments":{}}]},"id":"e3","timestamp":"2026-11-20T09:15:20.000Z","parentId":"e2"}

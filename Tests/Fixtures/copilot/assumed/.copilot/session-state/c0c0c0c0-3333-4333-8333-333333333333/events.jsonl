@@ -1,0 +1,2 @@
+{"type":"session.start","data":{"sessionId":"c0c0c0c0-3333-4333-8333-333333333333","version":1,"startTime":"2026-11-22T08:00:00.000Z","context":{"cwd":"/Users/dev/code/orbit-api"}},"id":"g1","timestamp":"2026-11-22T08:00:00.000Z"}
+{"type":"user.message","data":{"content":"Run the test suite"},"id":"g2","timestamp":"2026-11-22T08:00:02.000Z"}

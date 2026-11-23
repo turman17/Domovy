@@ -56,14 +56,6 @@ struct GeminiLayout: Sendable {
         }
     }
 
-    /// The 8 characters after the last `-` of a chat file name; Gemini CLI deletes every file
-    /// of a project that ends in them.
-    static func shortID(ofChatNamed name: String) -> String? {
-        let stem = name.hasSuffix(".jsonl") ? String(name.dropLast(6)) : name.hasSuffix(".json") ? String(name.dropLast(5)) : name
-        guard let last = stem.split(separator: "-").last, last.count == 8 else { return nil }
-        return String(last)
-    }
-
     /// `2026-06-22T07-44` from `session-2026-06-22T07-44-a2a-serv.jsonl`.
     static func stamp(ofChatNamed name: String) -> String? {
         guard name.hasPrefix("session-") else { return nil }

@@ -17,6 +17,8 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
     case notInQuarantine(URL)
     case copyFailed(URL, command: String, reason: String)
     case nothingToKeep(command: String)
+    case needsAcknowledgement(String)
+    case changedSinceCommand(URL, agent: String)
 
     public var errorDescription: String? {
         switch self {
@@ -52,6 +54,10 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
             "Domovy could not keep a copy of \(url.lastPathComponent) (\(reason)), so it did not run `\(command)`. Nothing was deleted."
         case .nothingToKeep(let command):
             "Domovy does not know which files `\(command)` deletes, so it cannot keep a copy and did not run it."
+        case .needsAcknowledgement(let text):
+            "Nothing was changed: this needs your explicit OK first. \(text)"
+        case .changedSinceCommand(let url, let agent):
+            "\(agent) changed \(url.lastPathComponent) after the delete, so putting the old copy back would lose those changes. This delete can no longer be undone; Domovy's copy stays in its quarantine until you purge it."
         }
     }
 }
@@ -107,6 +113,7 @@ public struct Executor: Sendable {
     private func execute(_ plan: Plan, batchID: UUID?) throws -> UndoEntry {
         guard !plan.liveCheck.isLive else { throw ExecutorError.sessionIsLive(reasons: plan.liveCheck.reasons) }
         guard !plan.isEmpty else { throw ExecutorError.nothingToDo }
+        if plan.needsAcknowledgement, let text = plan.acknowledgement { throw ExecutorError.needsAcknowledgement(text) }
         // Checked again here: the app may have started while the user read the plan.
         let blocking = processes.blockingReasons(plan.mustNotBeRunning)
         guard blocking.isEmpty else { throw ExecutorError.appRunning(reasons: blocking) }
@@ -215,7 +222,15 @@ public struct Executor: Sendable {
     private func run(_ command: PlannedCommand, entry: inout UndoEntry) throws {
         let sessionID = entry.sessionID
         Log.executor.info("Running \(command.executable.lastPathComponent, privacy: .public) \(command.arguments.first ?? "", privacy: .public) for session \(sessionID, privacy: .public)")
-        let copies = try keepCopies(for: command, entry: &entry)
+        try takeSnapshots(for: command, entry: &entry)
+        let copies: [UndoEntry.MovedItem]
+        do {
+            copies = try keepCopies(for: command, entry: &entry)
+        } catch {
+            settleSnapshots(&entry)
+            try? undoLog.write(entry)
+            throw error
+        }
         var captured: [UndoEntry.IndexRestore] = []
         for edit in command.indexLinesBeforeRun where FileSystem.exists(edit.file) {
             if let restore = try snapshotLines(edit, entry: entry) { captured.append(restore) }
@@ -227,6 +242,8 @@ public struct Executor: Sendable {
         } catch {
             result = CommandResult(status: -1, errorOutput: error.localizedDescription)
         }
+        // Whatever the command changed in place, even when it failed, undo can put back.
+        settleSnapshots(&entry)
         guard result.status == 0 else {
             for copy in copies { try? fileManager.removeItem(at: copy.current) }
             entry.failure = "\(command.commandLine) exited with status \(result.status)"
@@ -366,6 +383,18 @@ public struct Executor: Sendable {
             pendingCommands.removeLast()
         }
         entry.undoCommands = []
+
+        // Databases a command rewrote in place, only if nothing wrote to them since.
+        do {
+            try restoreSnapshots(&entry)
+        } catch let error as ExecutorError {
+            if case .changedSinceCommand = error {
+                entry.irreversible = true
+                entry.notes.append(error.localizedDescription)
+            }
+            try undoLog.write(entry)
+            throw error
+        }
 
         // Put files back, last moved first, so parent folders exist before their children.
         var remaining = entry.moved

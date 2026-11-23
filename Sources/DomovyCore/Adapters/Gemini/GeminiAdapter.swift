@@ -2,8 +2,10 @@ import Foundation
 
 /// Adapter for Gemini CLI (`~/.gemini`). One session is one chat file plus what Gemini CLI
 /// keys by its session id: subagent chats, the activity log, tool outputs and the session
-/// folder (plans, task trackers). Delete runs `gemini --delete-session` from the project folder
-/// when that is safe and verifies the result; otherwise files move to the Trash.
+/// folder (plans, task trackers). Delete moves those files to the Trash or the quarantine.
+/// Domovy never runs `gemini --delete-session`: Gemini CLI runs its own retention sweep first,
+/// which deletes other chats for good, and it deletes every chat whose name ends the same way.
+/// Empty chats that share one session id (Gemini CLI's a2a server) are one row.
 public struct GeminiAdapter: AgentAdapter {
     public let kind: AgentKind = .gemini
     public let root: URL
@@ -13,7 +15,6 @@ public struct GeminiAdapter: AgentAdapter {
     let layout: GeminiLayout
     let openHandles: any OpenHandleChecker
     let processes: any RunningProcessLister
-    let cli: GeminiCLIResolver
     let now: @Sendable () -> Date
 
     /// Gemini CLI runs as `node …/@google/gemini-cli/…` (verified for the Homebrew install) or
@@ -25,12 +26,10 @@ public struct GeminiAdapter: AgentAdapter {
 
     /// - Parameters:
     ///   - geminiHome: the `.gemini` folder. Tests pass a copy of a fixture.
-    ///   - cli: which `gemini` delete may run; tests pass a stub, `.none` for the file fallback.
     ///   - openHandles: open-file-handle check; libproc by default.
     ///   - processes: running-Gemini-CLI check before a delete.
     public init(
         geminiHome: URL,
-        cli: ToolChoice = .automatic,
         expiringWindowDays: Int = 7,
         openHandles: any OpenHandleChecker = LibprocOpenHandleChecker(),
         processes: any RunningProcessLister = LibprocProcessLister(),
@@ -41,17 +40,13 @@ public struct GeminiAdapter: AgentAdapter {
         self.expiringWindowDays = expiringWindowDays
         self.openHandles = openHandles
         self.processes = processes
-        self.cli = GeminiCLIResolver(choice: cli)
         self.now = now
     }
 
     /// Convenience for a home directory: `<home>/.gemini`.
-    public init(home: URL, cli: ToolChoice = .automatic) {
-        self.init(geminiHome: home.appendingPathComponent(".gemini", isDirectory: true), cli: cli)
+    public init(home: URL) {
+        self.init(geminiHome: home.appendingPathComponent(".gemini", isDirectory: true))
     }
-
-    /// The `gemini` executable delete plans will run, or `nil` for the file fallback.
-    public var commandLineTool: GeminiCLI? { cli.resolve() }
 
     // MARK: AgentAdapter
 
@@ -64,46 +59,42 @@ public struct GeminiAdapter: AgentAdapter {
         let settings = GeminiSettings.load(from: layout.settings)
         let registry = layout.registry()
         let projects = layout.projectFolders().map { GeminiProject(folder: $0, registry: registry) }
-        let ids = Self.sessionIDs(projects.flatMap(\.chats))
+        let groups = GeminiChatGroup.groups(in: projects)
+        let grouped = Set(groups.flatMap { $0.members.map(\.chat.file) })
+        let ids = Self.sessionIDs(projects.flatMap(\.chats).filter { !grouped.contains($0.file) })
         var result: [Session] = []
         for project in projects {
             let due = project.dueForSweep(settings)
-            for chat in project.chats {
+            for chat in project.chats where !grouped.contains(chat.file) {
                 result.append(await makeSession(chat, id: ids[chat.file] ?? chat.file.lastPathComponent, project: project, settings: settings, due: due[chat.file]))
             }
         }
+        for group in groups { result.append(await makeSession(group, settings: settings)) }
         return result.sorted { $0.lastActive > $1.lastActive }
     }
 
     public func artifacts(of session: Session) async throws -> [Artifact] {
-        let (project, chat) = try locate(session)
-        return collectArtifacts(chat, in: project)
+        switch try locate(session) {
+        case .chat(let project, let chat): collectArtifacts(chat, in: project)
+        case .group(let group): collectArtifacts(group)
+        }
     }
 
     public func liveCheck(_ session: Session) async throws -> LiveCheckResult {
-        let (project, chat) = try locate(session)
-        return await liveness(collectArtifacts(chat, in: project).filter { $0.kind != .indexEntry }.map(\.url))
+        await liveness(try artifacts(of: session).filter { $0.kind != .indexEntry }.map(\.url))
     }
 
+    /// Moves the chat and what Gemini CLI keys by its id (or every chat of a group).
     public func deletePlan(for session: Session, destination: Destination = .trash) async throws -> Plan {
-        let (project, chat) = try locate(session)
+        let target = try locate(session)
         try requireWritable()
-        let artifacts = collectArtifacts(chat, in: project)
-        let files = artifacts.filter { $0.kind != .indexEntry }
+        let files = try await artifacts(of: session).filter { $0.kind != .indexEntry }
         for artifact in files where layout.isProtected(artifact.url) { throw AdapterError.protectedPathInPlan(artifact.url) }
         let live = await planCheck(files.map(\.url))
-        var remarks = sharedRemarks(chat, in: project)
-
-        let tool = cli.resolve()
-        switch tool.map({ cliRoute(for: chat, in: project, tool: $0) }) {
-        case .run(let command)?:
-            remarks.insert("Gemini CLI deletes the chat itself. Domovy keeps a copy in its quarantine folder first, so undo can put it back.", at: 0)
-            return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: [], indexEdits: [],
-                        commands: [command], remarks: remarks, mustNotBeRunning: [Self.processMatcher], liveCheck: live)
-        case .fallBack(let reason)?:
-            remarks.insert("Domovy moves the files itself: \(reason)", at: 0)
-        case nil:
-            break
+        let remarks: [String]
+        switch target {
+        case .chat(let project, let chat): remarks = sharedRemarks(chat, in: project)
+        case .group(let group): remarks = groupRemarks(group)
         }
         let moves = files.map { FileMove(source: $0.url, kind: $0.kind, sizeBytes: $0.sizeBytes, note: $0.note) }
         return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: moves, indexEdits: [],
@@ -113,10 +104,10 @@ public struct GeminiAdapter: AgentAdapter {
     /// Compresses the chat and its bulky companions in place with APFS transparent compression.
     /// Gemini CLI reads them unchanged and can resume; modification times stay as they were.
     public func archivePlan(for session: Session) async throws -> Plan {
-        let (project, chat) = try locate(session)
+        _ = try locate(session)
         try requireWritable()
         var compressions: [FileCompression] = []
-        for artifact in collectArtifacts(chat, in: project) where Self.archivedNotes.contains(artifact.note) {
+        for artifact in try await artifacts(of: session) where Self.archivedNotes.contains(artifact.note) {
             for file in APFSCompression.regularFiles(at: artifact.url) {
                 if layout.isProtected(file) { throw AdapterError.protectedPathInPlan(file) }
                 guard !APFSCompression.isCompressed(file), FileSystem.size(of: file) > APFSCompression.minimumUsefulSize else { continue }
@@ -134,8 +125,9 @@ public struct GeminiAdapter: AgentAdapter {
                     compressions: compressions, liveCheck: live)
     }
 
+    /// A group of empty chats has nothing to show.
     public func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript {
-        let (_, chat) = try locate(session)
+        guard case .chat(_, let chat) = try locate(session) else { return .empty }
         return try GeminiChat.readTranscript(of: chat.file, maxMessages: limit, masking: findings)
     }
 
@@ -197,6 +189,28 @@ public struct GeminiAdapter: AgentAdapter {
         )
     }
 
+    /// One row for a group of empty chats. Gemini CLI removes chats without messages at its next
+    /// start in their project, so the row is expiring unless the sweep is off.
+    private func makeSession(_ group: GeminiChatGroup, settings: GeminiSettings) async -> Session {
+        let artifacts = collectArtifacts(group)
+        let live = await liveness(artifacts.map(\.url))
+        let lastActive = group.newest?.chat.lastActive ?? .distantPast
+        let swept = settings.isEnabled
+        return Session(
+            id: group.id,
+            agent: kind,
+            title: group.title,
+            projectPath: group.projectPath,
+            lastActive: lastActive,
+            sizeBytes: artifacts.reduce(Int64(0)) { $0 + $1.sizeBytes },
+            status: live.isLive ? .live : swept ? .expiring : .idle,
+            expiresAt: swept ? lastActive : nil,
+            transcriptURL: group.newest?.chat.file ?? layout.tmp,
+            retentionNote: swept ? "Gemini CLI removes chats without messages the next time it starts in their project." : nil,
+            memberCount: group.members.count
+        )
+    }
+
     // MARK: Artifacts
 
     private static let archivedNotes: Set<String> = [GeminiNote.chat, GeminiNote.subagents, GeminiNote.toolOutputs]
@@ -222,6 +236,20 @@ public struct GeminiAdapter: AgentAdapter {
         return artifacts
     }
 
+    /// Every chat file of a group. The activity log and folder of the shared id are not theirs.
+    func collectArtifacts(_ group: GeminiChatGroup) -> [Artifact] {
+        group.members.compactMap { member in
+            let url = member.chat.file
+            guard FileSystem.exists(url), !layout.isProtected(url) else { return nil }
+            return Artifact(url: url, kind: .file, sizeBytes: FileSystem.size(of: url), note: GeminiNote.emptyChat)
+        }
+    }
+
+    private func groupRemarks(_ group: GeminiChatGroup) -> [String] {
+        ["All \(group.members.count) chats share the session id \(group.sessionID) and hold no messages. Gemini CLI removes such chats itself the next time it starts in their project.",
+         "The activity log and session folder of that id are shared with any other chat using it, so they stay."]
+    }
+
     /// What stays behind, said plainly.
     private func sharedRemarks(_ chat: GeminiProject.Chat, in project: GeminiProject) -> [String] {
         var remarks: [String] = []
@@ -233,48 +261,6 @@ public struct GeminiAdapter: AgentAdapter {
             remarks.append("\(prompts) typed \(prompts == 1 ? "prompt stays" : "prompts stay") in this project's logs.json. Domovy does not edit that file, and Gemini CLI keeps them too.")
         }
         return remarks
-    }
-
-    // MARK: Official command
-
-    enum Route {
-        case run(PlannedCommand)
-        case fallBack(String)
-    }
-
-    /// `gemini --delete-session <id>`, run from the project folder, when it deletes exactly this
-    /// chat. Gemini CLI deletes every chat whose name ends in the same 8 characters, reads an id it
-    /// cannot find as a list position, and runs its own retention sweep on start (0.43.0 source).
-    func cliRoute(for chat: GeminiProject.Chat, in project: GeminiProject, tool: GeminiCLI) -> Route {
-        guard let id = chat.header.sessionID, chat.header.kind != "subagent", chat.header.hasMessages else {
-            return .fallBack("Gemini CLI does not list this chat, so `gemini --delete-session` cannot pick it.")
-        }
-        guard id.first?.isNumber == false else {
-            return .fallBack("its id starts with a digit, which `gemini --delete-session` could read as a list position and delete another chat.")
-        }
-        guard project.ownedID(of: chat) != nil, project.hasUniqueShortID(chat) else {
-            return .fallBack("`gemini --delete-session` would also delete other chats of this project whose names end the same way.")
-        }
-        guard let path = project.path, FileSystem.isDirectory(URL(fileURLWithPath: path)), project.isRegistered else {
-            return .fallBack("the project folder is gone or not in projects.json, so Gemini CLI would not find this chat.")
-        }
-        let sweep = project.sweptOnStart(GeminiSettings.load(from: layout.settings), now: now()).filter { $0 != chat.file }
-        guard sweep.isEmpty else {
-            return .fallBack("Gemini CLI runs its own cleanup when it starts, which would delete \(sweep.count) more \(sweep.count == 1 ? "chat" : "chats") of this project for good.")
-        }
-        let targets = collectArtifacts(chat, in: project).filter { $0.kind != .indexEntry }
-        let others = project.chats.map(\.file).filter { $0 != chat.file }
-        return .run(PlannedCommand(
-            executable: tool.executable,
-            arguments: ["--delete-session", id],
-            // Gemini CLI's home folder (the parent of `.gemini`); the same as `~` for a real home.
-            environment: ["GEMINI_CLI_HOME": root.deletingLastPathComponent().path],
-            workingDirectory: URL(fileURLWithPath: path, isDirectory: true),
-            note: "Runs `gemini --delete-session` in the project folder, then checks the result.",
-            copiesBeforeRun: targets.map(\.url) + others,
-            verifications: targets.map { .fileGone($0.url) } + [.filesStay(others, what: "other chats of this project", tool: "Gemini CLI")],
-            sizeBytes: targets.reduce(Int64(0)) { $0 + $1.sizeBytes }
-        ))
     }
 
     // MARK: Liveness
@@ -305,15 +291,27 @@ public struct GeminiAdapter: AgentAdapter {
 
     // MARK: Guards
 
-    private func locate(_ session: Session) throws -> (GeminiProject, GeminiProject.Chat) {
+    enum Target {
+        case chat(GeminiProject, GeminiProject.Chat)
+        case group(GeminiChatGroup)
+    }
+
+    private func locate(_ session: Session) throws -> Target {
+        guard session.agent == kind else { throw AdapterError.sessionNotFound(session.id) }
+        if session.memberCount > 1 || session.id.hasSuffix(GeminiChatGroup.idSuffix) {
+            let registry = layout.registry()
+            let projects = layout.projectFolders().map { GeminiProject(folder: $0, registry: registry) }
+            if let group = GeminiChatGroup.groups(in: projects).first(where: { $0.id == session.id }) { return .group(group) }
+            if session.memberCount > 1 { throw AdapterError.sessionNotFound(session.id) }
+        }
         let file = session.transcriptURL.standardizedFileURL
         let folder = file.deletingLastPathComponent().deletingLastPathComponent()
-        guard session.agent == kind, FileSystem.relativePath(of: file, under: layout.tmp) != nil, FileSystem.exists(file) else {
+        guard FileSystem.relativePath(of: file, under: layout.tmp) != nil, FileSystem.exists(file) else {
             throw AdapterError.sessionNotFound(session.id)
         }
         let project = GeminiProject(folder: folder, registry: layout.registry())
         guard let chat = project.chats.first(where: { $0.file == file }) else { throw AdapterError.sessionNotFound(session.id) }
-        return (project, chat)
+        return .chat(project, chat)
     }
 
     private func requireWritable() throws {
@@ -346,4 +344,5 @@ private enum GeminiNote {
     static let chat = "Chat"
     static let subagents = "Subagent chats"
     static let toolOutputs = "Tool outputs"
+    static let emptyChat = "Empty chat"
 }

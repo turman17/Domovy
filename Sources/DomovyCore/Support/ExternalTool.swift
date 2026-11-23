@@ -49,7 +49,9 @@ enum ExternalTool {
 
     /// Runs `executable` without a shell, stdin closed, and returns its exit status and stdout.
     /// `nil` when it could not start. Output goes to a temporary file, never a pipe that can fill.
-    static func output(_ executable: URL, _ arguments: [String], environment: [String: String] = [:], timeout: TimeInterval = 10) -> (status: Int32, stdout: String)? {
+    /// - Parameter mergingErrors: also capture stderr (OpenCode prints its help there).
+    static func output(_ executable: URL, _ arguments: [String], environment: [String: String] = [:], timeout: TimeInterval = 10,
+                       mergingErrors: Bool = false) -> (status: Int32, stdout: String)? {
         let fm = FileManager.default
         let scratch = fm.temporaryDirectory.appendingPathComponent("domovy-tool-\(UUID().uuidString)")
         guard fm.createFile(atPath: scratch.path, contents: nil, attributes: [.posixPermissions: 0o600]),
@@ -64,7 +66,7 @@ enum ExternalTool {
         process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = out
-        process.standardError = FileHandle.nullDevice
+        process.standardError = mergingErrors ? out : FileHandle.nullDevice
         do { try process.run() } catch { return nil }
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning, Date() < deadline { usleep(20_000) }

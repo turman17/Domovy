@@ -94,6 +94,24 @@ struct FootprintBuilder {
         add(name, [item], disposition, note, guidance: guidance)
     }
 
+    /// Adds a category for a measured part of some files (one table's share of a database).
+    /// The caller claims the files once all their parts are added. Empty parts are left out.
+    mutating func add(
+        _ name: String,
+        part usage: DiskUsage,
+        of items: [URL],
+        reveal url: URL,
+        _ disposition: Footprint.Disposition,
+        _ note: String,
+        guidance: Footprint.Guidance? = nil
+    ) {
+        guard usage.allocated > 0 else { return }
+        categories.append(Footprint.Category(
+            name: name, url: url, items: items.filter { FileSystem.exists($0) }, sizeBytes: usage.allocated,
+            logicalBytes: usage.logical, disposition: disposition, note: note, guidance: guidance
+        ))
+    }
+
     /// Marks items as counted elsewhere (or deliberately not shown).
     mutating func claim(_ items: [URL]) {
         for item in items { claimed.insert(item.standardizedFileURL.path) }

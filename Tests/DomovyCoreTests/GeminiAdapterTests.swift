@@ -11,7 +11,7 @@ struct GeminiAdapterTests {
     func listsSessions() async throws {
         let fixture = try GeminiFixtureHome()
         let sessions = try await fixture.adapter().sessions()
-        #expect(sessions.count == 5)
+        #expect(sessions.count == 4)
 
         let idle = try #require(sessions.first { $0.id == IDs.idle })
         #expect(idle.title == "Health check endpoint") // the summary wins over the first prompt
@@ -27,12 +27,14 @@ struct GeminiAdapterTests {
         #expect(old.status == .expiring)
         #expect((old.daysUntilExpiryForTests ?? 0) <= 4)
 
-        // Two chats share the a2a server's id; both are listed under their own ids, and both
-        // have no messages, so Gemini CLI removes them at its next start.
-        let a2a = sessions.filter { $0.id.hasPrefix("a2a-server-") }
-        #expect(a2a.count == 2)
-        #expect(a2a.contains { $0.id == IDs.a2aFirst })
-        #expect(a2a.allSatisfy { $0.status == .expiring && $0.title == "Empty chat (no messages)" && $0.retentionNote != nil })
+        // Two empty chats share the a2a server's id: one row for both, which Gemini CLI's own
+        // sweep removes at its next start.
+        #expect(!sessions.contains { $0.id.hasPrefix("a2a-server-2026") })
+        let group = try #require(sessions.first { $0.id == IDs.a2aGroup })
+        #expect(group.memberCount == 2)
+        #expect(group.title == "2 empty chats from Gemini's a2a server")
+        #expect(group.status == .expiring && group.retentionNote != nil)
+        #expect(group.projectPath?.hasSuffix("/code/landing-site") == true)
     }
 
     @Test("artifacts: chat and everything keyed by its id; a shared id owns only the chat")
@@ -48,113 +50,52 @@ struct GeminiAdapterTests {
         #expect(notes.contains("Plans and task trackers"))
         #expect(notes.contains { $0.hasPrefix("1 typed prompt in logs.json") })
 
-        let shared = try await adapter.session(matching: IDs.a2aFirst)
-        let files = try await adapter.artifacts(of: shared)
-        #expect(files.map(\.url.lastPathComponent) == ["session-2026-11-18T07-44-a2a-serv.jsonl"])
+        let group = try await adapter.session(matching: IDs.a2aGroup)
+        let files = try await adapter.artifacts(of: group)
+        #expect(files.map(\.url.lastPathComponent) == GeminiFixtureHome.a2aChats.map { URL(fileURLWithPath: $0).lastPathComponent })
+        #expect(files.allSatisfy { $0.note == "Empty chat" })
+        #expect(try await adapter.transcript(of: group, limit: 10) == .empty)
     }
 
-    @Test("delete runs gemini --delete-session in the project, verifies, and undo restores")
-    func cliDeleteRoundTrip() async throws {
+    @Test("the grouped row deletes every empty chat in one plan, and undo puts them back")
+    func groupDeleteRoundTrip() async throws {
         let fixture = try GeminiFixtureHome()
         let adapter = fixture.adapter()
-        let session = try await adapter.session(matching: IDs.idle)
-        let mtime = fixture.modificationDate(GeminiFixtureHome.idleChat)
-        let plan = try await adapter.deletePlan(for: session, destination: .quarantine)
-        let command = try #require(plan.commands.first)
-        #expect(command.arguments == ["--delete-session", IDs.idle])
-        #expect(command.workingDirectory?.path == fixture.project.path)
-        #expect(command.environment["GEMINI_CLI_HOME"] == fixture.home.path)
-        #expect(plan.moves.isEmpty)
-        #expect(plan.mustNotBeRunning.contains(GeminiAdapter.processMatcher))
-
+        let group = try await adapter.session(matching: IDs.a2aGroup)
+        let plan = try await adapter.deletePlan(for: group, destination: .quarantine)
+        #expect(plan.commands.isEmpty)
+        #expect(plan.moves.count == 2)
+        #expect(plan.remarks.contains { $0.contains("share the session id a2a-server") })
         let executor = fixture.executor()
         let entry = try executor.execute(plan)
-        #expect(entry.leftovers.isEmpty)
-        #expect(!fixture.exists(GeminiFixtureHome.idleChat))
-        #expect(!fixture.exists("tmp/orbit-api/logs/session-\(IDs.idle).jsonl"))
-        #expect(!fixture.exists("tmp/orbit-api/\(IDs.idle)"))
-        #expect(fixture.exists(GeminiFixtureHome.digitChat)) // the other chats stay
-        #expect(fixture.exists("settings.json"))
-        #expect(fixture.stubInvocations().contains { $0.hasPrefix("--delete-session \(IDs.idle)") })
-
+        #expect(GeminiFixtureHome.a2aChats.allSatisfy { !fixture.exists($0) })
+        #expect(try await adapter.sessions().first { $0.id == IDs.a2aGroup } == nil)
         _ = try executor.undo(entry)
-        #expect(fixture.exists(GeminiFixtureHome.idleChat))
-        #expect(fixture.exists("tmp/orbit-api/chats/\(IDs.idle)/r8k2pq.jsonl"))
-        #expect(fixture.exists("tmp/orbit-api/tool-outputs/session-\(IDs.idle)/run_shell_command-1.txt"))
-        #expect(fixture.modificationDate(GeminiFixtureHome.idleChat) == mtime)
+        #expect(GeminiFixtureHome.a2aChats.allSatisfy { fixture.exists($0) })
+        #expect(try await adapter.sessions().first { $0.id == IDs.a2aGroup }?.memberCount == 2)
     }
 
-    @Test("a sloppy gemini leaves files behind, and the plan reports them")
-    func sloppyCLI() async throws {
+    @Test("a chat with messages that shares the a2a id stays its own row; a lone empty chat is not grouped")
+    func groupingEdges() async throws {
         let fixture = try GeminiFixtureHome()
-        fixture.touch(".stub-sloppy")
-        let adapter = fixture.adapter()
-        let plan = try await adapter.deletePlan(for: try await adapter.session(matching: IDs.idle), destination: .quarantine)
-        let entry = try fixture.executor().execute(plan)
-        #expect(!fixture.exists(GeminiFixtureHome.idleChat))
-        #expect(entry.leftovers.contains { $0.contains("session-\(IDs.idle).jsonl is still there") })
+        let chat = GeminiFixtureHome.a2aChats[1]
+        let line = "{\"id\":\"m1\",\"timestamp\":\"2026-11-18T07:45:10.000Z\",\"type\":\"user\",\"content\":\"Summarise the release notes\"}\n"
+        let handle = try FileHandle(forWritingTo: fixture.url(chat))
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(line.utf8))
+        try handle.close()
+        let sessions = try await fixture.adapter().sessions()
+        #expect(!sessions.contains { $0.memberCount > 1 })
+        #expect(sessions.contains { $0.title == "Summarise the release notes" })
+        #expect(sessions.contains { $0.title == "Empty chat (no messages)" })
     }
 
-    @Test("chats Gemini CLI's own cleanup removes on start are reported and come back on undo")
-    func collateralSweep() async throws {
-        let fixture = try GeminiFixtureHome()
-        fixture.touch(".stub-sweep")
-        let adapter = fixture.adapter()
-        let plan = try await adapter.deletePlan(for: try await adapter.session(matching: IDs.idle), destination: .quarantine)
-        let executor = fixture.executor()
-        let entry = try executor.execute(plan)
-        #expect(!fixture.exists(GeminiFixtureHome.oldChat))
-        #expect(entry.leftovers.contains { $0.contains("Gemini CLI also removed 1 other chats of this project") })
-        _ = try executor.undo(entry)
-        #expect(fixture.exists(GeminiFixtureHome.oldChat))
-    }
-
-    @Test("a failing gemini changes nothing")
-    func failingCLI() async throws {
-        let fixture = try GeminiFixtureHome()
-        fixture.touch(".stub-fail")
-        let adapter = fixture.adapter()
-        let plan = try await adapter.deletePlan(for: try await adapter.session(matching: IDs.idle), destination: .quarantine)
-        #expect(throws: ExecutorError.self) { try fixture.executor().execute(plan) }
-        #expect(fixture.exists(GeminiFixtureHome.idleChat))
-    }
-
-    @Test("falls back to moving files where gemini --delete-session could pick the wrong chat")
-    func fallbacks() async throws {
-        let fixture = try GeminiFixtureHome()
-        let adapter = fixture.adapter()
-
-        // An id starting with a digit could be read as a list position.
-        let digit = try await adapter.deletePlan(for: try await adapter.session(matching: IDs.digit), destination: .quarantine)
-        #expect(digit.commands.isEmpty)
-        #expect(digit.moves.map(\.source.lastPathComponent) == ["session-2026-11-21T10-00-7d7d7d7d.jsonl"])
-        #expect(digit.remarks.contains { $0.contains("starts with a digit") })
-
-        // Not listed by Gemini CLI (no messages), and the id is shared: only this chat moves.
-        let shared = try await adapter.deletePlan(for: try await adapter.session(matching: IDs.a2aFirst), destination: .quarantine)
-        #expect(shared.commands.isEmpty)
-        #expect(shared.moves.count == 1)
-        #expect(shared.remarks.contains { $0.contains("same session id") })
-        let entry = try fixture.executor().execute(shared)
-        #expect(!fixture.exists(GeminiFixtureHome.a2aChats[0]))
-        #expect(fixture.exists(GeminiFixtureHome.a2aChats[1]))
-        _ = try fixture.executor().undo(entry)
-        #expect(fixture.exists(GeminiFixtureHome.a2aChats[0]))
-
-        // An expired chat in the project: Gemini's own sweep would delete it on start.
-        try fixture.setDate(GeminiFixtureHome.oldChat, Date().addingTimeInterval(-40 * 86_400))
-        let swept = try await adapter.deletePlan(for: try await adapter.session(matching: IDs.idle), destination: .quarantine)
-        #expect(swept.commands.isEmpty)
-        #expect(swept.remarks.contains { $0.contains("its own cleanup") })
-        #expect(swept.moves.count == 5)
-    }
-
-    @Test("without the CLI every file moves to the quarantine, and undo puts it back")
+    @Test("delete moves every file to the quarantine itself, and undo puts it back")
     func fileFallbackRoundTrip() async throws {
         let fixture = try GeminiFixtureHome()
-        let adapter = fixture.adapter(cli: ToolChoice.none)
+        let adapter = fixture.adapter()
         let plan = try await adapter.deletePlan(for: try await adapter.session(matching: IDs.idle), destination: .quarantine)
-        #expect(plan.commands.isEmpty)
+        #expect(plan.commands.isEmpty) // never `gemini --delete-session`, whose own sweep deletes other chats
         #expect(Set(plan.moves.map(\.note)) == ["Chat", "Subagent chats", "Activity log", "Tool outputs", "Plans and task trackers"])
         #expect(plan.remarks.contains { $0.contains("logs.json") })
         let executor = fixture.executor()

@@ -45,6 +45,12 @@ final class SQLiteReader {
         Set(rows("SELECT name FROM sqlite_master WHERE type = 'table'").compactMap { $0.first ?? nil })
     }
 
+    /// Column names of `table`, empty when it does not exist.
+    func columns(of table: String) -> Set<String> {
+        guard Self.isIdentifier(table) else { return [] }
+        return Set(rows("PRAGMA table_info(\"\(table)\")").compactMap { $0.count > 1 ? $0[1] : nil })
+    }
+
     /// Rows where `column` equals `value`, or `nil` when the query failed (missing table or column).
     func count(table: String, column: String, equals value: String) -> Int? {
         guard Self.isIdentifier(table), Self.isIdentifier(column) else { return nil }

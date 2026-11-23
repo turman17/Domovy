@@ -7,6 +7,7 @@ public enum AgentKind: String, Codable, Sendable, CaseIterable, Hashable {
     case gemini
     case antigravity
     case openCode
+    case copilot
     /// Local model stores: measured and cleaned on the Disk screen, no sessions.
     case ollama
     case lmStudio
@@ -22,6 +23,7 @@ public enum AgentKind: String, Codable, Sendable, CaseIterable, Hashable {
         case .gemini: "Gemini CLI"
         case .antigravity: "Antigravity"
         case .openCode: "OpenCode"
+        case .copilot: "Copilot CLI"
         case .ollama: "Ollama"
         case .lmStudio: "LM Studio"
         case .huggingFace: "Hugging Face"

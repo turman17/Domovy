@@ -11,8 +11,6 @@ struct GeminiProject: Sendable {
     let folder: URL
     /// The project's own path, when known.
     let path: String?
-    /// `projects.json` maps `path` to this folder, so Gemini CLI started there finds these chats.
-    let isRegistered: Bool
     let chats: [Chat]
     /// Typed prompts per session id, from `logs.json`.
     private let prompts: [String: Int]
@@ -24,7 +22,6 @@ struct GeminiProject: Sendable {
         self.folder = folder.standardizedFileURL
         let path = GeminiLayout.projectPath(of: folder, registry: registry)
         self.path = path
-        self.isRegistered = path.map { registry[$0] == folder.lastPathComponent } ?? false
         self.chats = GeminiLayout.chatFiles(in: folder).map { file in
             Chat(file: file, header: GeminiChat.readHeader(of: file), lastActive: FileSystem.modificationDate(of: file) ?? .distantPast)
         }
@@ -36,12 +33,6 @@ struct GeminiProject: Sendable {
     func ownedID(of chat: Chat) -> String? {
         guard let id = chat.header.sessionID, GeminiLayout.isSafeComponent(id) else { return nil }
         return chats.filter { $0.header.sessionID == id }.count == 1 ? id : nil
-    }
-
-    /// No other chat file of the project ends in the same 8 characters.
-    func hasUniqueShortID(_ chat: Chat) -> Bool {
-        guard let short = GeminiLayout.shortID(ofChatNamed: chat.file.lastPathComponent) else { return false }
-        return chats.filter { GeminiLayout.shortID(ofChatNamed: $0.file.lastPathComponent) == short }.count == 1
     }
 
     func promptCount(for id: String) -> Int? {
@@ -64,17 +55,6 @@ struct GeminiProject: Sendable {
             }
         }
         return due
-    }
-
-    /// Every chat the sweep would remove if Gemini CLI started in this project now.
-    func sweptOnStart(_ settings: GeminiSettings, now: Date) -> Set<URL> {
-        var swept = Set(dueForSweep(settings).keys)
-        if let maxAge = settings.maxAge {
-            for chat in chats where chat.header.kind != "subagent" && chat.lastActive.addingTimeInterval(maxAge) < now {
-                swept.insert(chat.file)
-            }
-        }
-        return swept
     }
 
     /// Reads only `sessionId` of each entry; files over 8 MB are left unread.
