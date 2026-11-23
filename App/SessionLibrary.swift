@@ -91,7 +91,7 @@ final class SessionLibrary {
     let codex: CodexAdapter
     /// Every adapter, in sidebar order. Agents not installed at this home are skipped on scan.
     let adapters: [any AgentAdapter]
-    /// Every agent the Disk screen measures: the adapters plus Claude Desktop and Cursor.
+    /// Every agent the Disk screen measures: the adapters plus Claude Desktop.
     let footprintProviders: [any FootprintProvider]
     let executor: Executor
     /// The Disk screen's guided cleanups.
@@ -109,6 +109,7 @@ final class SessionLibrary {
             AntigravityAdapter(home: home),
             OpenCodeAdapter(home: home, cli: OpenCodeCLI.choice(home: home, isCustomHome: isCustomHome)),
             CopilotAdapter(home: home),
+            CursorAdapter(home: home),
         ]
         let models = ModelStores.at(home: home, isCustomHome: isCustomHome)
         footprintProviders = adapters + FootprintScanner.measuredOnly(home: home) + FootprintScanner.modelStores(models)
@@ -262,9 +263,14 @@ final class SessionLibrary {
         if freed == nil { register(action) }
         let title = "\u{201C}\(session.displayTitle)\u{201D} (\(size))"
         let destination = (plan.destination ?? .trash).displayName
-        let message = plan.commands.isEmpty
-            ? "Moved \(title) to \(destination)."
-            : "Deleted \(title) with \(plan.commands.map { "`\($0.executable.lastPathComponent) \($0.arguments.first ?? "")`" }.joined(separator: ", "))."
+        let message: String
+        if !plan.commands.isEmpty {
+            message = "Deleted \(title) with \(plan.commands.map { "`\($0.executable.lastPathComponent) \($0.arguments.first ?? "")`" }.joined(separator: ", "))."
+        } else if let edit = plan.databaseEdits.first(where: { !$0.isEmpty }) {
+            message = "Deleted \(title) from \(edit.database.lastPathComponent); the database passed its integrity check."
+        } else {
+            message = "Moved \(title) to \(destination)."
+        }
         toast = Toast(message: message + (freed.map { " " + $0 } ?? "") + Self.leftoverText(entries), undo: freed == nil ? action : nil)
         await reload()
     }
@@ -374,8 +380,9 @@ extension Session {
     }
     var sortProject: String { projectName ?? "" }
 
-    /// OpenCode sessions are rows of one shared database: there is no file to compress.
-    var canArchive: Bool { agent != .openCode }
+    /// OpenCode sessions and Cursor's editor chats are rows of one shared database: there is no
+    /// file to compress.
+    var canArchive: Bool { agent != .openCode && !CursorAdapter.isEditorChat(self) }
 
     /// Whole days until the agent's sweep, for the status column and warnings.
     var daysUntilExpiry: Int? {

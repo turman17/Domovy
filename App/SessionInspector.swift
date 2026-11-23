@@ -26,6 +26,7 @@ struct SessionInspector: View {
         switch session.agent {
         case .codex: "Archive this session in Codex (codex archive), or compress it on disk without the CLI. You can undo this."
         case .openCode: "OpenCode keeps sessions inside its database, so there is no file to compress."
+        case .cursor where CursorAdapter.isEditorChat(session): "Cursor keeps this chat as rows inside its database, so there is no file to compress."
         default: "Compress this session on disk. \(session.agent.displayName) can still resume it. You can undo this."
         }
     }

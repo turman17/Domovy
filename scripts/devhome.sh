@@ -56,7 +56,6 @@ if [ ! -d "$SUPPORT/Cursor" ]; then
   mkdir -p "$SUPPORT"
   cp -Rp "$ROOT/Tests/Fixtures/cursor/3.0/support" "$SUPPORT/Cursor"
   cp -Rp "$ROOT/Tests/Fixtures/cursor/3.0/dot-cursor" "$DEV/.cursor"
-  dd if=/dev/urandom of="$SUPPORT/Cursor/User/globalStorage/state.vscdb" bs=1m count=9 2>/dev/null
   dd if=/dev/urandom of="$DEV/.cursor/extensions/example.theme-1.0.0/theme.bin" bs=1m count=3 2>/dev/null
 fi
 if [ ! -d "$DEV/.claude/security/agent-sdk-venv" ]; then
@@ -191,24 +190,24 @@ if [ ! -f "$DEV/.gemini-seeded" ]; then
   # Compressible bulk, so Archive has something to do.
   seq 1 6000 | sed 's/.*/{"id":"b&","timestamp":"2026-11-21T10:01:00.000Z","type":"info","content":"synthetic repeated tool output for compression"}/' \
     >> "$G/tmp/orbit-api/chats/session-2026-11-21T10-00-7d7d7d7d.jsonl"
-  for id in a1a1a1a1-1111-4111-8111-111111111111 b2b2b2b2-2222-4222-8222-222222222222; do
+  for id in ca11ab1e-1111-4111-8111-111111111111 cafe0002-2222-4222-8222-222222222222; do
     mkdir -p "$G/antigravity-cli/conversations"
     sqlite3 "$G/antigravity-cli/conversations/$id.db" < "$ROOT/Tests/Fixtures/antigravity/sql/conversation.sql"
   done
   mkdir -p "$G/antigravity/conversations"
-  sqlite3 "$G/antigravity/conversations/c3c3c3c3-3333-4333-8333-333333333333.db" < "$ROOT/Tests/Fixtures/antigravity/sql/conversation.sql"
+  sqlite3 "$G/antigravity/conversations/cab00003-3333-4333-8333-333333333333.db" < "$ROOT/Tests/Fixtures/antigravity/sql/conversation.sql"
   sqlite3 "$G/antigravity-cli/conversation_summaries.db" < "$ROOT/Tests/Fixtures/antigravity/sql/summaries.sql"
   dd if=/dev/urandom of="$G/antigravity-cli/log/cli-20261101_100000.log" bs=1k count=900 2>/dev/null
-  dd if=/dev/urandom of="$G/antigravity-cli/brain/a1a1a1a1-1111-4111-8111-111111111111/screenshot.webp" bs=1k count=1500 2>/dev/null
+  dd if=/dev/urandom of="$G/antigravity-cli/brain/ca11ab1e-1111-4111-8111-111111111111/screenshot.webp" bs=1k count=1500 2>/dev/null
   age() { touch -t "$(date -v-"$1"d +%Y%m%d%H%M)" "$2"; }
   C="$G/tmp/orbit-api/chats"
   age 2 "$C/session-2026-11-20T09-15-e1e1e1e1.jsonl"
   age 1 "$C/session-2026-11-21T10-00-7d7d7d7d.jsonl"
   age 26 "$C/session-2026-10-28T14-30-e3e3e3e3.jsonl"
   for f in "$G"/tmp/landing-site/chats/*.jsonl; do age 5 "$f"; done
-  age 1 "$G/antigravity-cli/conversations/a1a1a1a1-1111-4111-8111-111111111111.db"
-  age 3 "$G/antigravity-cli/conversations/b2b2b2b2-2222-4222-8222-222222222222.db"
-  age 4 "$G/antigravity/conversations/c3c3c3c3-3333-4333-8333-333333333333.db"
+  age 1 "$G/antigravity-cli/conversations/ca11ab1e-1111-4111-8111-111111111111.db"
+  age 3 "$G/antigravity-cli/conversations/cafe0002-2222-4222-8222-222222222222.db"
+  age 4 "$G/antigravity/conversations/cab00003-3333-4333-8333-333333333333.db"
   # The app store's presence lock is not held here, so its conversation shows as idle.
   touch "$DEV/.gemini-seeded"
 fi
@@ -249,4 +248,17 @@ if [ ! -f "$DEV/.copilot-seeded" ]; then
   age 2 "$S/c0c0c0c0-2222-4222-8222-222222222222/events.jsonl"
   age 1 "$S/c0c0c0c0-3333-4333-8333-333333333333/events.jsonl"
   touch "$DEV/.copilot-seeded"
+fi
+if [ ! -f "$DEV/.cursor-seeded" ]; then
+  # Cursor's chat database built from the synthetic SQL (WAL, like Cursor), never a copy of the
+  # real one, plus bulk message rows so the Disk screen and a delete have something to show.
+  G="$DEV/Library/Application Support/Cursor/User/globalStorage"
+  rm -f "$G/state.vscdb" "$G/state.vscdb-wal" "$G/state.vscdb-shm"
+  sqlite3 "$G/state.vscdb" < "$ROOT/Tests/Fixtures/cursor/sql/state.sql" >/dev/null
+  sqlite3 "$G/state.vscdb" "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1500) INSERT INTO cursorDiskKV SELECT 'bubbleId:ca11ab1e-1111-4111-8111-111111111111:bulk' || i, json_object('type', 2, 'text', 'synthetic step', 'padding', hex(randomblob(3000))) FROM n;"
+  # A CLI chat with a name in its meta table (layout assumed) and compressible content.
+  CHAT="$DEV/.cursor/chats/4e5f6a7b/2c3d4e5f-1111-4111-8111-111111111111"
+  rm -f "$CHAT/store.db"
+  sqlite3 "$CHAT/store.db" "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB); INSERT INTO meta VALUES ('0', hex('{\"name\":\"Rename the CLI flags\",\"createdAt\":1795100000000}')); WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400) INSERT INTO blobs SELECT 'b' || i, 'synthetic agent step, compiled without warnings, ' || i FROM n;"
+  touch "$DEV/.cursor-seeded"
 fi

@@ -24,7 +24,7 @@ struct DeletePlanSheet: View {
     private var root: URL { library.root(for: plan.agent) }
     private var confirmTitle: String {
         if purgeNow && plan.keepsToolCopies { return "Delete Now" }
-        if !plan.commands.isEmpty && plan.moves.isEmpty { return "Delete" }
+        if (!plan.commands.isEmpty || !plan.databaseEdits.isEmpty) && plan.moves.isEmpty { return "Delete" }
         return destination == .trash ? "Move to Trash" : "Move to Quarantine"
     }
 
@@ -72,6 +72,7 @@ struct DeletePlanSheet: View {
     private var changes: some View {
         List {
             CommandsSection(commands: plan.commands)
+            DatabaseEditSection(edits: plan.databaseEdits)
             Section("\(plan.agent.displayName) · \(abbreviatedRoot) · moved to \(destination.displayName)") {
                 ForEach(plan.moves, id: \.source) { move in
                     ChangeRow(
@@ -206,6 +207,29 @@ struct CommandsSection: View {
     }
 }
 
+/// Rows Domovy deletes from an app's database itself (Cursor's state.vscdb), each prefix one row.
+struct DatabaseEditSection: View {
+    let edits: [DatabaseEdit]
+
+    var body: some View {
+        ForEach(edits.filter { !$0.isEmpty }, id: \.database) { edit in
+            Section("\(edit.database.lastPathComponent) · rows deleted in place, whole-file copy kept, integrity checked") {
+                ForEach(edit.rows, id: \.key) { rows in
+                    ChangeRow(
+                        symbol: "tablecells",
+                        path: rows.isPrefix ? "\(rows.key)\u{2026}" : rows.key,
+                        note: "\(rows.note) · \(rows.count) \(rows.count == 1 ? "row" : "rows")",
+                        size: rows.bytes.formatted(.byteCount(style: .file))
+                    )
+                }
+                ForEach(edit.listRemovals, id: \.key) { removal in
+                    ChangeRow(symbol: "list.bullet.rectangle", path: removal.key, note: removal.note, size: "\u{2013}")
+                }
+            }
+        }
+    }
+}
+
 /// Opt-in, off by default: delete Domovy's kept copy right after the tool's command succeeded,
 /// so the space comes back now. Undo is no longer possible then.
 struct FreeSpaceNowToggle: View {
@@ -275,6 +299,7 @@ struct LiveCheckRow: View {
         if result.checkedSignals.contains("Gemini CLI processes") { parts.append("Gemini CLI is not running") }
         if result.checkedSignals.contains("OpenCode processes") { parts.append("OpenCode is not using its database") }
         if result.checkedSignals.contains("Copilot CLI processes") { parts.append("Copilot CLI is not running") }
+        if result.checkedSignals.contains("Cursor processes") { parts.append("Cursor is not running") }
         if result.checkedSignals.contains("ollama ps") { parts.append("the model is not loaded in Ollama") }
         return parts.joined(separator: ", ") + ". Checked just now."
     }

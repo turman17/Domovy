@@ -280,7 +280,7 @@ private struct CategoryRow: View {
 
     private var instructions: String? {
         if case .instructions(let text) = category.guidance { return text }
-        return nil
+        return category.advice
     }
 
     var body: some View {
