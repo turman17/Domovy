@@ -10,6 +10,11 @@ if [ ! -d "$DEV/.claude" ]; then
   mkdir -p "$DEV"
   cp -Rp "$ROOT/Tests/Fixtures/claude-code/2.1" "$DEV/.claude"
   CLAUDE="$DEV/.claude"
+  # The fixtures are tiny and APFS compression skips files of 16 KiB or less. Add synthetic,
+  # compressible tool output so Archive has something to do.
+  bulk() { mkdir -p "$(dirname "$2")"; seq 1 "$1" | sed 's/.*/{"type":"tool_result","n":&,"content":"synthetic build output, compiled module without warnings"}/' >> "$2"; }
+  bulk 30000 "$CLAUDE/projects/-Users-dev-code-orbit-api/aaaaaaaa-1111-4111-8111-111111111111/tool-results/r9build.txt"
+  bulk 12000 "$CLAUDE/projects/-Users-dev-code-landing-site/cccccccc-3333-4333-8333-333333333333.jsonl"
   # Pin transcript ages like the tests do, so idle, expiring and live states all show up.
   age() { touch -t "$(date -v-"$1"d +%Y%m%d%H%M)" "$2"; }
   age 2  "$CLAUDE/projects/-Users-dev-code-orbit-api/aaaaaaaa-1111-4111-8111-111111111111.jsonl"

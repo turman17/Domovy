@@ -44,7 +44,7 @@ struct MenuBarView: View {
 
     private var header: some View {
         HStack {
-            Image(systemName: "house.fill")
+            Image("MenuBarGlyph")
                 .foregroundStyle(.tint)
                 .accessibilityHidden(true)
             Text("Domovy").fontWeight(.semibold)
@@ -90,7 +90,7 @@ struct MenuBarView: View {
                 AttentionRow(
                     symbol: "clock",
                     title: "\(expiring.count) Claude Code \(expiring.count == 1 ? "session" : "sessions") will be deleted \(days == 0 ? "at the next sweep" : "in \(days) \(days == 1 ? "day" : "days")")",
-                    detail: "Archive them to keep them."
+                    detail: "Review them, or raise cleanupPeriodDays to keep them."
                 ) { open(filter: .expiring) }
             }
             let live = library.liveSessions

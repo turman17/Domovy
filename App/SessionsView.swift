@@ -21,6 +21,7 @@ struct SessionsView: View {
     @State private var showInspector = true
     @State private var bannerDismissed = false
     @State private var deleteRequest: DeleteRequest?
+    @State private var archiveRequest: ArchiveRequest?
     @State private var previewSession: Session?
     @State private var errorMessage: String?
 
@@ -45,6 +46,16 @@ struct SessionsView: View {
         return selectedSession.status != .live
     }
 
+    private var canArchiveSelection: Bool {
+        guard let selectedSession else { return false }
+        return selectedSession.status != .live && !selectedSession.isArchived
+    }
+
+    /// Expiring sessions "Archive all" would compress.
+    private var archivableExpiring: [Session] {
+        library.expiringSessions.filter { !$0.isArchived }
+    }
+
     private var showsBanner: Bool {
         !bannerDismissed && !library.expiringSessions.isEmpty && (agentFilter == nil || agentFilter == .claudeCode)
     }
@@ -57,6 +68,8 @@ struct SessionsView: View {
                     retentionDays: library.retentionDays,
                     withinDays: library.expiringWithinDays,
                     settingsURL: library.adapter.root.appendingPathComponent("settings.json"),
+                    archivableCount: archivableExpiring.count,
+                    onArchiveAll: { requestArchive(archivableExpiring) },
                     onReview: { statusFilter = .expiring },
                     onDismiss: { bannerDismissed = true }
                 )
@@ -70,7 +83,7 @@ struct SessionsView: View {
         .toolbar { toolbar }
         .inspector(isPresented: $showInspector) {
             if let selectedSession {
-                SessionInspector(session: selectedSession, onDelete: requestDelete)
+                SessionInspector(session: selectedSession, onArchive: requestArchiveSelection, onDelete: requestDelete)
                     .inspectorColumnWidth(min: 260, ideal: 300, max: 420)
             } else {
                 ContentUnavailableView("No session selected", systemImage: "bubble.left.and.text.bubble.right", description: Text("Select a session to read it."))
@@ -79,6 +92,9 @@ struct SessionsView: View {
         .sheet(item: $deleteRequest) { request in
             DeletePlanSheet(request: request)
         }
+        .sheet(item: $archiveRequest) { request in
+            ArchivePlanSheet(request: request)
+        }
         .sheet(item: $previewSession) { session in
             TranscriptPreviewSheet(session: session)
         }
@@ -86,6 +102,12 @@ struct SessionsView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(errorMessage ?? "")
+        }
+        .onChange(of: library.actionError) { _, message in
+            if let message {
+                errorMessage = message
+                library.actionError = nil
+            }
         }
         .onChange(of: library.requestedFilter) { _, requested in
             if let requested {
@@ -160,9 +182,10 @@ struct SessionsView: View {
             .help(statusFilter == .all ? "Filter by status" : "Showing \(statusFilter.rawValue.lowercased()) sessions")
         }
         ToolbarItemGroup {
-            Button("Archive", systemImage: "archivebox") {}
-                .disabled(true)
-                .help("Archiving is not available yet.")
+            Button("Archive…", systemImage: "archivebox", action: requestArchiveSelection)
+                .keyboardShortcut("a", modifiers: [.command, .option])
+                .disabled(!canArchiveSelection)
+                .help(archiveHelp)
             Button("Delete…", systemImage: "trash", action: requestDelete)
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(!canDeleteSelection)
@@ -171,6 +194,13 @@ struct SessionsView: View {
                 .keyboardShortcut("i", modifiers: [.command, .option])
                 .help("Show or hide the transcript")
         }
+    }
+
+    private var archiveHelp: String {
+        guard let selectedSession else { return "Select a session to archive it" }
+        if selectedSession.status == .live { return "This session is live. Quit the Claude Code session using it first." }
+        if selectedSession.isArchived { return "This session is already archived." }
+        return "Compress this session on disk; Claude Code can still resume it (⌥⌘A)"
     }
 
     private var deleteHelp: String {
@@ -197,7 +227,8 @@ struct SessionsView: View {
         if let toast = library.toast {
             UndoToast(toast: toast) {
                 Task {
-                    do { try await library.undo(toast.undoEntry) } catch { errorMessage = error.localizedDescription }
+                    guard let action = toast.undo else { return }
+                    do { try await library.undo(action) } catch { errorMessage = error.localizedDescription }
                 }
             }
             .padding(.bottom, 16)
@@ -206,6 +237,28 @@ struct SessionsView: View {
     }
 
     // MARK: Actions
+
+    private func requestArchiveSelection() {
+        guard let session = selectedSession, canArchiveSelection else { return }
+        requestArchive([session])
+    }
+
+    /// Plans first, then the confirmation sheet. Sessions with nothing to compress drop out.
+    private func requestArchive(_ sessions: [Session]) {
+        Task {
+            do {
+                let plans = try await library.archivePlans(for: sessions)
+                guard !plans.isEmpty else {
+                    errorMessage = "Nothing to compress: \(sessions.count == 1 ? "this session's files are" : "these sessions' files are") already compressed or too small to gain from it."
+                    return
+                }
+                let planned = Set(plans.map(\.sessionID))
+                archiveRequest = ArchiveRequest(sessions: sessions.filter { planned.contains($0.id) }, plans: plans)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
 
     private func requestDelete() {
         guard let session = selectedSession, session.status != .live else { return }

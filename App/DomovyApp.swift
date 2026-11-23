@@ -14,13 +14,8 @@ struct DomovyApp: App {
         }
         .defaultSize(width: 1100, height: 720)
         .commands {
-            CommandGroup(replacing: .undoRedo) {
-                Button("Undo Move to Trash") {
-                    Task { try? await library.undo() }
-                }
-                .keyboardShortcut("z")
-                .disabled(!library.canUndo)
-            }
+            // Undo/Redo stay the system items: Domovy actions are registered with the window's
+            // UndoManager, so ⌘Z reads "Undo Move to Trash" / "Undo Archive" outside text fields.
             CommandGroup(after: .toolbar) {
                 Button("Reload Sessions") { Task { await library.reload() } }
                     .keyboardShortcut("r")
@@ -31,7 +26,12 @@ struct DomovyApp: App {
             MenuBarView()
                 .environment(library)
         } label: {
-            Label(library.totalFootprintBytes.formatted(.byteCount(style: .file)), systemImage: "house")
+            Label {
+                Text(library.totalFootprintBytes.formatted(.byteCount(style: .file)))
+            } icon: {
+                Image("MenuBarGlyph")
+            }
+            .labelStyle(.titleAndIcon)
         }
         .menuBarExtraStyle(.window)
     }

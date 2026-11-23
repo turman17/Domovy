@@ -4,6 +4,7 @@ import SwiftUI
 /// Right-hand pane: who, where, how big, then the conversation.
 struct SessionInspector: View {
     let session: Session
+    let onArchive: () -> Void
     let onDelete: () -> Void
 
     @Environment(SessionLibrary.self) private var library
@@ -16,6 +17,7 @@ struct SessionInspector: View {
         let entries = artifacts.filter { $0.kind == .indexEntry }.count
         var text = "\(session.sizeBytes.formatted(.byteCount(style: .file))) in \(files) \(files == 1 ? "file or folder" : "files and folders")"
         if entries > 0 { text += ", \(entries) index \(entries == 1 ? "entry" : "entries")" }
+        if session.isArchived { text += " · archived" }
         return text
     }
 
@@ -63,9 +65,9 @@ struct SessionInspector: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Button("Archive", systemImage: "archivebox") {}
-                    .disabled(true)
-                    .help("Archiving is not available yet.")
+                Button("Archive…", systemImage: "archivebox", action: onArchive)
+                    .disabled(isLive || session.isArchived)
+                    .help(session.isArchived ? "Already archived: its files are compressed on disk." : isLive ? "This session is live, so it cannot be archived." : "Compress this session on disk. Claude Code can still resume it. You can undo this.")
                 Button("Delete…", systemImage: "trash", action: onDelete)
                     .disabled(isLive)
                     .help(isLive ? "This session is live, so it cannot be deleted." : "Move every file of this session to the Trash. You can undo this.")
@@ -75,7 +77,7 @@ struct SessionInspector: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text("Space to preview · ⌫ to delete · ⌘Z to undo")
+            Text("Space to preview · ⌥⌘A to archive · ⌘⌫ to delete · ⌘Z to undo")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }

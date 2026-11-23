@@ -11,7 +11,7 @@ struct UndoToast: View {
                 .foregroundStyle(.green)
             Text(toast.message)
                 .lineLimit(1)
-            if toast.undoEntry != nil {
+            if toast.undo != nil {
                 Button("Undo", action: onUndo)
                     .buttonStyle(.plain)
                     .foregroundStyle(.tint)

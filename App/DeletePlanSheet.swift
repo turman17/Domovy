@@ -16,7 +16,7 @@ struct DeletePlanSheet: View {
     init(request: DeleteRequest) {
         self.request = request
         _plan = State(initialValue: request.plan)
-        _destination = State(initialValue: request.plan.destination)
+        _destination = State(initialValue: request.plan.destination ?? .trash)
     }
 
     private var root: URL { library.adapter.root }
@@ -110,7 +110,7 @@ struct DeletePlanSheet: View {
     }
 }
 
-private struct ChangeRow: View {
+struct ChangeRow: View {
     let symbol: String
     let path: String
     let note: String
@@ -142,7 +142,7 @@ private struct ChangeRow: View {
 }
 
 /// Green check when nothing uses the session; gray broadcast symbol with the reasons otherwise.
-private struct LiveCheckRow: View {
+struct LiveCheckRow: View {
     let result: LiveCheckResult
 
     private var detail: String {

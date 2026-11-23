@@ -24,11 +24,24 @@ enum StatusFilter: String, CaseIterable, Identifiable {
     }
 }
 
-/// A short confirmation after an action, with the undo entry it can revert.
+/// One Domovy action on the window's undo stack ("Undo Move to Trash", "Undo Archive").
+/// Also the UndoManager target, so the toast's Undo button can take it off the stack.
+final class UndoAction: Sendable {
+    let name: String
+    /// Newest last, as executed.
+    let entries: [UndoEntry]
+
+    init(name: String, entries: [UndoEntry]) {
+        self.name = name
+        self.entries = entries
+    }
+}
+
+/// A short confirmation after an action, with the action it can revert.
 struct Toast: Identifiable, Equatable {
     let id = UUID()
     let message: String
-    let undoEntry: UndoEntry?
+    let undo: UndoAction?
 
     static func == (lhs: Toast, rhs: Toast) -> Bool { lhs.id == rhs.id }
 }
@@ -44,8 +57,12 @@ final class SessionLibrary {
     private(set) var errorMessage: String?
     private(set) var lastScan: Date?
     private(set) var retentionDays = 30
-    private(set) var canUndo = false
     var toast: Toast?
+    /// Failure of an action started from the menu (⌘Z), shown by the sessions view.
+    var actionError: String?
+    /// The main window's undo manager. Domovy actions go on the same stack as text edits, so
+    /// ⌘Z in the search field undoes typing and ⌘Z elsewhere undoes the last Domovy action.
+    weak var undoManager: UndoManager?
     /// Set by the menu bar popover so the main window opens on that filter.
     var requestedFilter: StatusFilter?
 
@@ -101,7 +118,6 @@ final class SessionLibrary {
             logger.error("Scan failed: \(error.localizedDescription, privacy: .private)")
             errorMessage = error.localizedDescription
         }
-        refreshUndoState()
     }
 
     func transcript(of session: Session) async throws -> Transcript {
@@ -118,28 +134,69 @@ final class SessionLibrary {
         try await adapter.deletePlan(for: session, destination: destination)
     }
 
-    /// Executes off the main actor, then rescans and offers undo.
+    /// One archive plan per session; sessions with nothing to compress are left out.
+    func archivePlans(for sessions: [Session]) async throws -> [Plan] {
+        var plans: [Plan] = []
+        for session in sessions where session.status != .live {
+            let plan = try await adapter.archivePlan(for: session)
+            if !plan.isEmpty, !plan.liveCheck.isLive { plans.append(plan) }
+        }
+        return plans
+    }
+
+    /// Executes a delete plan off the main actor, then rescans and offers undo.
     func execute(_ plan: Plan, for session: Session) async throws {
-        let executor = self.executor
-        let entry = try await Task.detached { try executor.execute(plan) }.value
+        let entries = try await run([plan])
         let size = plan.totalBytes.formatted(.byteCount(style: .file))
-        toast = Toast(message: "Moved \u{201C}\(session.displayTitle)\u{201D} (\(size)) to \(plan.destination.displayName).", undoEntry: entry)
+        let action = UndoAction(name: "Move to Trash", entries: entries)
+        register(action)
+        toast = Toast(message: "Moved \u{201C}\(session.displayTitle)\u{201D} (\(size)) to \((plan.destination ?? .trash).displayName).", undo: action)
         await reload()
     }
 
-    func undo(_ entry: UndoEntry? = nil) async throws {
+    /// Executes archive plans as one batch, then rescans and offers undo.
+    func archive(_ plans: [Plan]) async throws {
+        let entries = try await run(plans)
+        let done = Set(entries.flatMap(\.compressed).map(\.file))
+        let items = plans.flatMap(\.compressions).filter { done.contains($0.file) }
+        let before = items.reduce(Int64(0)) { $0 + $1.sizeBytes }.formatted(.byteCount(style: .file))
+        let after = items.reduce(Int64(0)) { $0 + $1.estimatedBytes }.formatted(.byteCount(style: .file))
+        let what = plans.count == 1
+            ? "\u{201C}\(sessions.first { $0.id == plans[0].sessionID }?.displayTitle ?? "session")\u{201D}"
+            : "\(plans.count) sessions"
+        let action = UndoAction(name: "Archive", entries: entries)
+        register(action)
+        toast = Toast(message: items.isEmpty ? "Nothing in \(what) needed compressing." : "Archived \(what) (\(before) \u{2192} ~\(after)).", undo: items.isEmpty ? nil : action)
+        await reload()
+    }
+
+    /// Reverts one Domovy action, newest entry first. Called by ⌘Z and by the toast.
+    func undo(_ action: UndoAction) async throws {
+        undoManager?.removeAllActions(withTarget: action)
         let executor = self.executor
         let restored = try await Task.detached {
-            if let entry { return try executor.undo(entry) }
-            return try executor.undoLatest()
+            try action.entries.reversed().filter { !$0.isUndone }.map { try executor.undo($0) }
         }.value
-        let title = sessions.first { $0.id == restored.sessionID }?.displayTitle ?? "session"
-        toast = Toast(message: "Put \u{201C}\(title)\u{201D} back.", undoEntry: nil)
+        let titles = Set(restored.map(\.sessionID)).compactMap { id in sessions.first { $0.id == id }?.displayTitle }
+        let what = titles.count == 1 ? "\u{201C}\(titles[0])\u{201D}" : "\(restored.count) sessions"
+        let verb = action.entries.first?.action == .archive ? "Decompressed" : "Put back"
+        toast = Toast(message: "\(verb) \(what).", undo: nil)
         await reload()
     }
 
-    private func refreshUndoState() {
-        canUndo = ((try? executor.undoLog.latestPending()) ?? nil) != nil
+    private func run(_ plans: [Plan]) async throws -> [UndoEntry] {
+        let executor = self.executor
+        return try await Task.detached { try executor.execute(plans) }.value
+    }
+
+    private func register(_ action: UndoAction) {
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: action) { [weak self] action in
+            Task { @MainActor in
+                do { try await self?.undo(action) } catch { self?.actionError = error.localizedDescription }
+            }
+        }
+        undoManager.setActionName(action.name)
     }
 }
 

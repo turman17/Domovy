@@ -11,6 +11,9 @@ struct RetentionBanner: View {
     let retentionDays: Int
     let withinDays: Int
     let settingsURL: URL
+    /// Expiring sessions not archived yet.
+    let archivableCount: Int
+    let onArchiveAll: () -> Void
     let onReview: () -> Void
     let onDismiss: () -> Void
 
@@ -29,14 +32,15 @@ struct RetentionBanner: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(headline)
                     .fontWeight(.semibold)
-                Text("Archive them first to keep them resumable, or raise cleanupPeriodDays in Claude Code settings.")
+                Text("Archiving compresses them to free space but keeps their dates, so the sweep still applies. To keep them longer, raise cleanupPeriodDays in Claude Code settings.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 8) {
-                    Button("Archive all \(sessions.count)") {}
-                        .buttonStyle(.borderedProminent)
-                        .disabled(true)
-                        .help("Archiving is not available yet.")
+                    if archivableCount > 0 {
+                        Button("Archive all \(archivableCount)", action: onArchiveAll)
+                            .buttonStyle(.borderedProminent)
+                            .help("Compress the expiring sessions on disk. Claude Code can still resume them.")
+                    }
                     Button("Review", action: onReview)
                         .help("Show only the expiring sessions")
                     Button("Change setting…") {

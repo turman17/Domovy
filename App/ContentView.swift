@@ -24,6 +24,7 @@ enum SidebarSelection: Hashable {
 
 struct ContentView: View {
     @Environment(SessionLibrary.self) private var library
+    @Environment(\.undoManager) private var undoManager
     @State private var selection: SidebarSelection? = .section(.sessions)
     @State private var search = ""
 
@@ -50,5 +51,7 @@ struct ContentView: View {
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search")
+        .onAppear { library.undoManager = undoManager }
+        .onChange(of: undoManager) { _, manager in library.undoManager = manager }
     }
 }
