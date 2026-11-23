@@ -86,13 +86,13 @@ struct MenuBarView: View {
             Text("Needs attention")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            let expiring = library.expiringSessions
-            if !expiring.isEmpty {
-                let days = library.expiringWithinDays
+            ForEach(library.expiringByAgent, id: \.rule.agent) { group in
+                let n = group.sessions.count
+                let when = library.expiringWithinDays(group.sessions).map { $0 == 0 ? "at the next sweep" : "in \($0) \($0 == 1 ? "day" : "days")" }
                 AttentionRow(
                     symbol: "clock",
-                    title: "\(expiring.count) Claude Code \(expiring.count == 1 ? "session" : "sessions") will be deleted \(days == 0 ? "at the next sweep" : "in \(days) \(days == 1 ? "day" : "days")")",
-                    detail: "Review them, or raise cleanupPeriodDays to keep them."
+                    title: "\(n) \(group.rule.agent.displayName) \(n == 1 ? "session" : "sessions") " + (when.map { "will be deleted \($0)" } ?? "near its limit"),
+                    detail: group.rule.rule
                 ) { open(filter: .expiring) }
             }
             let live = library.liveSessions

@@ -57,7 +57,10 @@ final class SessionLibrary {
     private(set) var isLoading = false
     private(set) var errorMessage: String?
     private(set) var lastScan: Date?
-    private(set) var retentionDays = 30
+    /// Each agent's own retention sweep, for the banner and the menu bar.
+    private(set) var retentionRules: [AgentKind: RetentionRule] = [:]
+    /// Agents Domovy only reads, with the reason (Antigravity for now).
+    private(set) var readOnlyAgents: [AgentKind: String] = [:]
     var toast: Toast?
     /// Failure of an action started from the menu (⌘Z), shown by the sessions view.
     var actionError: String?
@@ -100,7 +103,11 @@ final class SessionLibrary {
         self.home = home
         claudeCode = ClaudeCodeAdapter(home: home)
         codex = CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: isCustomHome))
-        adapters = [claudeCode, codex]
+        adapters = [
+            claudeCode, codex,
+            GeminiAdapter(home: home, cli: GeminiCLI.choice(home: home, isCustomHome: isCustomHome)),
+            AntigravityAdapter(home: home),
+        ]
         let models = ModelStores.at(home: home, isCustomHome: isCustomHome)
         footprintProviders = adapters + FootprintScanner.measuredOnly(home: home) + FootprintScanner.modelStores(models)
         executor = Executor(storeRoot: storeRoot)
@@ -157,10 +164,20 @@ final class SessionLibrary {
         footprints.map { ($0.agent, $0.totalBytes) }.sorted { $0.1 > $1.1 }
     }
 
-    /// Days until the last of the expiring sessions is swept, rounded up.
-    var expiringWithinDays: Int {
-        guard let latest = expiringSessions.compactMap(\.expiresAt).max() else { return 0 }
+    /// Days until the last of the expiring sessions is swept, rounded up; `nil` when the
+    /// agent's rule is not a date (Antigravity's 500-conversation cap).
+    func expiringWithinDays(_ sessions: [Session]) -> Int? {
+        guard let latest = sessions.compactMap(\.expiresAt).max() else { return nil }
         return max(0, Int(ceil(latest.timeIntervalSinceNow / 86_400)))
+    }
+
+    /// Expiring sessions per agent with a known rule, in sidebar order.
+    var expiringByAgent: [(rule: RetentionRule, sessions: [Session])] {
+        AgentKind.allCases.compactMap { agent in
+            let expiring = expiringSessions.filter { $0.agent == agent }
+            guard !expiring.isEmpty, let rule = retentionRules[agent] else { return nil }
+            return (rule, expiring)
+        }
     }
 
     // MARK: Loading
@@ -173,8 +190,10 @@ final class SessionLibrary {
         let measuring = Task.detached { await FootprintScanner.scan(providers) }
         var found: [Session] = []
         var failures: [String] = []
+        var readOnly: [AgentKind: String] = [:]
         // One agent failing must not hide the others.
         for adapter in adapters where await adapter.status() != .notInstalled {
+            if case .readOnly(let reason) = await adapter.status() { readOnly[adapter.kind] = reason }
             do {
                 found += try await adapter.sessions()
             } catch {
@@ -192,7 +211,12 @@ final class SessionLibrary {
         failures += measured.failures
         sessions = found.sorted { $0.lastActive > $1.lastActive }
         footprints = measured.footprints
-        retentionDays = claudeCode.cleanupPeriodDays()
+        readOnlyAgents = readOnly
+        var rules: [AgentKind: RetentionRule] = [:]
+        for case let reporter as any RetentionReporting & AgentAdapter in adapters {
+            if let rule = reporter.retentionRule() { rules[reporter.kind] = rule }
+        }
+        retentionRules = rules
         errorMessage = failures.isEmpty ? nil : failures.joined(separator: " ")
         lastScan = Date()
     }

@@ -12,6 +12,7 @@ struct AgentGlyph: View {
         case .codex: "Cx"
         case .cursor: "Cu"
         case .gemini: "Ge"
+        case .antigravity: "AG"
         case .openCode: "OC"
         case .ollama: "Ol"
         case .lmStudio: "LM"
@@ -47,10 +48,12 @@ struct StatusLabel: View {
                 .foregroundStyle(.secondary)
         case .expiring:
             let days = session.daysUntilExpiry ?? 0
-            Label(days == 0 ? "Next sweep" : "\(days) \(days == 1 ? "day" : "days")", systemImage: "clock")
+            // No date for a count-based rule (Antigravity's 500 conversations): the note says why.
+            let text = session.expiresAt == nil ? "At risk" : days == 0 ? "Next sweep" : "\(days) \(days == 1 ? "day" : "days")"
+            Label(text, systemImage: "clock")
                 .foregroundStyle(.tint)
-                .help(session.expiresAt.map { "Claude Code will delete this session around \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "")
-                .accessibilityLabel(days == 0 ? "Expiring at the next sweep" : "Expiring in \(days) days")
+                .help(session.retentionNote ?? session.expiresAt.map { "\(session.agent.displayName) will delete this session around \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "")
+                .accessibilityLabel(session.expiresAt == nil ? "At risk: \(session.retentionNote ?? "the agent may delete it soon")" : days == 0 ? "Expiring at the next sweep" : "Expiring in \(days) days")
         }
     }
 }

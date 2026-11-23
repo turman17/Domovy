@@ -176,3 +176,41 @@ if [ ! -f "$DEV/.models-seeded" ]; then
   age 40 "$H/datasets--acme--reviews/snapshots/ffffffffffffffffffffffffffffffffffffffff"
   touch "$DEV/.models-seeded"
 fi
+if [ ! -f "$DEV/.gemini-seeded" ]; then
+  # Gemini CLI and Antigravity from the fixtures. The chats' project paths point at folders in
+  # .devhome/code, where the gemini stub (never the real CLI) runs --delete-session.
+  rm -rf "$DEV/.gemini"
+  cp -Rp "$ROOT/Tests/Fixtures/gemini/0.43" "$DEV/.gemini"
+  cp -Rp "$ROOT/Tests/Fixtures/antigravity/1.5/antigravity-cli" "$DEV/.gemini/antigravity-cli"
+  cp -Rp "$ROOT/Tests/Fixtures/antigravity/1.5/antigravity" "$DEV/.gemini/antigravity"
+  mkdir -p "$DEV/bin" "$DEV/code/orbit-api" "$DEV/code/landing-site"
+  cp "$ROOT/Tests/Fixtures/gemini/stub-gemini.sh" "$DEV/bin/gemini"
+  chmod 755 "$DEV/bin/gemini"
+  G="$DEV/.gemini"
+  for f in "$G/projects.json" "$G/tmp/orbit-api/.project_root" "$G/tmp/landing-site/.project_root"; do
+    sed "s|/Users/dev/code|$DEV/code|g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  done
+  # Compressible bulk, so Archive has something to do.
+  seq 1 6000 | sed 's/.*/{"id":"b&","timestamp":"2026-11-21T10:01:00.000Z","type":"info","content":"synthetic repeated tool output for compression"}/' \
+    >> "$G/tmp/orbit-api/chats/session-2026-11-21T10-00-7d7d7d7d.jsonl"
+  for id in a1a1a1a1-1111-4111-8111-111111111111 b2b2b2b2-2222-4222-8222-222222222222; do
+    mkdir -p "$G/antigravity-cli/conversations"
+    sqlite3 "$G/antigravity-cli/conversations/$id.db" < "$ROOT/Tests/Fixtures/antigravity/sql/conversation.sql"
+  done
+  mkdir -p "$G/antigravity/conversations"
+  sqlite3 "$G/antigravity/conversations/c3c3c3c3-3333-4333-8333-333333333333.db" < "$ROOT/Tests/Fixtures/antigravity/sql/conversation.sql"
+  sqlite3 "$G/antigravity-cli/conversation_summaries.db" < "$ROOT/Tests/Fixtures/antigravity/sql/summaries.sql"
+  dd if=/dev/urandom of="$G/antigravity-cli/log/cli-20261101_100000.log" bs=1k count=900 2>/dev/null
+  dd if=/dev/urandom of="$G/antigravity-cli/brain/a1a1a1a1-1111-4111-8111-111111111111/screenshot.webp" bs=1k count=1500 2>/dev/null
+  age() { touch -t "$(date -v-"$1"d +%Y%m%d%H%M)" "$2"; }
+  C="$G/tmp/orbit-api/chats"
+  age 2 "$C/session-2026-11-20T09-15-e1e1e1e1.jsonl"
+  age 1 "$C/session-2026-11-21T10-00-7d7d7d7d.jsonl"
+  age 26 "$C/session-2026-10-28T14-30-e3e3e3e3.jsonl"
+  for f in "$G"/tmp/landing-site/chats/*.jsonl; do age 5 "$f"; done
+  age 1 "$G/antigravity-cli/conversations/a1a1a1a1-1111-4111-8111-111111111111.db"
+  age 3 "$G/antigravity-cli/conversations/b2b2b2b2-2222-4222-8222-222222222222.db"
+  age 4 "$G/antigravity/conversations/c3c3c3c3-3333-4333-8333-333333333333.db"
+  # The app store's presence lock is not held here, so its conversation shows as idle.
+  touch "$DEV/.gemini-seeded"
+fi

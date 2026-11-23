@@ -25,7 +25,7 @@ struct SessionsView: View {
     @State private var statusFilter: StatusFilter = .all
     @State private var sortOrder = [KeyPathComparator(\Session.lastActive, order: .reverse)]
     @State private var showInspector = true
-    @State private var bannerDismissed = false
+    @State private var dismissedBanners: Set<AgentKind> = []
     @State private var deleteRequest: DeleteRequest?
     @State private var archiveRequest: ArchiveRequest?
     @State private var previewSession: Session?
@@ -58,30 +58,26 @@ struct SessionsView: View {
 
     private var canArchiveSelection: Bool {
         guard let selectedSession else { return false }
-        return selectedSession.status != .live && !selectedSession.isArchived
+        return selectedSession.status != .live && !selectedSession.isArchived && library.readOnlyAgents[selectedSession.agent] == nil
     }
 
-    /// Expiring sessions "Archive all" would compress.
-    private var archivableExpiring: [Session] {
-        library.expiringSessions.filter { !$0.isArchived }
-    }
-
-    private var showsBanner: Bool {
-        !bannerDismissed && !library.expiringSessions.isEmpty && (agentFilter == nil || agentFilter == .claudeCode)
+    /// One retention banner per agent whose sweep is about to take sessions.
+    private var banners: [(rule: RetentionRule, sessions: [Session])] {
+        library.expiringByAgent.filter { !dismissedBanners.contains($0.rule.agent) && (agentFilter == nil || agentFilter == $0.rule.agent) }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            if showsBanner {
+            ForEach(banners, id: \.rule.agent) { banner in
+                let archivable = banner.sessions.filter { !$0.isArchived }
                 RetentionBanner(
-                    sessions: library.expiringSessions,
-                    retentionDays: library.retentionDays,
-                    withinDays: library.expiringWithinDays,
-                    settingsURL: library.claudeCode.root.appendingPathComponent("settings.json"),
-                    archivableCount: archivableExpiring.count,
-                    onArchiveAll: { requestArchive(archivableExpiring) },
+                    rule: banner.rule,
+                    sessions: banner.sessions,
+                    withinDays: library.expiringWithinDays(banner.sessions),
+                    archivableCount: banner.rule.canArchive ? archivable.count : 0,
+                    onArchiveAll: { requestArchive(archivable) },
                     onReview: { statusFilter = .expiring },
-                    onDismiss: { bannerDismissed = true }
+                    onDismiss: { dismissedBanners.insert(banner.rule.agent) }
                 )
             }
             if library.secretScan != .idle {

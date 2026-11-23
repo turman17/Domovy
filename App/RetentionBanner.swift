@@ -3,15 +3,16 @@ import DomovyCore
 import SwiftUI
 
 /// "Claude Code deletes sessions older than 30 days. 12 sessions go in the next 4 days."
+/// One per agent whose own sweep is about to take sessions.
 ///
 /// No `.fixedSize(horizontal: false, vertical: true)` on these texts: on macOS 27 it makes
 /// SwiftUI stop drawing the sidebar and the sessions Table below it. Text wraps without it.
 struct RetentionBanner: View {
+    let rule: RetentionRule
     let sessions: [Session]
-    let retentionDays: Int
-    let withinDays: Int
-    let settingsURL: URL
-    /// Expiring sessions not archived yet.
+    /// `nil` when the rule is not a date (a conversation cap).
+    let withinDays: Int?
+    /// Expiring sessions not archived yet, when Domovy can archive this agent's sessions.
     let archivableCount: Int
     let onArchiveAll: () -> Void
     let onReview: () -> Void
@@ -19,8 +20,13 @@ struct RetentionBanner: View {
 
     private var headline: String {
         let count = sessions.count
+        let noun = rule.agent == .antigravity ? "conversation" : rule.agent == .gemini ? "chat" : "session"
+        let subject = "\(count) \(noun)\(count == 1 ? "" : "s")"
+        guard let withinDays else {
+            return "\(rule.rule) \(subject) \(count == 1 ? "is" : "are") close to the limit or past it."
+        }
         let when = withinDays == 0 ? "at the next sweep" : "in the next \(withinDays) \(withinDays == 1 ? "day" : "days")"
-        return "Claude Code deletes sessions older than \(retentionDays) days. \(count) \(count == 1 ? "session goes" : "sessions go") \(when)."
+        return "\(rule.rule) \(subject) \(count == 1 ? "goes" : "go") \(when)."
     }
 
     var body: some View {
@@ -32,22 +38,24 @@ struct RetentionBanner: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(headline)
                     .fontWeight(.semibold)
-                Text("Archiving compresses them to free space but keeps their dates, so the sweep still applies. To keep them longer, raise cleanupPeriodDays in Claude Code settings.")
+                Text(rule.advice)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 8) {
-                    if archivableCount > 0 {
+                    if rule.canArchive, archivableCount > 0 {
                         Button("Archive all \(archivableCount)", action: onArchiveAll)
                             .buttonStyle(.borderedProminent)
-                            .help("Compress the expiring sessions on disk. Claude Code can still resume them.")
+                            .help("Compress the expiring sessions on disk. \(rule.agent.displayName) can still resume them.")
                     }
                     Button("Review", action: onReview)
                         .help("Show only the expiring sessions")
-                    Button("Change setting…") {
-                        NSWorkspace.shared.activateFileViewerSelecting([settingsURL])
+                    if let settingsFile = rule.settingsFile {
+                        Button("Change setting…") {
+                            NSWorkspace.shared.activateFileViewerSelecting([settingsFile])
+                        }
+                        .buttonStyle(.link)
+                        .help("Reveal \(settingsFile.lastPathComponent) in the Finder")
                     }
-                    .buttonStyle(.link)
-                    .help("Reveal settings.json in the Finder")
                 }
                 .padding(.top, 4)
             }

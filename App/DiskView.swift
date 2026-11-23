@@ -50,6 +50,7 @@ struct DiskView: View {
                         }
                         ForEach(ordered.filter { !$0.agent.isModelStore }, id: \.agent) { footprint in
                             AgentFootprintSection(footprint: footprint, onOpenSessions: onOpenSessions, onCleanUp: { requestCleanUp(.orphans) }, onGuidedCleanup: requestCleanup)
+                                .id(footprint.agent.rawValue) // DOMOVY_DISK_ANCHOR=gemini
                         }
                         if !library.modelFootprints.isEmpty {
                             LocalModelsHeader(unusedDays: $unusedDays, selected: $selectedModels, onRemoveSelected: removeSelected, onPurgeCopies: requestPurge)
