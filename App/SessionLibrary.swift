@@ -189,33 +189,51 @@ final class SessionLibrary {
 
     func reload() async {
         isLoading = true
-        defer { isLoading = false }
-        // Disk sizes are measured off the main actor, alongside the session scan.
+        let started = ContinuousClock.now
+        defer {
+            isLoading = false
+            logger.info("Reload finished in \(ContinuousClock.now - started, privacy: .public)")
+        }
+        // Disk sizes, orphans, kept copies and every agent's sessions are read in parallel,
+        // off the main actor. Sizes are published as soon as they are measured: the menu bar
+        // shows them without waiting for the session scan.
         let providers = footprintProviders
         let measuring = Task.detached { await FootprintScanner.scan(providers) }
-        var found: [Session] = []
-        var failures: [String] = []
-        var readOnly: [AgentKind: String] = [:]
-        // One agent failing must not hide the others.
-        for adapter in adapters where await adapter.status() != .notInstalled {
-            if case .readOnly(let reason) = await adapter.status() { readOnly[adapter.kind] = reason }
-            do {
-                found += try await adapter.sessions()
-            } catch {
-                logger.error("Scan of \(adapter.kind.displayName, privacy: .public) failed: \(error.localizedDescription, privacy: .private)")
-                failures.append(error.localizedDescription)
-            }
-        }
         let claudeCode = self.claudeCode
         let orphans = Task.detached { await claudeCode.orphanReport() }
         let executor = self.executor
         let kept = Task.detached { (try? executor.purgePlan([.toolCopy]).totalBytes) ?? 0 }
+        let adapters = self.adapters
+        // One agent failing must not hide the others.
+        let scanning = Task.detached {
+            await withTaskGroup(of: AgentScan.self) { group in
+                for adapter in adapters {
+                    group.addTask { await AgentScan.run(adapter) }
+                }
+                var results: [AgentScan] = []
+                for await scan in group { results.append(scan) }
+                return results
+            }
+        }
         let measured = await measuring.value
+        footprints = measured.footprints
+        logger.info("Disk sizes ready after \(ContinuousClock.now - started, privacy: .public)")
+        let scanned = await scanning.value
+        var found: [Session] = []
+        var failures: [String] = []
+        var readOnly: [AgentKind: String] = [:]
+        for scan in scanned {
+            found += scan.sessions
+            if let reason = scan.readOnlyReason { readOnly[scan.kind] = reason }
+            if let failure = scan.failure {
+                logger.error("Scan of \(scan.kind.displayName, privacy: .public) failed: \(failure, privacy: .private)")
+                failures.append(failure)
+            }
+        }
         orphanReport = await orphans.value
         keptCopyBytes = await kept.value
         failures += measured.failures
         sessions = found.sorted { $0.lastActive > $1.lastActive }
-        footprints = measured.footprints
         readOnlyAgents = readOnly
         var rules: [AgentKind: RetentionRule] = [:]
         for case let reporter as any RetentionReporting & AgentAdapter in adapters {
@@ -224,6 +242,27 @@ final class SessionLibrary {
         retentionRules = rules
         errorMessage = failures.isEmpty ? nil : failures.joined(separator: " ")
         lastScan = Date()
+    }
+
+    /// One agent's part of a reload, run off the main actor.
+    private struct AgentScan: Sendable {
+        let kind: AgentKind
+        var sessions: [Session] = []
+        var readOnlyReason: String?
+        var failure: String?
+
+        static func run(_ adapter: any AgentAdapter) async -> AgentScan {
+            var scan = AgentScan(kind: adapter.kind)
+            let status = await adapter.status()
+            guard status != .notInstalled else { return scan }
+            if case .readOnly(let reason) = status { scan.readOnlyReason = reason }
+            do {
+                scan.sessions = try await adapter.sessions()
+            } catch {
+                scan.failure = error.localizedDescription
+            }
+            return scan
+        }
     }
 
     /// The conversation for the preview, with the values of scan findings masked.
