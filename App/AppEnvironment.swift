@@ -18,6 +18,18 @@ enum AppEnvironment {
         home.appendingPathComponent("Library/Application Support/Domovy", isDirectory: true)
     }
 
+    /// Debug only: `DOMOVY_START_SECTION=disk` opens the window on that section, so a window
+    /// capture can show it without clicking.
+    static var startSection: SidebarSelection {
+        #if DEBUG
+        if let raw = ProcessInfo.processInfo.environment["DOMOVY_START_SECTION"],
+           let item = SidebarItem.allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) {
+            return .section(item)
+        }
+        #endif
+        return .section(.sessions)
+    }
+
     static var isDevHome: Bool {
         ProcessInfo.processInfo.environment["DOMOVY_ROOT"]?.isEmpty == false
     }

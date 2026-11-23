@@ -52,6 +52,7 @@ struct Toast: Identifiable, Equatable {
 @Observable
 final class SessionLibrary {
     private(set) var sessions: [Session] = []
+    /// Last measured footprints, kept while a rescan runs so the Disk screen never goes blank.
     private(set) var footprints: [Footprint] = []
     private(set) var isLoading = false
     private(set) var errorMessage: String?
@@ -70,6 +71,8 @@ final class SessionLibrary {
     let codex: CodexAdapter
     /// Every adapter, in sidebar order. Agents not installed at this home are skipped on scan.
     let adapters: [any AgentAdapter]
+    /// Every agent the Disk screen measures: the adapters plus Claude Desktop and Cursor.
+    let footprintProviders: [any FootprintProvider]
     let executor: Executor
     private let logger = Logger(subsystem: "io.github.turman17.Domovy", category: "SessionLibrary")
 
@@ -77,6 +80,7 @@ final class SessionLibrary {
         claudeCode = ClaudeCodeAdapter(home: home)
         codex = CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: isCustomHome))
         adapters = [claudeCode, codex]
+        footprintProviders = adapters + FootprintScanner.measuredOnly(home: home)
         executor = Executor(storeRoot: storeRoot)
     }
 
@@ -94,6 +98,7 @@ final class SessionLibrary {
 
     var totalSessionBytes: Int64 { sessions.reduce(0) { $0 + $1.sizeBytes } }
     var totalFootprintBytes: Int64 { footprints.reduce(0) { $0 + $1.totalBytes } }
+    var safeFootprintBytes: Int64 { footprints.reduce(0) { $0 + $1.bytes(.safe) } }
     var expiringSessions: [Session] { sessions.filter { $0.status == .expiring } }
     var liveSessions: [Session] { sessions.filter { $0.status == .live } }
     var needsAttention: Bool { !expiringSessions.isEmpty }
@@ -123,21 +128,24 @@ final class SessionLibrary {
     func reload() async {
         isLoading = true
         defer { isLoading = false }
+        // Disk sizes are measured off the main actor, alongside the session scan.
+        let providers = footprintProviders
+        let measuring = Task.detached { await FootprintScanner.scan(providers) }
         var found: [Session] = []
-        var prints: [Footprint] = []
         var failures: [String] = []
         // One agent failing must not hide the others.
         for adapter in adapters where await adapter.status() != .notInstalled {
             do {
                 found += try await adapter.sessions()
-                prints.append(try await adapter.footprint())
             } catch {
                 logger.error("Scan of \(adapter.kind.displayName, privacy: .public) failed: \(error.localizedDescription, privacy: .private)")
                 failures.append(error.localizedDescription)
             }
         }
+        let measured = await measuring.value
+        failures += measured.failures
         sessions = found.sorted { $0.lastActive > $1.lastActive }
-        footprints = prints
+        footprints = measured.footprints
         retentionDays = claudeCode.cleanupPeriodDays()
         errorMessage = failures.isEmpty ? nil : failures.joined(separator: " ")
         lastScan = Date()

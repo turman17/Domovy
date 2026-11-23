@@ -25,7 +25,7 @@ enum SidebarSelection: Hashable {
 struct ContentView: View {
     @Environment(SessionLibrary.self) private var library
     @Environment(\.undoManager) private var undoManager
-    @State private var selection: SidebarSelection? = .section(.sessions)
+    @State private var selection: SidebarSelection? = AppEnvironment.startSection
     @State private var search = ""
 
     private var showsSessions: Bool {
@@ -46,6 +46,8 @@ struct ContentView: View {
         } detail: {
             if showsSessions {
                 SessionsView(agentFilter: agentFilter, search: search)
+            } else if selection == .section(.disk) {
+                DiskView(onOpenSessions: { selection = .agent($0) })
             } else if case .section(let item) = selection {
                 ContentUnavailableView(item.rawValue, systemImage: item.symbol, description: Text("Not built yet."))
             }

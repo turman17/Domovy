@@ -43,3 +43,28 @@ if [ ! -d "$DEV/.codex" ]; then
   age 42 "$S/10/12/rollout-2026-10-12T10-00-00-01a1f055-5555-7555-8555-555555555555.jsonl.zst"
   age 8  "$CODEX/archived_sessions/rollout-2026-11-15T22-41-43-01a1f044-4444-7444-8444-444444444444.jsonl"
 fi
+SUPPORT="$DEV/Library/Application Support"
+if [ ! -d "$SUPPORT/Claude" ]; then
+  mkdir -p "$SUPPORT"
+  cp -Rp "$ROOT/Tests/Fixtures/claude-desktop/1.0" "$SUPPORT/Claude"
+  # A sparse stand-in for the 10 GiB Cowork VM image: large logically, a few KB on disk.
+  dd if=/dev/zero of="$SUPPORT/Claude/vm_bundles/claudevm.bundle/rootfs.img" bs=1 count=0 seek=10g 2>/dev/null
+  dd if=/dev/urandom of="$SUPPORT/Claude/vm_bundles/claudevm.bundle/rootfs.img" bs=1m count=24 conv=notrunc 2>/dev/null
+  dd if=/dev/urandom of="$SUPPORT/Claude/Cache/Cache_Data/data_1" bs=1m count=6 2>/dev/null
+fi
+if [ ! -d "$SUPPORT/Cursor" ]; then
+  mkdir -p "$SUPPORT"
+  cp -Rp "$ROOT/Tests/Fixtures/cursor/3.0/support" "$SUPPORT/Cursor"
+  cp -Rp "$ROOT/Tests/Fixtures/cursor/3.0/dot-cursor" "$DEV/.cursor"
+  dd if=/dev/urandom of="$SUPPORT/Cursor/User/globalStorage/state.vscdb" bs=1m count=9 2>/dev/null
+  dd if=/dev/urandom of="$DEV/.cursor/extensions/example.theme-1.0.0/theme.bin" bs=1m count=3 2>/dev/null
+fi
+if [ ! -d "$DEV/.claude/security/agent-sdk-venv" ]; then
+  # Disk screen extras: a rebuildable venv and a companion whose transcript is gone.
+  mkdir -p "$DEV/.claude/security/agent-sdk-venv/lib"
+  dd if=/dev/urandom of="$DEV/.claude/security/agent-sdk-venv/lib/site.bin" bs=1m count=4 2>/dev/null
+  ORPHAN="$DEV/.claude/file-history/eeeeeeee-5555-4555-8555-555555555555"
+  mkdir -p "$ORPHAN"
+  dd if=/dev/urandom of="$ORPHAN/snapshot.bin" bs=1k count=640 2>/dev/null
+  touch -t "$(date -v-5d +%Y%m%d%H%M)" "$ORPHAN"
+fi
