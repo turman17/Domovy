@@ -1,6 +1,6 @@
 # Claude rules (local only)
-CLAUDE.md
-.claude/
+/CLAUDE.md
+/.claude/
 
 # Build artifacts
 .local/
