@@ -8,6 +8,12 @@ struct DeleteRequest: Identifiable {
     var id: String { session.id }
 }
 
+/// Purge originals awaiting confirmation.
+struct PurgeRequest: Identifiable {
+    let id = UUID()
+    let plan: PurgePlan
+}
+
 struct SessionsView: View {
     let agentFilter: AgentKind?
     /// Owned by ContentView: `.searchable` must sit on the split view, or SwiftUI can insert
@@ -15,7 +21,7 @@ struct SessionsView: View {
     let search: String
 
     @Environment(SessionLibrary.self) private var library
-    @State private var selection: Session.ID?
+    @State private var selection: Session.ID? = AppEnvironment.startSelection
     @State private var statusFilter: StatusFilter = .all
     @State private var sortOrder = [KeyPathComparator(\Session.lastActive, order: .reverse)]
     @State private var showInspector = true
@@ -23,12 +29,16 @@ struct SessionsView: View {
     @State private var deleteRequest: DeleteRequest?
     @State private var archiveRequest: ArchiveRequest?
     @State private var previewSession: Session?
+    @State private var redactRequest: RedactRequest?
+    @State private var purgeRequest: PurgeRequest?
+    @State private var showsFlaggedOnly = false
     @State private var errorMessage: String?
 
     private var visible: [Session] {
         library.sessions
             .filter { agentFilter == nil || $0.agent == agentFilter }
             .filter { statusFilter.matches($0) }
+            .filter { !showsFlaggedOnly || !library.findings(for: $0).isEmpty }
             .filter {
                 search.isEmpty
                     || $0.displayTitle.localizedCaseInsensitiveContains(search)
@@ -74,16 +84,29 @@ struct SessionsView: View {
                     onDismiss: { bannerDismissed = true }
                 )
             }
+            if library.secretScan != .idle {
+                SecretScanBanner(
+                    state: library.secretScan,
+                    showsFlaggedOnly: showsFlaggedOnly,
+                    onToggleFlagged: { showsFlaggedOnly.toggle() },
+                    onPurge: requestPurge,
+                    onCancel: library.cancelSecretScan,
+                    onDismiss: {
+                        library.dismissSecretScan()
+                        showsFlaggedOnly = false
+                    }
+                )
+            }
             table
         }
         .overlay { emptyState }
         .overlay(alignment: .bottom) { toastOverlay }
-        .navigationTitle(statusFilter == .expiring ? "Expiring soon" : (agentFilter?.displayName ?? "Sessions"))
+        .navigationTitle(showsFlaggedOnly ? "Flagged by the secret scan" : statusFilter == .expiring ? "Expiring soon" : (agentFilter?.displayName ?? "Sessions"))
         .navigationSubtitle("\(visible.count) \(visible.count == 1 ? "session" : "sessions") · \(visible.reduce(0) { $0 + $1.sizeBytes }.formatted(.byteCount(style: .file)))")
         .toolbar { toolbar }
         .inspector(isPresented: $showInspector) {
             if let selectedSession {
-                SessionInspector(session: selectedSession, onArchive: requestArchiveSelection, onDelete: requestDelete)
+                SessionInspector(session: selectedSession, onArchive: requestArchiveSelection, onDelete: requestDelete, onRedact: requestRedact)
                     .inspectorColumnWidth(min: 260, ideal: 300, max: 420)
             } else {
                 ContentUnavailableView("No session selected", systemImage: "bubble.left.and.text.bubble.right", description: Text("Select a session to read it."))
@@ -97,6 +120,12 @@ struct SessionsView: View {
         }
         .sheet(item: $previewSession) { session in
             TranscriptPreviewSheet(session: session)
+        }
+        .sheet(item: $redactRequest) { request in
+            RedactPlanSheet(request: request)
+        }
+        .sheet(item: $purgeRequest) { request in
+            PurgeSheet(plan: request.plan)
         }
         .alert("Something went wrong", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
@@ -147,8 +176,13 @@ struct SessionsView: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .width(min: 60, ideal: 70)
-            TableColumn("Status", value: \.status.rawValue) { StatusLabel(session: $0) }
-                .width(min: 80, ideal: 96)
+            TableColumn("Status", value: \.status.rawValue) { session in
+                HStack(spacing: 6) {
+                    StatusLabel(session: session)
+                    SecretMarker(count: library.findings(for: session).count)
+                }
+            }
+            .width(min: 96, ideal: 116)
         }
         .onDeleteCommand(perform: requestDelete)
         .onKeyPress(.space) {
@@ -181,6 +215,22 @@ struct SessionsView: View {
             }
             .help(statusFilter == .all ? "Filter by status" : "Showing \(statusFilter.rawValue.lowercased()) sessions")
         }
+        ToolbarItem {
+            Menu {
+                Button("Scan All Sessions") { library.scanSecrets(library.sessions) }
+                Button("Scan Selected Session") {
+                    if let selectedSession { library.scanSecrets([selectedSession]) }
+                }
+                .disabled(selectedSession == nil)
+                Divider()
+                Button("Redact Selected Session\u{2026}", action: requestRedact)
+                    .disabled(!canRedactSelection)
+                Button("Purge Originals\u{2026}", action: requestPurge)
+            } label: {
+                Label("Secrets", systemImage: library.flaggedSessionCount > 0 ? "key.fill" : "key")
+            }
+            .help("Scan transcripts for API keys, tokens and passwords (\u{21E7}\u{2318}S)")
+        }
         ToolbarItemGroup {
             Button("Archive…", systemImage: "archivebox", action: requestArchiveSelection)
                 .keyboardShortcut("a", modifiers: [.command, .option])
@@ -194,6 +244,11 @@ struct SessionsView: View {
                 .keyboardShortcut("i", modifiers: [.command, .option])
                 .help("Show or hide the transcript")
         }
+    }
+
+    private var canRedactSelection: Bool {
+        guard let selectedSession, selectedSession.status != .live else { return false }
+        return library.findings(for: selectedSession).contains(where: \.isRedactable)
     }
 
     private var archiveHelp: String {
@@ -262,11 +317,34 @@ struct SessionsView: View {
         }
     }
 
-    private func requestDelete() {
-        guard let session = selectedSession, session.status != .live else { return }
+    private func requestRedact() {
+        guard let session = selectedSession, canRedactSelection else { return }
         Task {
             do {
-                let plan = try await library.deletePlan(for: session, destination: .trash)
+                redactRequest = RedactRequest(session: session, plan: try await library.redactionPlan(for: session))
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func requestPurge() {
+        Task {
+            do {
+                purgeRequest = PurgeRequest(plan: try await library.purgePlan())
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func requestDelete() {
+        guard let session = selectedSession, session.status != .live else { return }
+        // The Trash keeps plaintext until it is emptied; flagged sessions default to the quarantine.
+        let destination: Destination = library.findings(for: session).isEmpty ? .trash : .quarantine
+        Task {
+            do {
+                let plan = try await library.deletePlan(for: session, destination: destination)
                 deleteRequest = DeleteRequest(session: session, plan: plan)
             } catch {
                 errorMessage = error.localizedDescription

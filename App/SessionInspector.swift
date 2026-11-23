@@ -6,11 +6,13 @@ struct SessionInspector: View {
     let session: Session
     let onArchive: () -> Void
     let onDelete: () -> Void
+    let onRedact: () -> Void
 
     @Environment(SessionLibrary.self) private var library
     @State private var artifacts: [Artifact] = []
 
     private var isLive: Bool { session.status == .live }
+    private var findings: [SecretFinding] { library.findings(for: session) }
 
     private var archivedHelp: String {
         session.agent == .codex ? "Already archived in Codex." : "Already archived: its files are compressed on disk."
@@ -36,6 +38,11 @@ struct SessionInspector: View {
             header
                 .padding(16)
             Divider()
+            if !findings.isEmpty {
+                SecretsSection(session: session, findings: findings, onRedact: onRedact)
+                    .padding(16)
+                Divider()
+            }
             TranscriptView(session: session)
             Divider()
             footer

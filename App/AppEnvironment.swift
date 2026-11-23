@@ -30,6 +30,23 @@ enum AppEnvironment {
         return .section(.sessions)
     }
 
+    /// Debug only: `DOMOVY_SELECT=<session id>` selects that session at launch.
+    static var startSelection: String? {
+        #if DEBUG
+        if let id = ProcessInfo.processInfo.environment["DOMOVY_SELECT"], !id.isEmpty { return id }
+        #endif
+        return nil
+    }
+
+    /// Debug only: `DOMOVY_SCAN_SECRETS=1` runs the secret scan over every session after launch.
+    static var scansSecretsAtLaunch: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["DOMOVY_SCAN_SECRETS"] == "1"
+        #else
+        return false
+        #endif
+    }
+
     static var isDevHome: Bool {
         ProcessInfo.processInfo.environment["DOMOVY_ROOT"]?.isEmpty == false
     }

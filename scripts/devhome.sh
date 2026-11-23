@@ -68,3 +68,23 @@ if [ ! -d "$DEV/.claude/security/agent-sdk-venv" ]; then
   dd if=/dev/urandom of="$ORPHAN/snapshot.bin" bs=1k count=640 2>/dev/null
   touch -t "$(date -v-5d +%Y%m%d%H%M)" "$ORPHAN"
 fi
+if [ ! -f "$DEV/.secrets-seeded" ]; then
+  # Synthetic, obviously fake secrets for the secret scan. Each value is split in two here so
+  # no token-shaped literal sits in the repository.
+  ANT="sk-""ant-api03-FAKEfake0123456789FAKEfake0123456789a1B2"
+  AWS="AKIA""EXAMPLEFAKE00001"
+  GH="ghp""_FAKEfakeFAKEfakeFAKEfakeFAKEfake0000"
+  OAI="sk-""proj-FAKEa1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuV"
+  P="$DEV/.claude/projects"
+  A="$P/-Users-dev-code-orbit-api/aaaaaaaa-1111-4111-8111-111111111111.jsonl"
+  C="$P/-Users-dev-code-landing-site/cccccccc-3333-4333-8333-333333333333.jsonl"
+  X="$DEV/.codex/sessions/2026/11/20/rollout-2026-11-20T09-15-00-01a1f011-1111-7111-8111-111111111111.jsonl"
+  printf '%s\n' "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Use ANTHROPIC_API_KEY=$ANT for the eval run\"},\"cwd\":\"/Users/dev/code/orbit-api\",\"sessionId\":\"aaaaaaaa-1111-4111-8111-111111111111\",\"timestamp\":\"2026-11-20T10:05:00.000Z\"}" >> "$A"
+  printf '%s\n' "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"The staging db password=Zq8vN3xLm2Pw7Rt, AWS key $AWS\"},\"cwd\":\"/Users/dev/code/orbit-api\",\"sessionId\":\"aaaaaaaa-1111-4111-8111-111111111111\",\"timestamp\":\"2026-11-20T10:06:00.000Z\"}" >> "$A"
+  printf '%s\n' "deploy log: using token $GH" >> "$DEV/.claude/projects/-Users-dev-code-orbit-api/aaaaaaaa-1111-4111-8111-111111111111/tool-results/r1a2b3c4d.txt"
+  printf '%s\n' "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"export GH_TOKEN=$GH and push\"},\"cwd\":\"/Users/dev/code/landing-site\",\"sessionId\":\"cccccccc-3333-4333-8333-333333333333\",\"timestamp\":\"2026-10-28T10:00:00.000Z\"}" >> "$C"
+  printf '%s\n' "{\"timestamp\":\"2026-11-20T09:16:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Run the evals with $OAI\",\"images\":[]}}" >> "$X"
+  age() { touch -t "$(date -v-"$1"d +%Y%m%d%H%M)" "$2"; }
+  age 2 "$A"; age 26 "$C"; age 2 "$X"
+  touch "$DEV/.secrets-seeded"
+fi

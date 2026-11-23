@@ -10,7 +10,10 @@ struct DomovyApp: App {
             ContentView()
                 .environment(library)
                 .frame(minWidth: 820, minHeight: 560)
-                .task { await library.reload() }
+                .task {
+                    await library.reload()
+                    if AppEnvironment.scansSecretsAtLaunch { library.scanSecrets(library.sessions) }
+                }
         }
         .defaultSize(width: 1100, height: 720)
         .commands {
@@ -19,6 +22,8 @@ struct DomovyApp: App {
             CommandGroup(after: .toolbar) {
                 Button("Reload Sessions") { Task { await library.reload() } }
                     .keyboardShortcut("r")
+                Button("Scan for Secrets") { library.scanSecrets(library.sessions) }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
             }
         }
 

@@ -30,6 +30,7 @@ struct DeletePlanSheet: View {
                 .foregroundStyle(.secondary)
             LiveCheckRow(result: plan.liveCheck)
             RemarksView(remarks: plan.remarks)
+            secretsHint
             changes
             if let failure {
                 Label(failure, systemImage: "exclamationmark.circle")
@@ -43,6 +44,20 @@ struct DeletePlanSheet: View {
             Task {
                 do { plan = try await library.deletePlan(for: request.session, destination: newValue) } catch { failure = error.localizedDescription }
             }
+        }
+    }
+
+    /// The Trash keeps plaintext; say so when the scan flagged this session.
+    @ViewBuilder
+    private var secretsHint: some View {
+        let count = library.findings(for: request.session).count
+        if count > 0 {
+            Label(
+                "The secret scan found \(count) possible \(count == 1 ? "secret" : "secrets") here. The Trash keeps files in plain text until it is emptied. The Domovy quarantine keeps them out of the Trash; remove them for good later with Secrets \u{203A} Purge Originals.",
+                systemImage: "key.fill"
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
         }
     }
 

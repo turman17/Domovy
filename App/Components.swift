@@ -52,6 +52,23 @@ struct StatusLabel: View {
     }
 }
 
+/// `key.fill` in the accent with the count, when the secret scan flagged the session.
+struct SecretMarker: View {
+    let count: Int
+
+    var body: some View {
+        if count > 0 {
+            Label("\(count)", systemImage: "key.fill")
+                .labelStyle(.titleAndIcon)
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.tint)
+                .help("\(count) possible \(count == 1 ? "secret" : "secrets") found by the secret scan")
+                .accessibilityLabel("\(count) possible \(count == 1 ? "secret" : "secrets")")
+        }
+    }
+}
+
 /// Proportional bar, one segment per agent. Accent shades, then gray for the rest.
 struct BreakdownBar: View {
     let segments: [(name: String, bytes: Int64)]

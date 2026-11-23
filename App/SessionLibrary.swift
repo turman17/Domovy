@@ -67,6 +67,15 @@ final class SessionLibrary {
     /// Set by the menu bar popover so the main window opens on that filter.
     var requestedFilter: StatusFilter?
 
+    // Secret scan state, changed only by SessionLibrary+Secrets. In memory only: findings are
+    // never written to disk (they hold masked previews, never values, either way).
+    /// Findings of the last scan, by session id.
+    var secretFindings: [Session.ID: [SecretFinding]] = [:]
+    var secretScan: SecretScanState = .idle
+    var secretScanTask: Task<Void, Never>?
+    /// Actions on the undo stack, so a purge can take the ones it ended off it.
+    var registeredUndoActions: [UndoAction] = []
+
     let claudeCode: ClaudeCodeAdapter
     let codex: CodexAdapter
     /// Every adapter, in sidebar order. Agents not installed at this home are skipped on scan.
@@ -74,9 +83,11 @@ final class SessionLibrary {
     /// Every agent the Disk screen measures: the adapters plus Claude Desktop and Cursor.
     let footprintProviders: [any FootprintProvider]
     let executor: Executor
-    private let logger = Logger(subsystem: "io.github.turman17.Domovy", category: "SessionLibrary")
+    let home: URL
+    let logger = Logger(subsystem: "io.github.turman17.Domovy", category: "SessionLibrary")
 
     init(home: URL, storeRoot: URL, isCustomHome: Bool) {
+        self.home = home
         claudeCode = ClaudeCodeAdapter(home: home)
         codex = CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: isCustomHome))
         adapters = [claudeCode, codex]
@@ -178,7 +189,11 @@ final class SessionLibrary {
 
     /// Executes a delete plan off the main actor, then rescans and offers undo.
     func execute(_ plan: Plan, for session: Session) async throws {
+        var plan = plan
+        // The undo entry remembers the scan's verdict, so Purge originals can offer its files.
+        plan.secretFindingCount = secretFindings[session.id]?.count ?? 0
         let entries = try await run([plan])
+        secretFindings[session.id] = nil
         let size = plan.totalBytes.formatted(.byteCount(style: .file))
         let action = UndoAction(name: "Move to Trash", entries: entries)
         register(action)
@@ -224,24 +239,33 @@ final class SessionLibrary {
         }.value
         let titles = Set(restored.map(\.sessionID)).compactMap { id in sessions.first { $0.id == id }?.displayTitle }
         let what = titles.count == 1 ? "\u{201C}\(titles[0])\u{201D}" : "\(restored.count) sessions"
-        let verb = action.entries.first?.action == .archive ? "Decompressed" : "Put back"
+        let verb = switch action.entries.first?.action {
+        case .archive: "Decompressed"
+        case .redact: "Put back the original of"
+        default: "Put back"
+        }
         toast = Toast(message: "\(verb) \(what).", undo: nil)
+        registeredUndoActions.removeAll { $0 === action }
         await reload()
+        if action.entries.first?.action == .redact {
+            await rescanSecrets(Set(restored.map(\.sessionID)))
+        }
     }
 
     /// " Codex left 2 things behind: …" after a verified agent command, or nothing.
-    private static func leftoverText(_ entries: [UndoEntry]) -> String {
+    static func leftoverText(_ entries: [UndoEntry]) -> String {
         let leftovers = entries.flatMap(\.leftovers)
         guard !leftovers.isEmpty else { return "" }
         return " Checked afterwards: " + leftovers.joined(separator: " ")
     }
 
-    private func run(_ plans: [Plan]) async throws -> [UndoEntry] {
+    func run(_ plans: [Plan]) async throws -> [UndoEntry] {
         let executor = self.executor
         return try await Task.detached { try executor.execute(plans) }.value
     }
 
-    private func register(_ action: UndoAction) {
+    func register(_ action: UndoAction) {
+        registeredUndoActions.append(action)
         guard let undoManager else { return }
         undoManager.registerUndo(withTarget: action) { [weak self] action in
             Task { @MainActor in
