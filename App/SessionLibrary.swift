@@ -316,6 +316,31 @@ final class SessionLibrary {
         await reload()
     }
 
+    /// Executes delete plans for several sessions as one batch: one undo entry for all.
+    func execute(_ plans: [Plan], for sessions: [Session], purgeNow: Bool = false) async throws {
+        if plans.count == 1, let session = sessions.first(where: { $0.id == plans[0].sessionID }) {
+            try await execute(plans[0], for: session, purgeNow: purgeNow)
+            return
+        }
+        let plans = plans.map { plan in
+            var plan = plan
+            plan.secretFindingCount = secretFindings[plan.sessionID]?.count ?? 0
+            return plan
+        }
+        let entries = try await run(plans)
+        for plan in plans { secretFindings[plan.sessionID] = nil }
+        let size = plans.reduce(Int64(0)) { $0 + $1.totalBytes }.formatted(.byteCount(style: .file))
+        let freed = purgeNow ? await purgeKeptCopies(entries) : nil
+        let action = UndoAction(name: "Move to Trash", entries: entries)
+        if freed == nil { register(action) }
+        let what = "\(plans.count) sessions (\(size))"
+        let message = plans.allSatisfy(\.moves.isEmpty)
+            ? "Deleted \(what)."
+            : "Moved \(what) to \((plans[0].destination ?? .trash).displayName)."
+        toast = Toast(message: message + (freed.map { " " + $0 } ?? "") + Self.leftoverText(entries), undo: freed == nil ? action : nil)
+        await reload()
+    }
+
     /// "Free the space now": purges the copies Domovy kept for `entries` right after the tool
     /// command ran. Returns what to tell the user; a failure leaves the copies and says so.
     func purgeKeptCopies(_ entries: [UndoEntry]) async -> String {
@@ -374,7 +399,7 @@ final class SessionLibrary {
         } else if let scope = restored.first.flatMap({ OrphanScope(rawValue: $0.sessionID) }) {
             what = scope == .orphans ? "the orphans" : "the duplicates"
         } else {
-            what = titles.count == 1 ? "\u{201C}\(titles[0])\u{201D}" : "\(restored.count) sessions"
+            what = titles.count == 1 ? "\u{201C}\(titles[0])\u{201D}" : "\(Set(restored.map(\.sessionID)).count) sessions"
         }
         let verb = switch action.entries.first?.action {
         case .archive: "Decompressed"

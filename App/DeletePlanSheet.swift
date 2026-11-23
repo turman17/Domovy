@@ -2,13 +2,14 @@ import DomovyCore
 import SwiftUI
 
 /// Shows the exact plan before anything moves: every file and index entry, the total, the
-/// destination and the live check. Return confirms, Escape cancels.
+/// destination and the live check, grouped per session for a batch. Return confirms, Escape
+/// cancels.
 struct DeletePlanSheet: View {
     let request: DeleteRequest
 
     @Environment(SessionLibrary.self) private var library
     @Environment(\.dismiss) private var dismiss
-    @State private var plan: Plan
+    @State private var plans: [Plan]
     @State private var destination: Destination
     @State private var isExecuting = false
     @State private var failure: String?
@@ -17,29 +18,63 @@ struct DeletePlanSheet: View {
 
     init(request: DeleteRequest) {
         self.request = request
-        _plan = State(initialValue: request.plan)
-        _destination = State(initialValue: request.plan.destination ?? .trash)
+        _plans = State(initialValue: request.plans)
+        _destination = State(initialValue: request.plans.first?.destination ?? .trash)
     }
 
-    private var root: URL { library.root(for: plan.agent) }
+    private var isBatch: Bool { plans.count > 1 }
+    private var totalBytes: Int64 { plans.reduce(0) { $0 + $1.totalBytes } }
+    private var keepsToolCopies: Bool { plans.contains(where: \.keepsToolCopies) }
+    private var acknowledgements: [String] { Array(Set(plans.compactMap(\.acknowledgement))).sorted() }
+    private var isLive: Bool { plans.contains { $0.liveCheck.isLive } }
+    private var secretCount: Int { request.sessions.reduce(0) { $0 + library.findings(for: $1).count } }
+
     private var confirmTitle: String {
-        if purgeNow && plan.keepsToolCopies { return "Delete Now" }
-        if (!plan.commands.isEmpty || !plan.databaseEdits.isEmpty) && plan.moves.isEmpty { return "Delete" }
-        return destination == .trash ? "Move to Trash" : "Move to Quarantine"
+        let what = isBatch ? " \(plans.count) Sessions" : ""
+        if purgeNow && keepsToolCopies { return "Delete Now" }
+        if plans.allSatisfy({ (!$0.commands.isEmpty || !$0.databaseEdits.isEmpty) && $0.moves.isEmpty }) { return "Delete" + what }
+        return "Move\(what) to " + (destination == .trash ? "Trash" : "Quarantine")
+    }
+
+    private var title: String {
+        isBatch ? "Delete \(plans.count) sessions?" : "Delete session \u{201C}\(request.sessions[0].displayTitle)\u{201D}?"
+    }
+
+    private var summary: String {
+        guard isBatch else { return plans.first?.summary ?? "" }
+        let moved = plans.reduce(0) { $0 + $1.moves.count }
+        var parts = ["Changes \(plans.count) sessions (\(totalBytes.formatted(.byteCount(style: .file))))."]
+        if moved > 0 { parts.append("Moves \(moved) \(moved == 1 ? "file or folder" : "files and folders") to \(destination.displayName).") }
+        parts.append("Every change is listed below, grouped by session.")
+        return parts.joined(separator: " ")
+    }
+
+    /// One live check per agent: a batch is checked with the same signals for each session.
+    private var liveChecks: [Plan] {
+        if let live = plans.first(where: { $0.liveCheck.isLive }) { return [live] }
+        var seen: Set<AgentKind> = []
+        return plans.filter { seen.insert($0.agent).inserted }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Delete session \u{201C}\(request.session.displayTitle)\u{201D}?")
+            Text(title)
                 .font(.title3.weight(.semibold))
-            Text(plan.summary)
+            Text(summary)
                 .foregroundStyle(.secondary)
-            LiveCheckRow(result: plan.liveCheck)
-            RemarksView(remarks: plan.remarks)
+            ForEach(request.notes, id: \.self) { note in
+                Label(note, systemImage: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(liveChecks) { plan in
+                LiveCheckRow(result: plan.liveCheck)
+            }
+            RemarksView(remarks: Array(Set(plans.flatMap(\.remarks))).sorted())
             secretsHint
             changes
-            if plan.keepsToolCopies { FreeSpaceNowToggle(isOn: $purgeNow) }
-            if let text = plan.acknowledgement { AcknowledgementToggle(text: text, isOn: $acknowledged) }
+            if keepsToolCopies { FreeSpaceNowToggle(isOn: $purgeNow) }
+            if !acknowledgements.isEmpty { AcknowledgementToggle(text: acknowledgements.joined(separator: " "), isOn: $acknowledged) }
             if let failure {
                 Label(failure, systemImage: "exclamationmark.circle")
                     .foregroundStyle(.secondary)
@@ -50,15 +85,23 @@ struct DeletePlanSheet: View {
         .frame(width: 560)
         .onChange(of: destination) { _, newValue in
             Task {
-                do { plan = try await library.deletePlan(for: request.session, destination: newValue) } catch { failure = error.localizedDescription }
+                do {
+                    var replanned: [Plan] = []
+                    for session in request.sessions {
+                        replanned.append(try await library.deletePlan(for: session, destination: newValue))
+                    }
+                    plans = replanned
+                } catch {
+                    failure = error.localizedDescription
+                }
             }
         }
     }
 
-    /// The Trash keeps plaintext; say so when the scan flagged this session.
+    /// The Trash keeps plaintext; say so when the scan flagged these sessions.
     @ViewBuilder
     private var secretsHint: some View {
-        let count = library.findings(for: request.session).count
+        let count = secretCount
         if count > 0 {
             Label(
                 "The secret scan found \(count) possible \(count == 1 ? "secret" : "secrets") here. The Trash keeps files in plain text until it is emptied. The Domovy quarantine keeps them out of the Trash; remove them for good later with Secrets \u{203A} Purge Originals.",
@@ -71,25 +114,8 @@ struct DeletePlanSheet: View {
 
     private var changes: some View {
         List {
-            CommandsSection(commands: plan.commands)
-            DatabaseEditSection(edits: plan.databaseEdits)
-            Section("\(plan.agent.displayName) · \(abbreviatedRoot) · moved to \(destination.displayName)") {
-                ForEach(plan.moves, id: \.source) { move in
-                    ChangeRow(
-                        symbol: move.kind == .folder ? "folder" : "doc",
-                        path: relativePath(move.source, under: root) + (move.kind == .folder ? "/" : ""),
-                        note: move.note,
-                        size: move.sizeBytes.formatted(.byteCount(style: .file))
-                    )
-                }
-            }
-            if !plan.indexEdits.isEmpty || !plan.registryRemovals.isEmpty {
-                Section("Index entries · edited in place, backup kept") {
-                    ForEach(plan.indexEdits, id: \.file) { edit in
-                        ChangeRow(symbol: "list.bullet.rectangle", path: relativePath(edit.file, under: root), note: edit.note, size: "–")
-                    }
-                    RegistryRemovalRows(removals: plan.registryRemovals)
-                }
+            ForEach(plans) { plan in
+                PlanChanges(plan: plan, sessionTitle: isBatch ? title(of: plan) : nil, root: library.root(for: plan.agent), destination: destination)
             }
         }
         .frame(height: 320)
@@ -97,8 +123,8 @@ struct DeletePlanSheet: View {
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private var abbreviatedRoot: String {
-        "~/" + relativePath(root, under: root.deletingLastPathComponent())
+    private func title(of plan: Plan) -> String {
+        request.sessions.first { $0.id == plan.sessionID }?.displayTitle ?? plan.sessionID
     }
 
     private var footer: some View {
@@ -110,7 +136,7 @@ struct DeletePlanSheet: View {
             }
             .labelsHidden()
             .fixedSize()
-            SizeText(bytes: plan.totalBytes)
+            SizeText(bytes: totalBytes)
                 .foregroundStyle(.secondary)
             Spacer()
             Button("Cancel") { dismiss() }
@@ -119,22 +145,65 @@ struct DeletePlanSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 // With a kept copy the delete stays undoable; red only once it is for good.
-                .tint(!plan.keepsToolCopies || purgeNow ? .red : nil)
-                .disabled(plan.liveCheck.isLive || plan.isEmpty || isExecuting || (plan.acknowledgement != nil && !acknowledged))
+                .tint(!keepsToolCopies || purgeNow ? .red : nil)
+                .disabled(isLive || plans.isEmpty || plans.contains(where: \.isEmpty) || isExecuting || (!acknowledgements.isEmpty && !acknowledged))
         }
     }
 
     private func execute() {
         isExecuting = true
-        var plan = plan
-        plan.isAcknowledged = acknowledged
+        let plans = plans.map { plan in
+            var plan = plan
+            plan.isAcknowledged = acknowledged
+            return plan
+        }
         Task {
             do {
-                try await library.execute(plan, for: request.session, purgeNow: purgeNow && plan.keepsToolCopies)
+                try await library.execute(plans, for: request.sessions, purgeNow: purgeNow && keepsToolCopies)
                 dismiss()
             } catch {
                 failure = error.localizedDescription
                 isExecuting = false
+            }
+        }
+    }
+}
+
+/// One plan's rows: the agent's commands, database rows, moved files and index entries.
+/// In a batch every section header starts with the session's title.
+private struct PlanChanges: View {
+    let plan: Plan
+    let sessionTitle: String?
+    let root: URL
+    let destination: Destination
+
+    private var prefix: String { sessionTitle.map { "\u{201C}\($0)\u{201D} · " } ?? "" }
+
+    private var abbreviatedRoot: String {
+        "~/" + relativePath(root, under: root.deletingLastPathComponent())
+    }
+
+    var body: some View {
+        CommandsSection(commands: plan.commands)
+        DatabaseEditSection(edits: plan.databaseEdits)
+        if !plan.moves.isEmpty || sessionTitle == nil {
+            Section(prefix + "\(plan.agent.displayName) · \(abbreviatedRoot) · moved to \(destination.displayName)") {
+                ForEach(plan.moves, id: \.source) { move in
+                    ChangeRow(
+                        symbol: move.kind == .folder ? "folder" : "doc",
+                        path: relativePath(move.source, under: root) + (move.kind == .folder ? "/" : ""),
+                        note: move.note,
+                        size: move.sizeBytes.formatted(.byteCount(style: .file))
+                    )
+                }
+            }
+        }
+        if !plan.indexEdits.isEmpty || !plan.registryRemovals.isEmpty {
+            Section(prefix + "Index entries · edited in place, backup kept") {
+                ForEach(plan.indexEdits, id: \.file) { edit in
+                    ChangeRow(symbol: "list.bullet.rectangle", path: relativePath(edit.file, under: root), note: edit.note, size: "–")
+                }
+                RegistryRemovalRows(removals: plan.registryRemovals)
             }
         }
     }

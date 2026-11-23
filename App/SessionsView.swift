@@ -1,11 +1,13 @@
 import DomovyCore
 import SwiftUI
 
-/// A delete request awaiting confirmation: the session and its computed plan.
+/// A delete request awaiting confirmation: the sessions and one computed plan each.
 struct DeleteRequest: Identifiable {
-    let session: Session
-    let plan: Plan
-    var id: String { session.id }
+    let id = UUID()
+    let sessions: [Session]
+    let plans: [Plan]
+    /// Selected sessions left out, one line each ("2 live sessions are left alone.").
+    var notes: [String] = []
 }
 
 /// Purge originals awaiting confirmation.
@@ -21,7 +23,7 @@ struct SessionsView: View {
     let search: String
 
     @Environment(SessionLibrary.self) private var library
-    @State private var selection: Session.ID? = AppEnvironment.startSelection
+    @State private var selection: Set<Session.ID> = Set([AppEnvironment.startSelection].compactMap { $0 })
     @State private var statusFilter: StatusFilter = .all
     @State private var sortOrder = [KeyPathComparator(\SessionRow.lastActive, order: .reverse)]
     /// Column widths, kept here so they survive the table being rebuilt on a sort.
@@ -57,19 +59,33 @@ struct SessionsView: View {
         )
     }
 
+    /// Selected sessions in table order.
+    private var selectedSessions: [Session] {
+        guard !selection.isEmpty else { return [] }
+        return rows.lazy.filter { selection.contains($0.id) }.map(\.session)
+    }
+
+    /// The one selected session, or nil when none or several are selected.
     private var selectedSession: Session? {
-        library.sessions.first { $0.id == selection }
+        guard selection.count == 1, let id = selection.first else { return nil }
+        return library.sessions.first { $0.id == id }
+    }
+
+    /// What Quick Look, Get Info and scrolling use: the first selected row.
+    private var primarySession: Session? {
+        selectedSession ?? selectedSessions.first
     }
 
     private var canDeleteSelection: Bool {
-        guard let selectedSession else { return false }
-        return selectedSession.status != .live
+        selectedSessions.contains { $0.status != .live }
     }
 
     private var canArchiveSelection: Bool {
-        guard let selectedSession else { return false }
-        return selectedSession.status != .live && !selectedSession.isArchived && selectedSession.canArchive
-            && library.readOnlyAgents[selectedSession.agent] == nil
+        selectedSessions.contains(where: canArchive)
+    }
+
+    private func canArchive(_ session: Session) -> Bool {
+        session.status != .live && !session.isArchived && session.canArchive && library.readOnlyAgents[session.agent] == nil
     }
 
     /// One retention banner per agent whose sweep is about to take sessions.
@@ -116,11 +132,20 @@ struct SessionsView: View {
         }
         .onChange(of: rowView) { _, view in rows = view.apply(to: allRows) }
         .onChange(of: library.sessions.isEmpty) { _, isEmpty in
-            if !isEmpty, AppEnvironment.opensInfoAtLaunch, infoSession == nil { infoSession = selectedSession }
+            if !isEmpty, AppEnvironment.opensInfoAtLaunch, infoSession == nil { infoSession = primarySession }
         }
         .toolbar { toolbar }
         .inspector(isPresented: $showInspector) {
-            if let selectedSession {
+            if selection.count > 1 {
+                SelectionSummary(
+                    sessions: selectedSessions,
+                    canArchive: canArchiveSelection,
+                    canDelete: canDeleteSelection,
+                    onArchive: requestArchiveSelection,
+                    onDelete: requestDelete
+                )
+                .inspectorColumnWidth(min: 260, ideal: 300, max: 420)
+            } else if let selectedSession {
                 SessionInspector(session: selectedSession, onArchive: requestArchiveSelection, onDelete: requestDelete, onRedact: requestRedact)
                     .inspectorColumnWidth(min: 260, ideal: 300, max: 420)
             } else {
@@ -179,8 +204,8 @@ struct SessionsView: View {
                 // place takes AppKit seconds with hundreds of rows.
                 .id(sortOrder.map { "\($0.keyPath)\($0.order == .forward)" })
                 .onChange(of: sortOrder) {
-                    guard let selection else { return }
-                    Task { proxy.scrollTo(selection, anchor: .center) }
+                    guard let first = primarySession?.id else { return }
+                    Task { proxy.scrollTo(first, anchor: .center) }
                 }
         }
     }
@@ -238,16 +263,19 @@ struct SessionsView: View {
             .customizationID("status")
         }
         .contextMenu(forSelectionType: Session.ID.self) { ids in
-            if let id = ids.first, let session = library.sessions.first(where: { $0.id == id }) {
+            // Right-clicking inside a selection gives the whole selection, like the Finder.
+            if ids.count > 1 {
+                selectionMenu(for: rows.filter { ids.contains($0.id) }.map(\.session))
+            } else if let id = ids.first, let session = library.sessions.first(where: { $0.id == id }) {
                 rowMenu(for: session)
             }
         } primaryAction: { ids in
-            if let id = ids.first { previewSession = library.sessions.first { $0.id == id } }
+            if let session = rows.first(where: { ids.contains($0.id) })?.session { previewSession = session }
         }
         .onDeleteCommand(perform: requestDelete)
         .onKeyPress(.space) {
-            guard let selectedSession else { return .ignored }
-            previewSession = selectedSession
+            guard let primarySession else { return .ignored }
+            previewSession = primarySession
             return .handled
         }
     }
@@ -281,15 +309,30 @@ struct SessionsView: View {
         Button("Scan for Secrets", systemImage: "key") { library.scanSecrets([session]) }
         Divider()
         Button("Archive\u{2026}", systemImage: "archivebox") {
-            selection = session.id
+            selection = [session.id]
             requestArchive([session])
         }
-        .disabled(isLive || session.isArchived || !session.canArchive || library.readOnlyAgents[session.agent] != nil)
+        .disabled(!canArchive(session))
         Button("Move to Trash\u{2026}", systemImage: "trash") {
-            selection = session.id
-            requestDelete(session)
+            selection = [session.id]
+            requestDelete([session])
         }
         .disabled(isLive)
+    }
+
+    /// Right-click menu on several rows: actions that make sense for all of them at once.
+    @ViewBuilder
+    private func selectionMenu(for sessions: [Session]) -> some View {
+        let n = sessions.count
+        Button("Copy Session IDs", systemImage: "number") {
+            copyToPasteboard(sessions.map(\.id).joined(separator: "\n"))
+        }
+        Button("Scan \(n) for Secrets", systemImage: "key") { library.scanSecrets(sessions) }
+        Divider()
+        Button("Archive \(n) Sessions\u{2026}", systemImage: "archivebox") { requestArchiveBatch(sessions) }
+            .disabled(!sessions.contains(where: canArchive))
+        Button("Move \(n) Sessions to Trash\u{2026}", systemImage: "trash") { requestDelete(sessions) }
+            .disabled(!sessions.contains { $0.status != .live })
     }
 
     @ToolbarContentBuilder
@@ -318,10 +361,10 @@ struct SessionsView: View {
         ToolbarItem {
             Menu {
                 Button("Scan All Sessions") { library.scanSecrets(library.sessions) }
-                Button("Scan Selected Session") {
-                    if let selectedSession { library.scanSecrets([selectedSession]) }
+                Button(selection.count > 1 ? "Scan \(selection.count) Selected Sessions" : "Scan Selected Session") {
+                    library.scanSecrets(selectedSessions)
                 }
-                .disabled(selectedSession == nil)
+                .disabled(selection.isEmpty)
                 Divider()
                 Button("Redact Selected Session\u{2026}", action: requestRedact)
                     .disabled(!canRedactSelection)
@@ -340,9 +383,9 @@ struct SessionsView: View {
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(!canDeleteSelection)
                 .help(deleteHelp)
-            Button("Get Info", systemImage: "info.circle") { infoSession = selectedSession }
+            Button("Get Info", systemImage: "info.circle") { infoSession = primarySession }
                 .keyboardShortcut("i", modifiers: .command)
-                .disabled(selectedSession == nil)
+                .disabled(primarySession == nil)
                 .help("Everything Domovy knows about this session (\u{2318}I)")
             Button("Inspector", systemImage: "sidebar.trailing") { showInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])
@@ -356,6 +399,12 @@ struct SessionsView: View {
     }
 
     private var archiveHelp: String {
+        if selection.count > 1 {
+            let n = selectedSessions.filter(canArchive).count
+            return n == 0
+                ? "None of the selected sessions can be archived: they are live, already archived or read-only."
+                : "Compress \(n) of the \(selection.count) selected sessions on disk; the others are left alone (⌥⌘A)"
+        }
         guard let selectedSession else { return "Select a session to archive it" }
         if selectedSession.status == .live { return "This session is live. Quit the Claude Code session using it first." }
         if selectedSession.isArchived { return "This session is already archived." }
@@ -363,6 +412,10 @@ struct SessionsView: View {
     }
 
     private var deleteHelp: String {
+        if selection.count > 1 {
+            let n = selectedSessions.filter { $0.status != .live }.count
+            return n == 0 ? "All selected sessions are live." : "Move \(n) selected \(n == 1 ? "session" : "sessions") to the Trash; live ones are left alone (⌘⌫)"
+        }
         guard let selectedSession else { return "Select a session to delete it" }
         if selectedSession.status == .live { return "This session is live. Quit the Claude Code session using it first." }
         return "Move this session to the Trash (⌘⌫)"
@@ -398,12 +451,35 @@ struct SessionsView: View {
     // MARK: Actions
 
     private func requestArchiveSelection() {
-        guard let session = selectedSession, canArchiveSelection else { return }
-        requestArchive([session])
+        let sessions = selectedSessions
+        if sessions.count == 1 {
+            guard canArchiveSelection else { return }
+            requestArchive(sessions)
+        } else {
+            requestArchiveBatch(sessions)
+        }
+    }
+
+    /// Archives what can be archived and says what was left alone.
+    private func requestArchiveBatch(_ sessions: [Session]) {
+        let archivable = sessions.filter(canArchive)
+        guard !archivable.isEmpty else { return }
+        var notes: [String] = []
+        let live = sessions.filter { $0.status == .live }.count
+        if live > 0 { notes.append(Self.leftAlone(live, "live")) }
+        let archived = sessions.filter { $0.status != .live && $0.isArchived }.count
+        if archived > 0 { notes.append(Self.leftAlone(archived, "already archived")) }
+        let other = sessions.count - archivable.count - live - archived
+        if other > 0 { notes.append("\(other) \(other == 1 ? "session" : "sessions") from a read-only agent or with nothing to compress \(other == 1 ? "is" : "are") left alone.") }
+        requestArchive(archivable, notes: notes)
+    }
+
+    private static func leftAlone(_ n: Int, _ what: String) -> String {
+        "\(n) \(what) \(n == 1 ? "session is" : "sessions are") left alone."
     }
 
     /// Plans first, then the confirmation sheet. Sessions with nothing to compress drop out.
-    private func requestArchive(_ sessions: [Session]) {
+    private func requestArchive(_ sessions: [Session], notes: [String] = []) {
         Task {
             do {
                 let plans = try await library.archivePlans(for: sessions)
@@ -414,7 +490,12 @@ struct SessionsView: View {
                     return
                 }
                 let planned = Set(plans.map(\.sessionID))
-                archiveRequest = ArchiveRequest(sessions: sessions.filter { planned.contains($0.id) }, plans: plans)
+                var notes = notes
+                let dropped = sessions.count - planned.count
+                if dropped > 0, sessions.count > 1 {
+                    notes.append("\(dropped) \(dropped == 1 ? "session has" : "sessions have") nothing to compress or became live, and \(dropped == 1 ? "is" : "are") left alone.")
+                }
+                archiveRequest = ArchiveRequest(sessions: sessions.filter { planned.contains($0.id) }, plans: plans, notes: notes)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -443,20 +524,50 @@ struct SessionsView: View {
     }
 
     private func requestDelete() {
-        if let selectedSession { requestDelete(selectedSession) }
+        requestDelete(selectedSessions)
     }
 
-    private func requestDelete(_ session: Session) {
-        guard session.status != .live else { return }
+    /// Plans first, then one confirmation sheet. In a batch, live sessions and sessions that
+    /// cannot be planned are left out and the sheet says so; a single one shows why instead.
+    private func requestDelete(_ sessions: [Session]) {
+        let candidates = sessions.filter { $0.status != .live }
+        guard !candidates.isEmpty else { return }
         // The Trash keeps plaintext until it is emptied; flagged sessions default to the quarantine.
-        let destination: Destination = library.findings(for: session).isEmpty ? .trash : .quarantine
+        let flagged = candidates.contains { !library.findings(for: $0).isEmpty }
+        let destination: Destination = flagged ? .quarantine : .trash
         Task {
-            do {
-                let plan = try await library.deletePlan(for: session, destination: destination)
-                deleteRequest = DeleteRequest(session: session, plan: plan)
-            } catch {
-                errorMessage = error.localizedDescription
+            if candidates.count == 1, sessions.count == 1 {
+                do {
+                    let plan = try await library.deletePlan(for: candidates[0], destination: destination)
+                    deleteRequest = DeleteRequest(sessions: candidates, plans: [plan])
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+                return
             }
+            var planned: [Session] = []
+            var plans: [Plan] = []
+            var live = sessions.count - candidates.count
+            var failed = 0
+            for session in candidates {
+                do {
+                    let plan = try await library.deletePlan(for: session, destination: destination)
+                    if plan.liveCheck.isLive { live += 1; continue }
+                    if plan.isEmpty { failed += 1; continue }
+                    planned.append(session)
+                    plans.append(plan)
+                } catch {
+                    failed += 1
+                }
+            }
+            var notes: [String] = []
+            if live > 0 { notes.append(Self.leftAlone(live, "live")) }
+            if failed > 0 { notes.append("\(failed) \(failed == 1 ? "session" : "sessions") could not be planned and \(failed == 1 ? "is" : "are") left alone; delete \(failed == 1 ? "it" : "them") one at a time to see why.") }
+            guard !plans.isEmpty else {
+                errorMessage = "None of the selected sessions can be deleted right now. " + notes.joined(separator: " ")
+                return
+            }
+            deleteRequest = DeleteRequest(sessions: planned, plans: plans, notes: notes)
         }
     }
 }

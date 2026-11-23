@@ -7,6 +7,8 @@ struct ArchiveRequest: Identifiable {
     let id = UUID()
     let sessions: [Session]
     let plans: [Plan]
+    /// Selected sessions left out, one line each ("2 live sessions are left alone.").
+    var notes: [String] = []
 }
 
 /// Shows every file an archive compresses, sizes before and after, and the live check.
@@ -51,6 +53,11 @@ struct ArchivePlanSheet: View {
                 .font(.title3.weight(.semibold))
             Text(summary)
                 .foregroundStyle(.secondary)
+            ForEach(request.notes, id: \.self) { note in
+                Label(note, systemImage: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             if let plan = request.plans.first, !isBatch {
                 LiveCheckRow(result: plan.liveCheck)
                 RemarksView(remarks: plan.remarks.filter { $0 != summary })

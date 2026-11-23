@@ -73,6 +73,37 @@ struct ExecutorTests {
         #expect(throws: ExecutorError.self) { try executor.undoLatest() }
     }
 
+    @Test("a batch delete edits the shared history once per session and undoes as one")
+    func batchDelete() async throws {
+        let fixture = try FixtureHome()
+        let historyBefore = try fixture.contents("history.jsonl")
+        let historyMtime = try #require(fixture.modificationDate("history.jsonl"))
+        let adapter = fixture.adapter()
+        let plans = [
+            try await adapter.deletePlan(for: adapter.session(matching: IDs.idle), destination: .quarantine),
+            try await adapter.deletePlan(for: adapter.session(matching: IDs.expiring), destination: .quarantine),
+        ]
+        let executor = fixture.executor()
+        let entries = try executor.execute(plans)
+        #expect(entries.count == 2)
+        #expect(entries[0].batchID != nil && entries[0].batchID == entries[1].batchID)
+
+        // Both sessions' lines are gone, every other line stays.
+        let historyAfter = try fixture.contents("history.jsonl")
+        #expect(!historyAfter.contains(IDs.idle))
+        #expect(!historyAfter.contains(IDs.expiring))
+        #expect(historyAfter.contains(IDs.live))
+        #expect(historyAfter.contains(IDs.rosterLive))
+        #expect(fixture.modificationDate("history.jsonl") == historyMtime)
+
+        // Undone newest first, the way the app undoes a batch.
+        for entry in entries.reversed() { _ = try executor.undo(entry) }
+        #expect(try fixture.contents("history.jsonl") == historyBefore)
+        #expect(fixture.modificationDate("history.jsonl") == historyMtime)
+        let ids = Set(try await fixture.adapter().sessions().map(\.id))
+        #expect(ids.isSuperset(of: [IDs.idle, IDs.expiring]))
+    }
+
     @Test("refuses to execute a plan for a live session")
     func refusesLive() async throws {
         let fixture = try FixtureHome()
