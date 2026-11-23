@@ -104,7 +104,7 @@ struct Archive: AsyncParsableCommand {
                 Format.bytes(plan.totalBytes),
                 plan.isEmpty || !plan.commands.isEmpty ? "-" : "~" + Format.bytes(plan.estimatedBytesAfter),
                 state,
-                session.title ?? "(no prompt found)",
+                session.displayTitle,
             ])
         }
         guard !rows.isEmpty else {

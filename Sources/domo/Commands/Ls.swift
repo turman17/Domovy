@@ -35,7 +35,7 @@ struct Ls: AsyncParsableCommand {
                 Format.relative(s.lastActive),
                 Format.bytes(s.sizeBytes),
                 Format.status(s),
-                s.title ?? "(no prompt found)",
+                s.displayTitle,
             ]
         }
         print(Format.table(rows, header: ["ID", "AGENT", "PROJECT", "LAST ACTIVE", "SIZE", "STATUS", "TITLE"], rightAligned: [4]))
