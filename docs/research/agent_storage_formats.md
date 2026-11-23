@@ -65,6 +65,16 @@ Each agent stores a "session" differently. Claude Code uses one JSONL file per s
 - `session_index.jsonl` is an append-only thread-name index; "the most recent entry wins". Rewrites are serialized with `session_index.jsonl.lock`. — [codex-rs/rollout/src/session_index.rs](https://github.com/openai/codex/blob/main/codex-rs/rollout/src/session_index.rs)
 - `history.jsonl` holds prompt history, controlled by `history.persistence` (`save-all` or `none`) and `history.max_bytes`. Logs go to `$CODEX_HOME/log`. — [Codex config reference](https://developers.openai.com/codex/config-reference)
 - Worktrees: `~/.codex/worktrees/<hex-id>/<project-name>/`, each with a `.git` gitdir pointer into `repo/.git/worktrees/<name>/`. — [iamquang95/codex-clean (search snippet)](https://github.com/iamquang95/codex-clean); [openai/codex#54891](https://github.com/openai/codex/issues/54891)
+- Verified on a real install (codex-cli 0.169.0, app-server daemon 0.171.0, 2026-11-23; names, sizes, schemas and counts only):
+  - Rollouts at `sessions/YYYY/MM/DD/`, most of them `.jsonl.zst` even though `codex features list` reports `local_thread_store_compression` as false. Thread ids are UUIDv7.
+  - Some rollouts are named `rollout-<ts>-<thread>_<uuid>.jsonl[.zst]`; the second uuid has no `threads` row, so they are treated as further segments of `<thread>` (inferred).
+  - `archived_sessions/` is flat; its file count matches `threads.archived = 1`.
+  - `session_index.jsonl` keys: `id`, `thread_name`, `updated_at`. `history.jsonl` keys: `session_id`, `text`, `ts`.
+  - `generated_images/<thread-id>/` is keyed by thread id. `attachments/<uuid>/` is not (no match to any rollout); it is indexed by `attachments/pasted-text-attachments.json`.
+  - `thread-writer-locks/<thread-id>.lock`: the app-server daemon holds these open while a thread is loaded (lsof), and holds rollouts open too.
+  - `state_5.sqlite` (64 migrations): `threads` has `title`, `cwd`, `rollout_path`, `archived`, `first_user_message`; thread-keyed tables also in `thread_history_1.sqlite`, `logs_2.sqlite`, `goals_1.sqlite`, `memories_1.sqlite`, `queue_1.sqlite`, `sqlite/codex.db`.
+  - The CLI's own help lists `archive`, `unarchive`, `delete` (`--force`: SESSION must be a UUID). No `worktrees/` folder on this install.
+  - A Codex process (the app-server daemon of the ChatGPT app) runs persistently.
 - Per-run temporary repo copies were also reported in `/private/tmp`: 118 copies, 202 GB, not registered anywhere Codex can see. — [openai/codex#35383 (search snippet)](https://github.com/openai/codex/issues/35383)
 
 **Cursor**
