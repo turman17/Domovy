@@ -8,18 +8,27 @@ struct Du: AsyncParsableCommand {
     @OptionGroup var options: RootOptions
 
     func run() async throws {
-        let adapter = options.adapter
-        let footprint: Footprint
+        var footprints: [Footprint] = []
         do {
-            footprint = try await adapter.footprint()
+            for adapter in await options.installedAdapters() { footprints.append(try await adapter.footprint()) }
         } catch {
             throw Domo.fail(error)
         }
-        print("\(footprint.agent.displayName)  \(footprint.root.path)  \(Format.bytes(footprint.totalBytes))")
-        print("")
-        let rows = footprint.categories
-            .sorted { $0.sizeBytes > $1.sizeBytes }
-            .map { [Format.bytes($0.sizeBytes), $0.disposition.rawValue, $0.name, $0.note] }
-        print(Format.table(rows, header: ["SIZE", "DISPOSITION", "CATEGORY", "NOTE"], rightAligned: [0]))
+        guard !footprints.isEmpty else {
+            print("No agent folders found. All tidy.")
+            return
+        }
+        for (index, footprint) in footprints.enumerated() {
+            if index > 0 { print("") }
+            print("\(footprint.agent.displayName)  \(footprint.root.path)  \(Format.bytes(footprint.totalBytes))")
+            print("")
+            let rows = footprint.categories
+                .sorted { $0.sizeBytes > $1.sizeBytes }
+                .map { [Format.bytes($0.sizeBytes), $0.disposition.rawValue, $0.name, $0.note] }
+            print(Format.table(rows, header: ["SIZE", "DISPOSITION", "CATEGORY", "NOTE"], rightAligned: [0]))
+        }
+        if footprints.count > 1 {
+            print("\nTotal: \(Format.bytes(footprints.reduce(0) { $0 + $1.totalBytes }))")
+        }
     }
 }

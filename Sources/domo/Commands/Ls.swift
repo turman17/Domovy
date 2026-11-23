@@ -11,17 +11,18 @@ struct Ls: AsyncParsableCommand {
     var full = false
 
     func run() async throws {
-        let adapter = options.adapter
-        let status = await adapter.status()
-        if case .readOnly(let reason) = status {
-            FileHandle.standardError.write(Data("note: \(adapter.kind.displayName) is read-only: \(reason)\n".utf8))
-        }
-        let sessions: [Session]
+        var sessions: [Session] = []
         do {
-            sessions = try await adapter.sessions()
+            for adapter in await options.installedAdapters() {
+                if case .readOnly(let reason) = await adapter.status() {
+                    FileHandle.standardError.write(Data("note: \(adapter.kind.displayName) is read-only: \(reason)\n".utf8))
+                }
+                sessions += try await adapter.sessions()
+            }
         } catch {
             throw Domo.fail(error)
         }
+        sessions.sort { $0.lastActive > $1.lastActive }
         guard !sessions.isEmpty else {
             print("No sessions found. All tidy.")
             return

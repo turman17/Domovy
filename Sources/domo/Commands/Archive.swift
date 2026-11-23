@@ -6,8 +6,10 @@ struct Archive: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Compress cold sessions in place so they take less disk.",
         discussion: """
-        Uses APFS transparent compression: Claude Code reads the files unchanged and can still resume the session. \
-        Modification times are kept, so Claude Code's own cleanup still applies on schedule. `domo undo` decompresses again.
+        Claude Code sessions: APFS transparent compression; Claude Code reads the files unchanged and can still resume the session. \
+        Modification times are kept, so Claude Code's own cleanup still applies on schedule. \
+        Codex sessions: runs `codex archive` when the codex CLI is installed (Codex must be quit), else compresses in place. \
+        `domo undo` reverses either.
         """
     )
 
@@ -32,15 +34,15 @@ struct Archive: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let adapter = options.adapter
         do {
             let plans: [Plan]
             if let id {
-                let plan = try await adapter.archivePlan(for: try await adapter.session(matching: id))
+                let (adapter, session) = try await options.session(matching: id)
+                let plan = try await adapter.archivePlan(for: session)
                 print(Format.plan(plan))
                 plans = [plan]
             } else {
-                plans = try await batchPlans(adapter)
+                plans = try await batchPlans(await options.installedAdapters())
             }
             if dryRun {
                 print("\nDry run: nothing was changed.")
@@ -55,35 +57,50 @@ struct Archive: AsyncParsableCommand {
                 return
             }
             let files = runnable.reduce(0) { $0 + $1.compressions.count }
+            let commands = runnable.reduce(0) { $0 + $1.commands.count }
             let bytes = runnable.reduce(Int64(0)) { $0 + $1.totalBytes }
             if !yes {
-                try confirm("\nCompress \(files) files (\(Format.bytes(bytes))) in \(runnable.count) \(runnable.count == 1 ? "session" : "sessions")? [y/N] ")
+                var what: [String] = []
+                if files > 0 { what.append("compress \(files) files") }
+                if commands > 0 { what.append("run codex archive \(commands) \(commands == 1 ? "time" : "times")") }
+                let text = what.joined(separator: " and ")
+                try confirm("\n\(text.prefix(1).uppercased() + text.dropFirst()) (\(Format.bytes(bytes))) in \(runnable.count) \(runnable.count == 1 ? "session" : "sessions")? [y/N] ")
             }
             let entries = try options.executor.execute(runnable)
             let done = entries.reduce(0) { $0 + $1.compressed.count }
             if done < files { print("\nLeft \(files - done) files as they were: they changed since planning or did not compress.") }
-            print("\nDone. Compressed \(done) files in \(entries.count) \(entries.count == 1 ? "session" : "sessions"). Undo with `domo undo`.")
+            let ran = commands > 0 ? " Ran codex archive for \(commands) \(commands == 1 ? "session" : "sessions")." : ""
+            print("\nDone. Compressed \(done) files in \(entries.count) \(entries.count == 1 ? "session" : "sessions").\(ran) Undo with `domo undo`.")
+            Domo.printLeftovers(entries)
         } catch {
             throw Domo.fail(error)
         }
     }
 
     /// One plan per idle, not yet archived session older than the threshold, with a short table.
-    private func batchPlans(_ adapter: ClaudeCodeAdapter) async throws -> [Plan] {
+    private func batchPlans(_ adapters: [any AgentAdapter]) async throws -> [Plan] {
         guard let older else { return [] }
         let cutoff = Date().addingTimeInterval(-older.seconds)
-        let candidates = try await adapter.sessions().filter { $0.lastActive < cutoff && $0.status != .live }
         var plans: [Plan] = []
         var rows: [[String]] = []
-        for session in candidates {
+        // Codex sessions already in archived_sessions have nothing left to archive.
+        var candidates: [(adapter: any AgentAdapter, session: Session)] = []
+        for adapter in adapters {
+            for session in try await adapter.sessions()
+            where session.lastActive < cutoff && session.status != .live && !(session.agent == .codex && session.isArchived) {
+                candidates.append((adapter, session))
+            }
+        }
+        for (adapter, session) in candidates {
             let plan = try await adapter.archivePlan(for: session)
             plans.append(plan)
-            let state = plan.liveCheck.isLive ? "live, skipped" : (plan.isEmpty ? "nothing to compress" : "\(plan.compressions.count) files")
+            let state = plan.liveCheck.isLive ? "blocked, skipped" : (plan.isEmpty ? "nothing to do" : (plan.commands.isEmpty ? "\(plan.compressions.count) files" : "codex archive"))
             rows.append([
                 String(session.id.prefix(8)),
+                session.agent.displayName,
                 Format.relative(session.lastActive),
                 Format.bytes(plan.totalBytes),
-                plan.isEmpty ? "-" : "~" + Format.bytes(plan.estimatedBytesAfter),
+                plan.isEmpty || !plan.commands.isEmpty ? "-" : "~" + Format.bytes(plan.estimatedBytesAfter),
                 state,
                 session.title ?? "(no prompt found)",
             ])
@@ -92,12 +109,19 @@ struct Archive: AsyncParsableCommand {
             print("No idle sessions older than \(older.text).")
             return []
         }
-        print(Format.table(rows, header: ["ID", "LAST ACTIVE", "SIZE", "AFTER", "FILES", "TITLE"], rightAligned: [2, 3]))
+        print(Format.table(rows, header: ["ID", "AGENT", "LAST ACTIVE", "SIZE", "AFTER", "ACTION", "TITLE"], rightAligned: [3, 4]))
         let runnable = plans.filter { !$0.isEmpty && !$0.liveCheck.isLive }
         guard !runnable.isEmpty else { return plans }
-        let before = runnable.reduce(Int64(0)) { $0 + $1.totalBytes }
-        let after = runnable.reduce(Int64(0)) { $0 + $1.estimatedBytesAfter }
-        print("\n\(runnable.count) \(runnable.count == 1 ? "session" : "sessions"): \(Format.bytes(before)) \u{2192} ~\(Format.bytes(after)). Claude Code can still resume them. You can undo this.")
+        let compressing = runnable.filter { $0.commands.isEmpty }
+        let before = compressing.reduce(Int64(0)) { $0 + $1.totalBytes }
+        let after = compressing.reduce(Int64(0)) { $0 + $1.estimatedBytesAfter }
+        let archiving = runnable.count - compressing.count
+        if !compressing.isEmpty {
+            print("\n\(compressing.count) \(compressing.count == 1 ? "session" : "sessions") compressed in place: \(Format.bytes(before)) \u{2192} ~\(Format.bytes(after)). The agent can still resume them. You can undo this.")
+        }
+        if archiving > 0 {
+            print("\(archiving) Codex \(archiving == 1 ? "session goes" : "sessions go") to archived_sessions via `codex archive`. You can undo this.")
+        }
         return plans
     }
 }

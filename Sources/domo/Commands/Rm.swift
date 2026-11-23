@@ -23,9 +23,8 @@ struct Rm: AsyncParsableCommand {
     var to: Destination = .trash
 
     func run() async throws {
-        let adapter = options.adapter
         do {
-            let session = try await adapter.session(matching: id)
+            let (adapter, session) = try await options.session(matching: id)
             let plan = try await adapter.deletePlan(for: session, destination: to)
             print(Format.plan(plan))
             if dryRun {
@@ -38,11 +37,14 @@ struct Rm: AsyncParsableCommand {
                 return
             }
             if !yes {
-                try confirm("\nMove \(plan.moves.count) items (\(Format.bytes(plan.totalBytes))) to \(to.displayName)? [y/N] ")
+                let run = plan.commands.map { "run `\($0.commandLine)` and " }.joined()
+                try confirm("\n\(run.prefix(1).uppercased() + run.dropFirst())\(run.isEmpty ? "Move" : "move") \(plan.moves.count) items (\(Format.bytes(plan.totalBytes))) to \(to.displayName)? [y/N] ")
             }
             print("")
             let entry = try options.executor.execute(plan)
-            print("Done. Moved \(entry.moved.count) items and edited \(entry.indexRestores.count) index file(s). Undo with `domo undo`.")
+            let ran = plan.commands.isEmpty ? "" : "Ran \(plan.commands.map { "`\($0.commandLine)`" }.joined(separator: ", ")). "
+            print("Done. \(ran)Moved \(entry.moved.count) items and edited \(entry.indexRestores.count) index file(s). Undo with `domo undo`.")
+            Domo.printLeftovers([entry])
         } catch {
             throw Domo.fail(error)
         }

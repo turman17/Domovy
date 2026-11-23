@@ -9,6 +9,13 @@ struct Domo: AsyncParsableCommand {
         abstract: "Domovy: tidy up after AI coding agents.",
         subcommands: [Ls.self, Du.self, Rm.self, Archive.self, Undo.self]
     )
+
+    static func printLeftovers(_ entries: [UndoEntry]) {
+        let leftovers = entries.flatMap(\.leftovers)
+        guard !leftovers.isEmpty else { return }
+        print("\nChecked afterwards; left behind:")
+        for item in leftovers { print("  - \(item)") }
+    }
 }
 
 /// Options every subcommand shares. `--root` is a home directory; adapters look inside it
@@ -23,8 +30,33 @@ struct RootOptions: ParsableArguments {
         return FileManager.default.homeDirectoryForCurrentUser
     }
 
-    var adapter: ClaudeCodeAdapter {
+    var claudeCode: ClaudeCodeAdapter {
         ClaudeCodeAdapter(home: home)
+    }
+
+    /// Every adapter, in display order. A `--root` home never gets the real codex CLI.
+    var adapters: [any AgentAdapter] {
+        [claudeCode, CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: root != nil))]
+    }
+
+    /// Adapters whose agent is present at this root.
+    func installedAdapters() async -> [any AgentAdapter] {
+        var result: [any AgentAdapter] = []
+        for adapter in adapters where await adapter.status() != .notInstalled { result.append(adapter) }
+        return result
+    }
+
+    /// The one session across all agents with this id or unique id prefix.
+    func session(matching idOrPrefix: String) async throws -> (adapter: any AgentAdapter, session: Session) {
+        var matches: [(adapter: any AgentAdapter, session: Session)] = []
+        for adapter in await installedAdapters() {
+            for session in try await adapter.sessions() where session.id.hasPrefix(idOrPrefix.lowercased()) {
+                if session.id == idOrPrefix.lowercased() { return (adapter, session) }
+                matches.append((adapter, session))
+            }
+        }
+        guard matches.count == 1, let match = matches.first else { throw AdapterError.sessionNotFound(idOrPrefix) }
+        return match
     }
 
     var executor: Executor {

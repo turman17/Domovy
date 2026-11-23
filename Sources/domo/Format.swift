@@ -52,6 +52,14 @@ enum Format {
         var lines: [String] = []
         lines.append("Plan for session \(plan.sessionID) (\(plan.agent.displayName))")
         lines.append("")
+        for command in plan.commands {
+            let environment = command.environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+            lines.append("  run    \(command.commandLine)\(environment.isEmpty ? "" : "   (\(environment))")")
+            lines.append("         \(command.note)")
+            if !command.copiesBeforeRun.isEmpty {
+                lines.append("         keeps a copy of \(command.copiesBeforeRun.count) file(s) first, for undo")
+            }
+        }
         for move in plan.moves {
             let marker = move.kind == .folder ? "folder" : "file"
             lines.append("  \(bytes(move.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) \(marker.padding(toLength: 6, withPad: " ", startingAt: 0)) \(move.source.path)")
@@ -74,6 +82,9 @@ enum Format {
             lines.append("Total: \(bytes(plan.totalBytes))")
         }
         lines.append(plan.summary)
+        for remark in plan.remarks where remark != plan.summary {
+            lines.append("Note: \(remark)")
+        }
         return lines.joined(separator: "\n")
     }
 }
