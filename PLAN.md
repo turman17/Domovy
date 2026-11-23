@@ -143,10 +143,10 @@ Each agent is one adapter. It implements: list sessions, list a session's artifa
 - v1 is read-only: show sizes and guide the user to "Developer: Delete Old Chats" and "Developer: GC Agent KV Blobs". Writing to the database comes later, only with Cursor quit and a backup made first.
 
 **Later adapters**
-- Gemini CLI: `~/.gemini/tmp/<project>/{chats,logs,tool-outputs,checkpoints}`, `~/.gemini/history/<project>` (`<project>` from `projects.json`; older versions used a hash). Official `--delete-session`, which also deletes chats sharing the id's first 8 characters and runs the retention sweep first (verified 0.43.0).
+- Gemini CLI: `~/.gemini/tmp/<project>/{chats,logs,tool-outputs,checkpoints}`, `~/.gemini/history/<project>` (`<project>` from `projects.json`; older versions used a hash). Official `--delete-session` also deletes chats sharing the id's first 8 characters and runs the retention sweep first, which deletes other chats for good (verified 0.43.0), so Domovy never runs it and moves the files itself. Empty chats sharing one id (the a2a server's, 427 here) are one row.
 - Antigravity: `~/.gemini/antigravity-cli/{brain,conversations/*.db}` for the `agy` CLI (verified 1.5.8), `~/.gemini/antigravity/{brain,conversations/*.db,annotations,presence}` for the app. Retention keeps 500 conversations. No delete command, so Domovy is read-only for it.
-- OpenCode: `~/.local/share/opencode/opencode.db`. Official `opencode session delete`; the `event` table bloats.
-- Copilot CLI: `~/.copilot/session-state/<id>/events.jsonl` and `session-store.db`. Its reindex syncs to the user's account, so warn before running it.
+- OpenCode: `~/.local/share/opencode/opencode.db` (`session`, `message`, `part`, `event`, plus sign-ins; verified 1.18.30). Delete runs the official `opencode session delete` with OpenCode quit, after cloning the database (undo only while nothing else wrote to it, which the user accepts explicitly), and checks the rows are gone. Domovy never writes the database. The `event` table bloats and has no compaction command. No archive: no file belongs to one session.
+- Copilot CLI: `~/.copilot/session-state/<id>/events.jsonl` and `session-store.db` (assumed, not installed here). Delete moves the session folder; Domovy never runs `/chronicle reindex`, which syncs to the user's account, and only reports index rows that stay.
 - Models: Ollama (`ollama rm`, content-addressed blobs), LM Studio `~/.lmstudio/models`, Hugging Face (`hf cache rm` and `hf cache prune`).
 
 ## 6. Architecture
@@ -241,5 +241,8 @@ DomovyCore        Swift package, no UI
 - [x] Antigravity CLI (`agy`) store layout and SQLite schemas (verified 2026-11-23).
 - [ ] Antigravity desktop app: `~/.gemini/antigravity` layout, `presence/*.lock`, process names, and whether it has a safe delete. Not installed here.
 - [ ] Antigravity conversation format (`brain/<id>/.system_generated/logs/transcript.jsonl`, the `.db` step payloads), for a transcript preview.
-- [ ] Gemini CLI: does `--delete-session` work in an untrusted folder, and do project `.gemini/settings.json` files override `sessionRetention`?
+- [ ] Gemini CLI: do project `.gemini/settings.json` files override `sessionRetention`? (`--delete-session` is no longer used.)
+- [x] OpenCode data folder, SQLite schema and CLI (`session delete`, no compaction command), taken from a real install (verified 2026-11-23; see docs/research/agent_storage_formats.md).
+- [ ] OpenCode: does `opencode session delete` remove the session's `event` rows, and does it honour `XDG_DATA_HOME`? Test on a throwaway session.
+- [ ] Copilot CLI: `~/.copilot` layout, `events.jsonl` shape, `session-store.db` schema, lock files and process names. Not installed here.
 - [x] Name: Domovy (домовий, the Ukrainian house spirit who keeps the home in order). CLI: `domo`.
