@@ -13,6 +13,9 @@ struct AgentGlyph: View {
         case .cursor: "Cu"
         case .gemini: "Ge"
         case .openCode: "OC"
+        case .ollama: "Ol"
+        case .lmStudio: "LM"
+        case .huggingFace: "HF"
         }
     }
 

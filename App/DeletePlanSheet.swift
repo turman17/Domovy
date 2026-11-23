@@ -224,6 +224,9 @@ struct LiveCheckRow: View {
         if result.checkedSignals.contains("thread-writer-locks") { parts.append("Codex does not have it open") }
         if result.checkedSignals.contains("Codex processes") { parts.append("Codex is not running") }
         if result.checkedSignals.contains("Claude Desktop processes") { parts.append("Claude Desktop is not running") }
+        if result.checkedSignals.contains("Ollama processes") { parts.append("Ollama is not running") }
+        if result.checkedSignals.contains("LM Studio processes") { parts.append("LM Studio is not running") }
+        if result.checkedSignals.contains("ollama ps") { parts.append("the model is not loaded in Ollama") }
         return parts.joined(separator: ", ") + ". Checked just now."
     }
 
@@ -231,7 +234,7 @@ struct LiveCheckRow: View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: result.isLive ? "dot.radiowaves.left.and.right" : "checkmark.circle.fill")
                 .foregroundStyle(result.isLive ? AnyShapeStyle(.secondary) : AnyShapeStyle(.green))
-            Text(result.isLive ? (result.reasons.allSatisfy { $0.contains("is running") } ? "Blocked" : "Running") : "Not running")
+            Text(result.isLive ? (result.reasons.allSatisfy { $0.contains("is running") || $0.contains("is loaded") } ? "Blocked" : "Running") : "Not running")
                 .fontWeight(.semibold)
             Text(detail)
                 .foregroundStyle(.secondary)

@@ -67,6 +67,7 @@ struct CleanupPlanSheet: View {
 
     private var changes: some View {
         List {
+            CommandsSection(commands: plan.commands)
             if !plan.moves.isEmpty {
                 Section("Moved to \(destination.displayName)") {
                     ForEach(plan.moves, id: \.source) { move in
@@ -106,7 +107,7 @@ struct CleanupPlanSheet: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            if !compresses {
+            if !compresses && plan.commands.isEmpty {
                 Text("Destination:")
                 Picker("Destination", selection: $destination) {
                     Text("Trash").tag(Destination.trash)
@@ -124,12 +125,12 @@ struct CleanupPlanSheet: View {
 
     @ViewBuilder
     private var primaryButton: some View {
-        let title = compresses ? "Compress" : (destination == .trash ? "Move to Trash" : "Move to Quarantine")
+        let title = compresses ? "Compress" : plan.isPermanent ? "Delete" : (destination == .trash ? "Move to Trash" : "Move to Quarantine")
         let button = Button(title, action: execute)
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
             .disabled(!cleanup.canExecute || isExecuting)
-        if cleanup.hasConsequences && !compresses {
+        if (cleanup.hasConsequences || plan.isPermanent) && !compresses {
             button.tint(.red)
         } else {
             button

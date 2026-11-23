@@ -12,17 +12,27 @@ struct DiskView: View {
     @Environment(SessionLibrary.self) private var library
     @State private var orphanRequest: OrphanRequest?
     @State private var cleanupRequest: CleanupRequest?
+    @State private var modelRequest: ModelRemovalRequest?
     @State private var errorMessage: String?
+    /// Local models ticked for "Remove Selected…", by `LocalModel.id`.
+    @State private var selectedModels: Set<String> = []
+    @AppStorage("unusedModelDays") private var unusedDays = 60
 
     /// Largest agent first, matching the breakdown bar and its legend.
     private var ordered: [Footprint] {
         library.footprints.sorted { $0.totalBytes > $1.totalBytes }
     }
 
+    private var selection: ModelSelection {
+        ModelSelection(selected: $selectedModels, unusedDays: unusedDays, onRemove: { requestModelRemoval([$0]) })
+    }
+
     private var subtitle: String {
         let total = library.totalFootprintBytes.formatted(.byteCount(style: .file))
         let safe = library.safeFootprintBytes.formatted(.byteCount(style: .file))
-        return "\(total) used by AI agents · \(safe) safe to remove"
+        let models = library.localModelBytes
+        let modelText = models > 0 ? " · \(models.formatted(.byteCount(style: .file))) of it local models" : ""
+        return "\(total) used by AI agents\(modelText) · \(safe) safe to remove"
     }
 
     var body: some View {
@@ -30,18 +40,34 @@ struct DiskView: View {
             if library.footprints.isEmpty {
                 emptyState
             } else {
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 24) {
                         breakdown
                         if !library.orphanReport.isEmpty {
                             OrphansSection(report: library.orphanReport, onCleanUp: requestCleanUp)
                         }
-                        ForEach(ordered, id: \.agent) { footprint in
+                        ForEach(ordered.filter { !$0.agent.isModelStore }, id: \.agent) { footprint in
                             AgentFootprintSection(footprint: footprint, onOpenSessions: onOpenSessions, onCleanUp: { requestCleanUp(.orphans) }, onGuidedCleanup: requestCleanup)
+                        }
+                        if !library.modelFootprints.isEmpty {
+                            LocalModelsHeader(unusedDays: $unusedDays, selected: $selectedModels, onRemoveSelected: removeSelected)
+                                .id(LocalModelsHeader.anchor)
+                            ForEach(library.modelFootprints, id: \.agent) { footprint in
+                                AgentFootprintSection(footprint: footprint, models: selection, onOpenSessions: onOpenSessions,
+                                                      onCleanUp: { requestCleanUp(.orphans) }, onGuidedCleanup: requestCleanup)
+                            }
                         }
                     }
                     .padding(.horizontal, 24)
                     .padding(.vertical, 16)
+                }
+                .task(id: library.requestedDiskAnchor) {
+                    guard let anchor = library.requestedDiskAnchor else { return }
+                    try? await Task.sleep(for: .milliseconds(300))
+                    withAnimation { proxy.scrollTo(anchor, anchor: .top) }
+                    library.requestedDiskAnchor = nil
+                }
                 }
             }
         }
@@ -54,12 +80,28 @@ struct DiskView: View {
         .sheet(item: $cleanupRequest) { request in
             CleanupPlanSheet(request: request)
         }
+        .sheet(item: $modelRequest) { request in
+            ModelRemovalSheet(request: request)
+        }
+        .onChange(of: library.footprints) { _, _ in
+            // Models removed since are no longer selectable.
+            selectedModels.formIntersection(library.localModels.map(\.id))
+        }
         .task(id: library.footprints.isEmpty) {
-            // Debug only: DOMOVY_OPEN_CLEANUP=<id> opens that cleanup's sheet for a window capture.
-            guard let id = AppEnvironment.startCleanup, !library.footprints.isEmpty, cleanupRequest == nil else { return }
+            // Debug only: DOMOVY_OPEN_CLEANUP=<id> opens that cleanup's sheet for a window capture;
+            // a model id (ollama:qwen3:14b) or "unused-models" opens the model removal sheet.
+            guard let raw = AppEnvironment.startCleanupRaw, !library.footprints.isEmpty, cleanupRequest == nil, modelRequest == nil else { return }
             try? await Task.sleep(for: .seconds(1))
             NSApp.activate()
-            requestCleanup(id)
+            if let id = CleanupID(rawValue: raw) {
+                requestCleanup(id)
+            } else if raw == "unused-models" {
+                selectedModels = Set(library.unusedModels(days: unusedDays).map(\.id))
+                removeSelected()
+            } else {
+                let ids = Set(raw.split(separator: ",").map(String.init))
+                requestModelRemoval(library.localModels.filter { ids.contains($0.id) })
+            }
         }
         .alert("Something went wrong", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
@@ -78,6 +120,22 @@ struct DiskView: View {
         Task {
             do {
                 cleanupRequest = CleanupRequest(cleanup: try await library.cleanupPlan(id, destination: .trash))
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func removeSelected() {
+        requestModelRemoval(library.localModels.filter { selectedModels.contains($0.id) })
+    }
+
+    /// Plans first, then the confirmation sheet. A blocked plan still opens it, to say why.
+    private func requestModelRemoval(_ models: [LocalModel]) {
+        guard !models.isEmpty else { return }
+        Task {
+            do {
+                modelRequest = ModelRemovalRequest(removal: try await library.modelRemovalPlan(models, destination: .trash))
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -145,7 +203,7 @@ struct DiskView: View {
             ContentUnavailableView(
                 "No agent folders found",
                 systemImage: "internaldrive",
-                description: Text("Domovy looked for Claude Code, Claude Desktop, Codex and Cursor and found none. The house is in order.")
+                description: Text("Domovy looked for Claude Code, Claude Desktop, Codex, Cursor and local model stores and found none. The house is in order.")
             )
         }
     }
@@ -154,6 +212,8 @@ struct DiskView: View {
 /// One agent: glyph, name and total, then its categories in a rounded box.
 private struct AgentFootprintSection: View {
     let footprint: Footprint
+    /// Set for local model stores: rows get a checkbox and their date.
+    var models: ModelSelection?
     let onOpenSessions: (AgentKind) -> Void
     let onCleanUp: () -> Void
     let onGuidedCleanup: (CleanupID) -> Void
@@ -182,7 +242,8 @@ private struct AgentFootprintSection: View {
             VStack(spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, category in
                     if index > 0 { Divider() }
-                    CategoryRow(category: category, agent: footprint.agent, onOpenSessions: onOpenSessions, onCleanUp: onCleanUp, onGuidedCleanup: onGuidedCleanup)
+                    CategoryRow(category: category, agent: footprint.agent, model: footprint.model(for: category), selection: models,
+                                onOpenSessions: onOpenSessions, onCleanUp: onCleanUp, onGuidedCleanup: onGuidedCleanup)
                 }
             }
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
@@ -194,6 +255,9 @@ private struct AgentFootprintSection: View {
 private struct CategoryRow: View {
     let category: Footprint.Category
     let agent: AgentKind
+    /// The local model this row stands for, if any.
+    var model: LocalModel?
+    var selection: ModelSelection?
     let onOpenSessions: (AgentKind) -> Void
     let onCleanUp: () -> Void
     let onGuidedCleanup: (CleanupID) -> Void
@@ -205,6 +269,15 @@ private struct CategoryRow: View {
 
     var body: some View {
         HStack(spacing: 16) {
+            if let selection {
+                Toggle(isOn: selection.binding(for: model)) { EmptyView() }
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .disabled(model == nil)
+                    .opacity(model == nil ? 0 : 1)
+                    .accessibilityLabel("Select \(category.name)")
+                    .accessibilityHidden(model == nil)
+            }
             DispositionBadge(disposition: category.disposition)
                 .frame(width: 128, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
@@ -214,6 +287,9 @@ private struct CategoryRow: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                if let model, let selection {
+                    ModelDateLine(model: model, unusedDays: selection.unusedDays)
+                }
                 if let instructions {
                     Label(instructions, systemImage: "info.circle")
                         .font(.caption)
@@ -242,7 +318,11 @@ private struct CategoryRow: View {
 
     @ViewBuilder
     private var actionButton: some View {
-        if let id = category.cleanupID {
+        if let model, let selection {
+            Button("Remove\u{2026}") { selection.onRemove(model) }
+                .help(model.agent == .lmStudio ? "Shows every file first. Moves the folder to the Trash; you can undo this."
+                      : "Shows exactly what happens first. \(model.agent.displayName)'s own command deletes it for good when it is available.")
+        } else if let id = category.cleanupID {
             guidedButton(id)
         } else if category.guidance == .manageInSessions {
             Button("Open Sessions") { onOpenSessions(agent) }

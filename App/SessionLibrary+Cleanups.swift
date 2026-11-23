@@ -22,11 +22,14 @@ extension SessionLibrary {
             message = items.isEmpty
                 ? "Nothing needed compressing."
                 : "Compressed \(items.count) \(items.count == 1 ? "rollout" : "rollouts") (\(before) \u{2192} ~\(after))."
+        } else if !plan.commands.isEmpty {
+            let lines = plan.commands.map { "`\($0.commandLine)`" }.joined(separator: ", ")
+            message = "Ran \(lines) (\(plan.totalBytes.formatted(.byteCount(style: .file))))." + Self.leftoverText([entry])
         } else {
             let n = entry.moved.count
             message = "Moved \(n) \(n == 1 ? "item" : "items") (\(plan.totalBytes.formatted(.byteCount(style: .file)))) to \((plan.destination ?? .trash).displayName)."
         }
-        let undoable = !entry.moved.isEmpty || !entry.compressed.isEmpty
+        let undoable = entry.isUndoable && (!entry.moved.isEmpty || !entry.compressed.isEmpty)
         let action = UndoAction(name: cleanup.cleanup.compresses ? "Compress" : "Move to Trash", entries: [entry])
         if undoable { register(action) }
         toast = Toast(message: message, undo: undoable ? action : nil)

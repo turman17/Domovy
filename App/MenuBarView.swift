@@ -108,7 +108,18 @@ struct MenuBarView: View {
                     detail: "Review what removing it costs on the Disk screen."
                 ) { open(section: .disk) }
             }
-            if library.hasLargeSafeFootprint {
+            if library.hasLargeModelFootprint {
+                let unused = library.unusedModels(days: 60)
+                AttentionRow(
+                    symbol: "shippingbox.circle",
+                    title: "\(library.localModelBytes.formatted(.byteCount(style: .file))) in local models",
+                    detail: unused.isEmpty ? "Ollama, LM Studio and Hugging Face downloads." : "\(unused.count) older than 60 days. Review them on the Disk screen."
+                ) {
+                    library.requestedDiskAnchor = LocalModelsHeader.anchor
+                    open(section: .disk)
+                }
+            }
+                        if library.hasLargeSafeFootprint {
                 AttentionRow(
                     symbol: "checkmark.circle",
                     title: "\(library.safeFootprintBytes.formatted(.byteCount(style: .file))) safe to remove",

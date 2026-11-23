@@ -68,6 +68,8 @@ final class SessionLibrary {
     var requestedFilter: StatusFilter?
     /// Set by the menu bar popover so the main window opens on that section.
     var requestedSection: SidebarItem?
+    /// Set by the menu bar popover so the Disk screen scrolls to a section ("local-models").
+    var requestedDiskAnchor: String? = AppEnvironment.startDiskAnchor
 
     // Secret scan state, changed only by SessionLibrary+Secrets. In memory only: findings are
     // never written to disk (they hold masked previews, never values, either way).
@@ -97,10 +99,17 @@ final class SessionLibrary {
         claudeCode = ClaudeCodeAdapter(home: home)
         codex = CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: isCustomHome))
         adapters = [claudeCode, codex]
-        footprintProviders = adapters + FootprintScanner.measuredOnly(home: home)
+        let models = ModelStores.at(home: home, isCustomHome: isCustomHome)
+        footprintProviders = adapters + FootprintScanner.measuredOnly(home: home) + FootprintScanner.modelStores(models)
         executor = Executor(storeRoot: storeRoot)
-        cleanupPlanner = CleanupPlanner(claudeCodeRoot: claudeCode.root, codexRoot: codex.root,
-                                        desktopSupport: home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true))
+        // A custom home (.devhome) runs only the stubs in <home>/bin, never the real ollama or hf.
+        cleanupPlanner = CleanupPlanner(
+            claudeCodeRoot: claudeCode.root, codexRoot: codex.root,
+            desktopSupport: home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true),
+            models: models,
+            ollamaCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "ollama", override: "DOMOVY_OLLAMA_CLI"),
+            huggingFaceCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "hf", override: "DOMOVY_HF_CLI")
+        )
     }
 
     func adapter(for agent: AgentKind) throws -> any AgentAdapter {
@@ -129,7 +138,7 @@ final class SessionLibrary {
         category(.claudeDesktopVM).map(\.sizeBytes).flatMap { $0 > Self.diskWarningBytes ? $0 : nil }
     }
     var hasLargeSafeFootprint: Bool { safeFootprintBytes > Self.diskWarningBytes }
-    var hasDiskWarnings: Bool { largeVMBundleBytes != nil || hasLargeSafeFootprint }
+    var hasDiskWarnings: Bool { largeVMBundleBytes != nil || hasLargeSafeFootprint || hasLargeModelFootprint }
 
     /// Agents that have at least one session, in declaration order.
     var agentsPresent: [AgentKind] {
@@ -262,6 +271,8 @@ final class SessionLibrary {
         let what: String
         if let cleanup = restored.first.flatMap({ CleanupID(rawValue: $0.sessionID) }) {
             what = cleanup.undoName
+        } else if restored.first?.agent.isModelStore == true {
+            what = restored.map(\.sessionID).joined(separator: ", ")
         } else if let scope = restored.first.flatMap({ OrphanScope(rawValue: $0.sessionID) }) {
             what = scope == .orphans ? "the orphans" : "the duplicates"
         } else {

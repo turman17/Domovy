@@ -31,6 +31,14 @@ enum AppEnvironment {
         return .section(.sessions)
     }
 
+    /// Debug only: `DOMOVY_DISK_ANCHOR=local-models` scrolls the Disk screen there at launch.
+    static var startDiskAnchor: String? {
+        #if DEBUG
+        if let anchor = ProcessInfo.processInfo.environment["DOMOVY_DISK_ANCHOR"], !anchor.isEmpty { return anchor }
+        #endif
+        return nil
+    }
+
     /// Debug only: `DOMOVY_SELECT=<session id>` selects that session at launch.
     static var startSelection: String? {
         #if DEBUG
@@ -39,10 +47,11 @@ enum AppEnvironment {
         return nil
     }
 
-    /// Debug only: `DOMOVY_OPEN_CLEANUP=<cleanup id>` opens that cleanup's sheet on the Disk screen.
-    static var startCleanup: CleanupID? {
+    /// Debug only: `DOMOVY_OPEN_CLEANUP=<cleanup id>` opens that cleanup's sheet on the Disk
+    /// screen; model ids (comma separated) or `unused-models` open the model removal sheet.
+    static var startCleanupRaw: String? {
         #if DEBUG
-        if let raw = ProcessInfo.processInfo.environment["DOMOVY_OPEN_CLEANUP"] { return CleanupID(rawValue: raw) }
+        if let raw = ProcessInfo.processInfo.environment["DOMOVY_OPEN_CLEANUP"], !raw.isEmpty { return raw }
         #endif
         return nil
     }

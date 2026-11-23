@@ -137,3 +137,42 @@ if [ ! -f "$DEV/.cleanups-seeded" ]; then
   printf 'work in progress\n' >> "$CODEX/worktrees/7c9a/orbit-api/README.md"
   touch "$DEV/.cleanups-seeded"
 fi
+if [ ! -f "$DEV/.models-seeded" ]; then
+  # Local model stores from the fixtures: Ollama (a shared layer, an orphan and a partial
+  # download), LM Studio, and a Hugging Face hub with a detached revision and a file two repos
+  # share. Model blobs get some real bytes so sizes read like models; the stubs stand in for
+  # the ollama and hf CLIs, so nothing reaches a real server or the network.
+  rm -rf "$DEV/.ollama" "$DEV/.lmstudio" "$DEV/.cache/huggingface"
+  cp -Rp "$ROOT/Tests/Fixtures/ollama/0.33/.ollama" "$DEV/.ollama"
+  cp -Rp "$ROOT/Tests/Fixtures/lmstudio/0.3/.lmstudio" "$DEV/.lmstudio"
+  mkdir -p "$DEV/.cache/huggingface" "$DEV/bin"
+  cp -Rp "$ROOT/Tests/Fixtures/huggingface/1.x/hub" "$DEV/.cache/huggingface/hub"
+  cp "$ROOT/Tests/Fixtures/ollama/stub-ollama.sh" "$DEV/bin/ollama"
+  cp "$ROOT/Tests/Fixtures/huggingface/stub-hf.sh" "$DEV/bin/hf"
+  chmod 755 "$DEV/bin/ollama" "$DEV/bin/hf"
+  fill() { dd if=/dev/urandom of="$1" bs=1m count="$2" 2>/dev/null; }
+  B="$DEV/.ollama/models/blobs"
+  fill "$B/sha256-a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1" 48
+  fill "$B/sha256-a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2" 36
+  fill "$B/sha256-a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3" 8
+  fill "$B/sha256-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f" 12
+  fill "$DEV/.lmstudio/models/lmstudio-community/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf" 30
+  fill "$DEV/.lmstudio/models/bartowski/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-Q8_0.gguf" 14
+  fill "$DEV/.cache/huggingface/hub/blobs/11/1111111111111111111111111111111111111111111111111111111111111111" 9
+  fill "$DEV/.cache/huggingface/hub/blobs/22/2222222222222222222222222222222222222222222222222222222222222222" 5
+  fill "$DEV/.cache/huggingface/hub/models--acme--tiny-bert/blobs/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2" 6
+  age() { touch -h -t "$(date -v-"$1"d +%Y%m%d%H%M)" "$2"; }
+  # Everything old first, then the dates the Disk screen shows.
+  find "$DEV/.ollama" "$DEV/.lmstudio" "$DEV/.cache/huggingface" -exec touch -h -t "$(date -v-120d +%Y%m%d%H%M)" {} +
+  M="$DEV/.ollama/models/manifests/registry.ollama.ai"
+  age 92 "$M/library/qwen3/14b"; age 9 "$M/library/deepcoder/14b"; age 210 "$M/someuser/tinyllm/q4"
+  age 5 "$DEV/.lmstudio/models/lmstudio-community/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf"
+  age 5 "$DEV/.lmstudio/models/lmstudio-community/Qwen3-8B-GGUF"
+  age 75 "$DEV/.lmstudio/models/bartowski/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-Q8_0.gguf"
+  age 75 "$DEV/.lmstudio/models/bartowski/Llama-3.2-1B-Instruct-GGUF"
+  H="$DEV/.cache/huggingface/hub"
+  age 70 "$H/models--acme--tiny-bert/snapshots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  age 14 "$H/models--acme--tiny-bert-distilled/snapshots/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  age 40 "$H/datasets--acme--reviews/snapshots/ffffffffffffffffffffffffffffffffffffffff"
+  touch "$DEV/.models-seeded"
+fi
