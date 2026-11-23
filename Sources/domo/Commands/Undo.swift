@@ -25,19 +25,27 @@ struct Undo: AsyncParsableCommand {
                         Format.relative(e.createdAt),
                         e.agent.displayName,
                         String(e.sessionID.prefix(8)),
-                        e.action == .archive ? "\(e.compressed.count) files compressed" : "\(e.moved.count) items, \(e.indexRestores.count) index edits",
-                        e.isUndone ? "undone" : (e.failure == nil ? "done" : "partial"),
+                        changes(e),
+                        e.isUndone ? "undone" : e.originalsPurgedAt != nil ? "purged" : (e.failure == nil ? "done" : "partial"),
                     ]
                 }
                 print(Format.table(rows, header: ["ENTRY", "WHEN", "AGENT", "SESSION", "CHANGES", "STATE"]))
                 return
             }
             for entry in try executor.undoLatestBatch() {
-                let verb = entry.action == .archive ? "Decompressed" : "Restored"
+                let verb = entry.action == .archive ? "Decompressed" : entry.action == .redact ? "Put back the originals of" : "Restored"
                 print("\(verb) session \(entry.sessionID) (\(entry.agent.displayName)).")
             }
         } catch {
             throw Domo.fail(error)
+        }
+    }
+
+    private func changes(_ entry: UndoEntry) -> String {
+        switch entry.action {
+        case .archive: "\(entry.compressed.count) files compressed"
+        case .redact: "\(entry.redacted.reduce(0) { $0 + $1.replacements }) values redacted"
+        case .delete: "\(entry.moved.count) items, \(entry.indexRestores.count) index edits"
         }
     }
 }

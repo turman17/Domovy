@@ -70,6 +70,17 @@ enum Format {
             lines.append("  \(sizes.padding(toLength: 22, withPad: " ", startingAt: 0)) \(item.file.path)")
             lines.append("  \(String(repeating: " ", count: 22)) \(item.note)")
         }
+        for item in plan.redactions {
+            lines.append("  redact \(item.file.path)")
+            for edit in item.lines {
+                for replacement in edit.replacements {
+                    lines.append("         line \(edit.line)  \(SecretRule.displayName(for: replacement.ruleID))  \(replacement.preview) \u{2192} [REDACTED:\(replacement.ruleID)]")
+                }
+            }
+        }
+        for item in plan.skippedSecrets {
+            lines.append("  skip   \(item.file.lastPathComponent) line \(item.line)  \(item.preview): \(item.reason)")
+        }
         for edit in plan.indexEdits {
             lines.append("  \(bytes(edit.removedBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) index  \(edit.file.path)")
             lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) \(edit.note)")
@@ -78,7 +89,7 @@ enum Format {
         lines.append("Live check: \(plan.liveCheck.isLive ? "LIVE" : "not live") (checked \(plan.liveCheck.checkedSignals.joined(separator: ", ")); open handles: \(plan.liveCheck.openHandles.rawValue))")
         if plan.action == .archive {
             lines.append("Total: \(bytes(plan.totalBytes)) \u{2192} ~\(bytes(plan.estimatedBytesAfter)) on disk")
-        } else {
+        } else if plan.action != .redact {
             lines.append("Total: \(bytes(plan.totalBytes))")
         }
         lines.append(plan.summary)
@@ -86,5 +97,38 @@ enum Format {
             lines.append("Note: \(remark)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// Masked findings, one per line, then the files that were skipped and the summary.
+    static func findings(_ report: SecretScanReport, home: URL) -> String {
+        let rows = report.findings.map { finding in
+            [
+                String(finding.sessionID.prefix(8)),
+                finding.agent.displayName,
+                displayPath(finding.file, home: home) + ":\(finding.line)",
+                finding.ruleName,
+                finding.preview,
+                finding.isRedactable ? "yes" : "no",
+            ]
+        }
+        var lines: [String] = []
+        if !rows.isEmpty {
+            lines.append(table(rows, header: ["SESSION", "AGENT", "FILE", "RULE", "PREVIEW", "REDACTABLE"]))
+            lines.append("")
+        }
+        for item in report.skipped {
+            lines.append("Skipped \(displayPath(item.file, home: home)): \(item.reason)")
+        }
+        lines.append(report.summary)
+        if !report.findings.isEmpty {
+            lines.append("Redact a session with `domo redact <id>`, or delete it with `domo rm <id> --to quarantine`.")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func displayPath(_ url: URL, home: URL) -> String {
+        let base = home.standardizedFileURL.path + "/"
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix(base) ? "~/" + path.dropFirst(base.count) : path
     }
 }
