@@ -58,7 +58,8 @@ struct SessionsView: View {
 
     private var canArchiveSelection: Bool {
         guard let selectedSession else { return false }
-        return selectedSession.status != .live && !selectedSession.isArchived && library.readOnlyAgents[selectedSession.agent] == nil
+        return selectedSession.status != .live && !selectedSession.isArchived && selectedSession.canArchive
+            && library.readOnlyAgents[selectedSession.agent] == nil
     }
 
     /// One retention banner per agent whose sweep is about to take sessions.
@@ -152,7 +153,16 @@ struct SessionsView: View {
 
     private var table: some View {
         Table(visible, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("Title", value: \.displayTitle) { Text($0.displayTitle).lineLimit(1) }
+            TableColumn("Title", value: \.displayTitle) { session in
+                HStack(spacing: 6) {
+                    if session.memberCount > 1 {
+                        Image(systemName: "square.stack")
+                            .foregroundStyle(.secondary)
+                            .help("\(session.memberCount) chats shown as one row")
+                    }
+                    Text(session.displayTitle).lineLimit(1)
+                }
+            }
                 .width(min: 180, ideal: 320)
             TableColumn("Agent", value: \.agentLabel) { session in
                 HStack(spacing: 6) {

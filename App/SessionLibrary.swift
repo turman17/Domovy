@@ -105,8 +105,10 @@ final class SessionLibrary {
         codex = CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: isCustomHome))
         adapters = [
             claudeCode, codex,
-            GeminiAdapter(home: home, cli: GeminiCLI.choice(home: home, isCustomHome: isCustomHome)),
+            GeminiAdapter(home: home),
             AntigravityAdapter(home: home),
+            OpenCodeAdapter(home: home, cli: OpenCodeCLI.choice(home: home, isCustomHome: isCustomHome)),
+            CopilotAdapter(home: home),
         ]
         let models = ModelStores.at(home: home, isCustomHome: isCustomHome)
         footprintProviders = adapters + FootprintScanner.measuredOnly(home: home) + FootprintScanner.modelStores(models)
@@ -371,6 +373,9 @@ extension Session {
         return "Also in Claude Desktop's session list" + (desktop.isArchived ? ", archived there." : ".")
     }
     var sortProject: String { projectName ?? "" }
+
+    /// OpenCode sessions are rows of one shared database: there is no file to compress.
+    var canArchive: Bool { agent != .openCode }
 
     /// Whole days until the agent's sweep, for the status column and warnings.
     var daysUntilExpiry: Int? {

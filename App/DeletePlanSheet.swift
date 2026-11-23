@@ -13,6 +13,7 @@ struct DeletePlanSheet: View {
     @State private var isExecuting = false
     @State private var failure: String?
     @State private var purgeNow = false
+    @State private var acknowledged = false
 
     init(request: DeleteRequest) {
         self.request = request
@@ -23,6 +24,7 @@ struct DeletePlanSheet: View {
     private var root: URL { library.root(for: plan.agent) }
     private var confirmTitle: String {
         if purgeNow && plan.keepsToolCopies { return "Delete Now" }
+        if !plan.commands.isEmpty && plan.moves.isEmpty { return "Delete" }
         return destination == .trash ? "Move to Trash" : "Move to Quarantine"
     }
 
@@ -37,6 +39,7 @@ struct DeletePlanSheet: View {
             secretsHint
             changes
             if plan.keepsToolCopies { FreeSpaceNowToggle(isOn: $purgeNow) }
+            if let text = plan.acknowledgement { AcknowledgementToggle(text: text, isOn: $acknowledged) }
             if let failure {
                 Label(failure, systemImage: "exclamationmark.circle")
                     .foregroundStyle(.secondary)
@@ -116,12 +119,14 @@ struct DeletePlanSheet: View {
                 .buttonStyle(.borderedProminent)
                 // With a kept copy the delete stays undoable; red only once it is for good.
                 .tint(!plan.keepsToolCopies || purgeNow ? .red : nil)
-                .disabled(plan.liveCheck.isLive || plan.isEmpty || isExecuting)
+                .disabled(plan.liveCheck.isLive || plan.isEmpty || isExecuting || (plan.acknowledgement != nil && !acknowledged))
         }
     }
 
     private func execute() {
         isExecuting = true
+        var plan = plan
+        plan.isAcknowledged = acknowledged
         Task {
             do {
                 try await library.execute(plan, for: request.session, purgeNow: purgeNow && plan.keepsToolCopies)
@@ -218,6 +223,24 @@ struct FreeSpaceNowToggle: View {
     }
 }
 
+/// Off by default: the user accepts, in so many words, that undo may stop working (OpenCode's
+/// database once OpenCode writes to it again). The confirm button waits for it.
+struct AcknowledgementToggle: View {
+    let text: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("I understand undo may not be possible", isOn: $isOn)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 20)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// Consequences the user should know before confirming, one line each.
 struct RemarksView: View {
     let remarks: [String]
@@ -249,6 +272,9 @@ struct LiveCheckRow: View {
         if result.checkedSignals.contains("Claude Desktop processes") { parts.append("Claude Desktop is not running") }
         if result.checkedSignals.contains("Ollama processes") { parts.append("Ollama is not running") }
         if result.checkedSignals.contains("LM Studio processes") { parts.append("LM Studio is not running") }
+        if result.checkedSignals.contains("Gemini CLI processes") { parts.append("Gemini CLI is not running") }
+        if result.checkedSignals.contains("OpenCode processes") { parts.append("OpenCode is not using its database") }
+        if result.checkedSignals.contains("Copilot CLI processes") { parts.append("Copilot CLI is not running") }
         if result.checkedSignals.contains("ollama ps") { parts.append("the model is not loaded in Ollama") }
         return parts.joined(separator: ", ") + ". Checked just now."
     }

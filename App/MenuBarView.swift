@@ -87,7 +87,7 @@ struct MenuBarView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             ForEach(library.expiringByAgent, id: \.rule.agent) { group in
-                let n = group.sessions.count
+                let n = group.sessions.reduce(0) { $0 + $1.memberCount }
                 let when = library.expiringWithinDays(group.sessions).map { $0 == 0 ? "at the next sweep" : "in \($0) \($0 == 1 ? "day" : "days")" }
                 AttentionRow(
                     symbol: "clock",

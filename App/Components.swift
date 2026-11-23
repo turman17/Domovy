@@ -14,6 +14,7 @@ struct AgentGlyph: View {
         case .gemini: "Ge"
         case .antigravity: "AG"
         case .openCode: "OC"
+        case .copilot: "CP"
         case .ollama: "Ol"
         case .lmStudio: "LM"
         case .huggingFace: "HF"

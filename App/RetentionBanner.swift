@@ -19,7 +19,8 @@ struct RetentionBanner: View {
     let onDismiss: () -> Void
 
     private var headline: String {
-        let count = sessions.count
+        // A grouped row (Gemini CLI's empty a2a chats) counts every chat it stands for.
+        let count = sessions.reduce(0) { $0 + $1.memberCount }
         let noun = rule.agent == .antigravity ? "conversation" : rule.agent == .gemini ? "chat" : "session"
         let subject = "\(count) \(noun)\(count == 1 ? "" : "s")"
         guard let withinDays else {

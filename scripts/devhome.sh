@@ -178,14 +178,12 @@ if [ ! -f "$DEV/.models-seeded" ]; then
 fi
 if [ ! -f "$DEV/.gemini-seeded" ]; then
   # Gemini CLI and Antigravity from the fixtures. The chats' project paths point at folders in
-  # .devhome/code, where the gemini stub (never the real CLI) runs --delete-session.
+  # .devhome/code. Domovy never runs gemini, so there is no stub.
   rm -rf "$DEV/.gemini"
   cp -Rp "$ROOT/Tests/Fixtures/gemini/0.43" "$DEV/.gemini"
   cp -Rp "$ROOT/Tests/Fixtures/antigravity/1.5/antigravity-cli" "$DEV/.gemini/antigravity-cli"
   cp -Rp "$ROOT/Tests/Fixtures/antigravity/1.5/antigravity" "$DEV/.gemini/antigravity"
-  mkdir -p "$DEV/bin" "$DEV/code/orbit-api" "$DEV/code/landing-site"
-  cp "$ROOT/Tests/Fixtures/gemini/stub-gemini.sh" "$DEV/bin/gemini"
-  chmod 755 "$DEV/bin/gemini"
+  mkdir -p "$DEV/code/orbit-api" "$DEV/code/landing-site"
   G="$DEV/.gemini"
   for f in "$G/projects.json" "$G/tmp/orbit-api/.project_root" "$G/tmp/landing-site/.project_root"; do
     sed "s|/Users/dev/code|$DEV/code|g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
@@ -213,4 +211,42 @@ if [ ! -f "$DEV/.gemini-seeded" ]; then
   age 4 "$G/antigravity/conversations/c3c3c3c3-3333-4333-8333-333333333333.db"
   # The app store's presence lock is not held here, so its conversation shows as idle.
   touch "$DEV/.gemini-seeded"
+fi
+if [ ! -f "$DEV/.gemini-groups-seeded" ]; then
+  # Gemini CLI's a2a server writes hundreds of empty chats under one id; Domovy shows them as
+  # one row. 425 more next to the fixture's two make the 427 seen on a real install.
+  rm -f "$DEV/bin/gemini"
+  C="$DEV/.gemini/tmp/landing-site/chats"
+  HEADER='{"sessionId":"a2a-server","projectHash":"1c3e5a7b9d0f2e4c6a8b0d1f3e5c7a9b2d4f6e8a0c1b3d5f7e9a2c4b6d8f0e1a","startTime":"2026-11-18T07:44:00.000Z","lastUpdated":"2026-11-18T07:44:00.000Z","kind":"main"}'
+  for n in $(seq 1 425); do
+    printf '%s\n' "$HEADER" > "$C/session-2026-11-$(printf '%02d' $((n % 28 + 1)))T$(printf '%02d' $((n % 24)))-$(printf '%02d' $((n % 60)))-a2a-serv.jsonl"
+  done
+  touch -t "$(date -v-5d +%Y%m%d%H%M)" "$C"/*-a2a-serv.jsonl
+  touch "$DEV/.gemini-groups-seeded"
+fi
+if [ ! -f "$DEV/.opencode-seeded" ]; then
+  # OpenCode from the fixtures: its database built from SQL (WAL mode, like OpenCode), and the
+  # stub at bin/opencode, never the real CLI.
+  rm -rf "$DEV/.local/share/opencode" "$DEV/.config/opencode"
+  mkdir -p "$DEV/.local/share" "$DEV/.config" "$DEV/bin"
+  cp -Rp "$ROOT/Tests/Fixtures/opencode/1.18/share/opencode" "$DEV/.local/share/opencode"
+  cp -Rp "$ROOT/Tests/Fixtures/opencode/1.18/config/opencode" "$DEV/.config/opencode"
+  sqlite3 "$DEV/.local/share/opencode/opencode.db" < "$ROOT/Tests/Fixtures/opencode/sql/opencode.sql" >/dev/null
+  # A bloated event log, the way real databases grow.
+  sqlite3 "$DEV/.local/share/opencode/opencode.db" "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4000) INSERT INTO event SELECT 'evt_bulk_' || i, 'ses_5a1b2c3d4ffeQx7Lm2Np9Rt0Vw', 100 + i, 'message.part.updated.1', '{\"synthetic\":\"' || hex(randomblob(400)) || '\"}' FROM n;"
+  cp "$ROOT/Tests/Fixtures/opencode/stub-opencode.sh" "$DEV/bin/opencode"
+  chmod 755 "$DEV/bin/opencode"
+  touch "$DEV/.opencode-seeded"
+fi
+if [ ! -f "$DEV/.copilot-seeded" ]; then
+  # Copilot CLI from the synthetic fixture (layout assumed from GitHub's docs).
+  rm -rf "$DEV/.copilot"
+  cp -Rp "$ROOT/Tests/Fixtures/copilot/assumed/.copilot" "$DEV/.copilot"
+  sqlite3 "$DEV/.copilot/session-store.db" < "$ROOT/Tests/Fixtures/copilot/sql/session-store.sql"
+  age() { touch -t "$(date -v-"$1"d +%Y%m%d%H%M)" "$2"; }
+  S="$DEV/.copilot/session-state"
+  age 3 "$S/c0c0c0c0-1111-4111-8111-111111111111/events.jsonl"
+  age 2 "$S/c0c0c0c0-2222-4222-8222-222222222222/events.jsonl"
+  age 1 "$S/c0c0c0c0-3333-4333-8333-333333333333/events.jsonl"
+  touch "$DEV/.copilot-seeded"
 fi

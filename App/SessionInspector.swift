@@ -15,13 +15,19 @@ struct SessionInspector: View {
     private var findings: [SecretFinding] { library.findings(for: session) }
 
     private var archivedHelp: String {
-        session.agent == .codex ? "Already archived in Codex." : "Already archived: its files are compressed on disk."
+        switch session.agent {
+        case .codex: "Already archived in Codex."
+        case .openCode: "Archived in OpenCode."
+        default: "Already archived: its files are compressed on disk."
+        }
     }
 
     private var archiveHelp: String {
-        session.agent == .codex
-            ? "Archive this session in Codex (codex archive), or compress it on disk without the CLI. You can undo this."
-            : "Compress this session on disk. Claude Code can still resume it. You can undo this."
+        switch session.agent {
+        case .codex: "Archive this session in Codex (codex archive), or compress it on disk without the CLI. You can undo this."
+        case .openCode: "OpenCode keeps sessions inside its database, so there is no file to compress."
+        default: "Compress this session on disk. \(session.agent.displayName) can still resume it. You can undo this."
+        }
     }
 
     private var footprintLine: String {
@@ -43,7 +49,11 @@ struct SessionInspector: View {
                     .padding(16)
                 Divider()
             }
-            TranscriptView(session: session)
+            if session.memberCount > 1 {
+                GroupMembersView(session: session, artifacts: artifacts)
+            } else {
+                TranscriptView(session: session)
+            }
             Divider()
             footer
                 .padding(16)
@@ -89,7 +99,7 @@ struct SessionInspector: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Button("Archive…", systemImage: "archivebox", action: onArchive)
-                    .disabled(isLive || session.isArchived)
+                    .disabled(isLive || session.isArchived || !session.canArchive)
                     .help(session.isArchived ? archivedHelp : isLive ? "This session is live, so it cannot be archived." : archiveHelp)
                 Button("Delete…", systemImage: "trash", action: onDelete)
                     .disabled(isLive)
@@ -103,6 +113,44 @@ struct SessionInspector: View {
             Text("Space to preview · ⌥⌘A to archive · ⌘⌫ to delete · ⌘Z to undo")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+        }
+    }
+}
+
+/// The chats a grouped row stands for (Gemini CLI's a2a server writes hundreds of empty ones),
+/// in place of a transcript. Collapsed by default.
+struct GroupMembersView: View {
+    let session: Session
+    let artifacts: [Artifact]
+    @State private var isExpanded = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("\(session.memberCount) chats without messages share one session id. Domovy shows them as one row and deletes them together.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                DisclosureGroup("Chat files (\(artifacts.count))", isExpanded: $isExpanded) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(artifacts, id: \.url) { artifact in
+                            HStack {
+                                Text(artifact.url.lastPathComponent)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .help(artifact.url.path)
+                                Spacer()
+                                SizeText(bytes: artifact.sizeBytes)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
