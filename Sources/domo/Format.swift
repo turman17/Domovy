@@ -79,6 +79,7 @@ enum Format {
         for command in plan.commands {
             let environment = command.environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
             lines.append("  run    \(command.commandLine)\(environment.isEmpty ? "" : "   (\(environment))")")
+            if let directory = command.workingDirectory { lines.append("         in \(directory.path)") }
             lines.append("         \(command.note)")
             if !command.copiesBeforeRun.isEmpty {
                 lines.append("         keeps a copy of \(command.copiesBeforeRun.count) file(s) first, for undo")

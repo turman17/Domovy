@@ -35,9 +35,14 @@ struct RootOptions: ParsableArguments {
         ClaudeCodeAdapter(home: home)
     }
 
-    /// Every adapter, in display order. A `--root` home never gets the real codex CLI.
+    /// Every adapter, in display order. A `--root` home never gets the real codex or gemini CLI.
     var adapters: [any AgentAdapter] {
-        [claudeCode, CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: root != nil))]
+        [
+            claudeCode,
+            CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: root != nil)),
+            GeminiAdapter(home: home, cli: GeminiCLI.choice(home: home, isCustomHome: root != nil)),
+            AntigravityAdapter(home: home),
+        ]
     }
 
     /// Adapters whose agent is present at this root.

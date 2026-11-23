@@ -9,6 +9,7 @@ struct Archive: AsyncParsableCommand {
         Claude Code sessions: APFS transparent compression; Claude Code reads the files unchanged and can still resume the session. \
         Modification times are kept, so Claude Code's own cleanup still applies on schedule. \
         Codex sessions: runs `codex archive` when the codex CLI is installed (Codex must be quit), else compresses in place. \
+        Gemini CLI chats: APFS compression in place, like Claude Code. Antigravity is read-only for now. \
         `domo undo` reverses either.
         """
     )
@@ -85,7 +86,8 @@ struct Archive: AsyncParsableCommand {
         var rows: [[String]] = []
         // Codex sessions already in archived_sessions have nothing left to archive.
         var candidates: [(adapter: any AgentAdapter, session: Session)] = []
-        for adapter in adapters {
+        // Read-only agents (Antigravity) have nothing Domovy may archive.
+        for adapter in adapters where await adapter.status() == .ready {
             for session in try await adapter.sessions()
             where session.lastActive < cutoff && session.status != .live && !(session.agent == .codex && session.isArchived) {
                 candidates.append((adapter, session))
