@@ -56,6 +56,15 @@ enum AppEnvironment {
         return nil
     }
 
+    /// Debug only: `DOMOVY_OPEN_INFO=1` opens Get Info for the `DOMOVY_SELECT` session at launch.
+    static var opensInfoAtLaunch: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["DOMOVY_OPEN_INFO"] == "1"
+        #else
+        return false
+        #endif
+    }
+
     /// Debug only: `DOMOVY_OPEN_PROCESS_ACTION=quit:<pid>` (or `freeze:<pid>`) opens that
     /// confirmation sheet on the Processes screen. It never runs the action.
     static var startProcessAction: (action: String, pid: Int32)? {

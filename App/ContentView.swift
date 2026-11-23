@@ -58,6 +58,11 @@ struct ContentView: View {
             openRequestedSection()
         }
         .onChange(of: library.requestedSection) { _, _ in openRequestedSection() }
+        .onChange(of: library.requestedSearch) { _, requested in
+            guard let requested else { return }
+            search = requested
+            library.requestedSearch = nil
+        }
         .onChange(of: undoManager) { _, manager in library.undoManager = manager }
     }
 

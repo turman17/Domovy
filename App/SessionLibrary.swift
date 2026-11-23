@@ -71,6 +71,8 @@ final class SessionLibrary {
     var requestedFilter: StatusFilter?
     /// Set by the menu bar popover so the main window opens on that section.
     var requestedSection: SidebarItem?
+    /// Set by a row's "Show Sessions in This Project" so the toolbar search shows that project.
+    var requestedSearch: String?
     /// Set by the menu bar popover so the Disk screen scrolls to a section ("local-models").
     var requestedDiskAnchor: String? = AppEnvironment.startDiskAnchor
 

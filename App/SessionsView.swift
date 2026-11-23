@@ -29,6 +29,7 @@ struct SessionsView: View {
     @State private var deleteRequest: DeleteRequest?
     @State private var archiveRequest: ArchiveRequest?
     @State private var previewSession: Session?
+    @State private var infoSession: Session?
     @State private var redactRequest: RedactRequest?
     @State private var purgeRequest: PurgeRequest?
     @State private var showsFlaggedOnly = false
@@ -104,6 +105,9 @@ struct SessionsView: View {
         .navigationTitle(showsFlaggedOnly ? "Flagged by the secret scan" : statusFilter == .expiring ? "Expiring soon" : (agentFilter?.displayName ?? "Sessions"))
         .navigationSubtitle("\(rows.count) \(rows.count == 1 ? "session" : "sessions") · \(rows.reduce(0) { $0 + $1.sizeBytes }.formatted(.byteCount(style: .file)))")
         .onChange(of: rowInputs, initial: true) { _, inputs in rows = SessionRow.rows(for: inputs) }
+        .onChange(of: library.sessions.isEmpty) { _, isEmpty in
+            if !isEmpty, AppEnvironment.opensInfoAtLaunch, infoSession == nil { infoSession = selectedSession }
+        }
         .toolbar { toolbar }
         .inspector(isPresented: $showInspector) {
             if let selectedSession {
@@ -118,6 +122,9 @@ struct SessionsView: View {
         }
         .sheet(item: $archiveRequest) { request in
             ArchivePlanSheet(request: request)
+        }
+        .sheet(item: $infoSession) { session in
+            SessionInfoSheet(session: session)
         }
         .sheet(item: $previewSession) { session in
             TranscriptPreviewSheet(session: session)
@@ -201,12 +208,59 @@ struct SessionsView: View {
             }
             .width(min: 96, ideal: 116)
         }
+        .contextMenu(forSelectionType: Session.ID.self) { ids in
+            if let id = ids.first, let session = library.sessions.first(where: { $0.id == id }) {
+                rowMenu(for: session)
+            }
+        } primaryAction: { ids in
+            if let id = ids.first { previewSession = library.sessions.first { $0.id == id } }
+        }
         .onDeleteCommand(perform: requestDelete)
         .onKeyPress(.space) {
             guard let selectedSession else { return .ignored }
             previewSession = selectedSession
             return .handled
         }
+    }
+
+    /// Right-click menu, like the Finder's. Destructive items still open their plan sheet first.
+    @ViewBuilder
+    private func rowMenu(for session: Session) -> some View {
+        let isLive = session.status == .live
+        Button("Quick Look", systemImage: "eye") { previewSession = session }
+        Button("Get Info", systemImage: "info.circle") { infoSession = session }
+        Button("Show in Finder", systemImage: "folder") { revealInFinder(session) }
+        if let project = session.projectPath, FileManager.default.fileExists(atPath: project) {
+            Button("Open Project Folder", systemImage: "folder.badge.gearshape") {
+                NSWorkspace.shared.open(URL(fileURLWithPath: project))
+            }
+        }
+        Divider()
+        if let command = resumeCommand(for: session) {
+            Button("Copy Resume Command", systemImage: "terminal") { copyToPasteboard(command) }
+        }
+        Button("Copy Session ID", systemImage: "number") { copyToPasteboard(session.id) }
+        Button("Copy Transcript Path", systemImage: "doc.on.doc") { copyToPasteboard(session.transcriptURL.path) }
+        if let project = session.projectPath {
+            Button("Copy Project Path", systemImage: "doc.on.doc") { copyToPasteboard(project) }
+        }
+        Divider()
+        Button("Show Sessions in This Project", systemImage: "line.3.horizontal.decrease") {
+            library.requestedSearch = session.projectName
+        }
+        .disabled(session.projectName == nil)
+        Button("Scan for Secrets", systemImage: "key") { library.scanSecrets([session]) }
+        Divider()
+        Button("Archive\u{2026}", systemImage: "archivebox") {
+            selection = session.id
+            requestArchive([session])
+        }
+        .disabled(isLive || session.isArchived || !session.canArchive || library.readOnlyAgents[session.agent] != nil)
+        Button("Move to Trash\u{2026}", systemImage: "trash") {
+            selection = session.id
+            requestDelete(session)
+        }
+        .disabled(isLive)
     }
 
     @ToolbarContentBuilder
@@ -257,6 +311,10 @@ struct SessionsView: View {
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(!canDeleteSelection)
                 .help(deleteHelp)
+            Button("Get Info", systemImage: "info.circle") { infoSession = selectedSession }
+                .keyboardShortcut("i", modifiers: .command)
+                .disabled(selectedSession == nil)
+                .help("Everything Domovy knows about this session (\u{2318}I)")
             Button("Inspector", systemImage: "sidebar.trailing") { showInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])
                 .help("Show or hide the transcript")
@@ -356,7 +414,11 @@ struct SessionsView: View {
     }
 
     private func requestDelete() {
-        guard let session = selectedSession, session.status != .live else { return }
+        if let selectedSession { requestDelete(selectedSession) }
+    }
+
+    private func requestDelete(_ session: Session) {
+        guard session.status != .live else { return }
         // The Trash keeps plaintext until it is emptied; flagged sessions default to the quarantine.
         let destination: Destination = library.findings(for: session).isEmpty ? .trash : .quarantine
         Task {
