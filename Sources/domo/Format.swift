@@ -23,9 +23,10 @@ enum Format {
         case .idle: return "idle"
         case .archived: return "archived"
         case .expiring:
-            guard let expiresAt = session.expiresAt else { return "expiring" }
+            let archived = session.isArchived ? ", archived" : ""
+            guard let expiresAt = session.expiresAt else { return "expiring" + archived }
             let days = Int(ceil(expiresAt.timeIntervalSinceNow / 86_400))
-            return days <= 0 ? "expiring (next sweep)" : "expiring in \(days)d"
+            return (days <= 0 ? "expiring (next sweep)" : "expiring in \(days)d") + archived
         }
     }
 
@@ -56,13 +57,22 @@ enum Format {
             lines.append("  \(bytes(move.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) \(marker.padding(toLength: 6, withPad: " ", startingAt: 0)) \(move.source.path)")
             lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) \(move.note)")
         }
+        for item in plan.compressions {
+            let sizes = "\(bytes(item.sizeBytes)) \u{2192} ~\(bytes(item.estimatedBytes))"
+            lines.append("  \(sizes.padding(toLength: 22, withPad: " ", startingAt: 0)) \(item.file.path)")
+            lines.append("  \(String(repeating: " ", count: 22)) \(item.note)")
+        }
         for edit in plan.indexEdits {
             lines.append("  \(bytes(edit.removedBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) index  \(edit.file.path)")
             lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) \(edit.note)")
         }
         lines.append("")
         lines.append("Live check: \(plan.liveCheck.isLive ? "LIVE" : "not live") (checked \(plan.liveCheck.checkedSignals.joined(separator: ", ")); open handles: \(plan.liveCheck.openHandles.rawValue))")
-        lines.append("Total: \(bytes(plan.totalBytes))")
+        if plan.action == .archive {
+            lines.append("Total: \(bytes(plan.totalBytes)) \u{2192} ~\(bytes(plan.estimatedBytesAfter)) on disk")
+        } else {
+            lines.append("Total: \(bytes(plan.totalBytes))")
+        }
         lines.append(plan.summary)
         return lines.joined(separator: "\n")
     }

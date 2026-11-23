@@ -38,23 +38,13 @@ struct Rm: AsyncParsableCommand {
                 return
             }
             if !yes {
-                try confirm("\nMove \(plan.moves.count) items (\(Format.bytes(plan.totalBytes))) to \(plan.destination.displayName)? [y/N] ")
+                try confirm("\nMove \(plan.moves.count) items (\(Format.bytes(plan.totalBytes))) to \(to.displayName)? [y/N] ")
             }
             print("")
             let entry = try options.executor.execute(plan)
             print("Done. Moved \(entry.moved.count) items and edited \(entry.indexRestores.count) index file(s). Undo with `domo undo`.")
         } catch {
             throw Domo.fail(error)
-        }
-    }
-
-    /// Asks on a terminal; without one the user must pass --yes so scripts never delete by accident.
-    private func confirm(_ prompt: String) throws {
-        guard isatty(STDIN_FILENO) != 0 else { throw DomoError.confirmationRequired }
-        print(prompt, terminator: "")
-        guard let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased(),
-              answer == "y" || answer == "yes" else {
-            throw DomoError.cancelled
         }
     }
 }
@@ -65,7 +55,7 @@ enum DomoError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .confirmationRequired: "Refusing to remove without confirmation. Pass --yes to confirm, or --dry-run to only show the plan."
+        case .confirmationRequired: "Refusing to change anything without confirmation. Pass --yes to confirm, or --dry-run to only show the plan."
         case .cancelled: "Cancelled. Nothing was changed."
         }
     }

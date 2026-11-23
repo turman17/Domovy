@@ -3,7 +3,7 @@ import DomovyCore
 import Foundation
 
 struct Undo: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Put back what the last `domo rm` moved.")
+    static let configuration = CommandConfiguration(abstract: "Undo the last `domo rm` or `domo archive`.")
 
     @OptionGroup var options: RootOptions
 
@@ -25,15 +25,17 @@ struct Undo: AsyncParsableCommand {
                         Format.relative(e.createdAt),
                         e.agent.displayName,
                         String(e.sessionID.prefix(8)),
-                        "\(e.moved.count) items, \(e.indexRestores.count) index edits",
+                        e.action == .archive ? "\(e.compressed.count) files compressed" : "\(e.moved.count) items, \(e.indexRestores.count) index edits",
                         e.isUndone ? "undone" : (e.failure == nil ? "done" : "partial"),
                     ]
                 }
                 print(Format.table(rows, header: ["ENTRY", "WHEN", "AGENT", "SESSION", "CHANGES", "STATE"]))
                 return
             }
-            let entry = try executor.undoLatest()
-            print("Restored session \(entry.sessionID) (\(entry.agent.displayName)).")
+            for entry in try executor.undoLatestBatch() {
+                let verb = entry.action == .archive ? "Decompressed" : "Restored"
+                print("\(verb) session \(entry.sessionID) (\(entry.agent.displayName)).")
+            }
         } catch {
             throw Domo.fail(error)
         }

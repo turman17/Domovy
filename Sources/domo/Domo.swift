@@ -7,7 +7,7 @@ struct Domo: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "domo",
         abstract: "Domovy: tidy up after AI coding agents.",
-        subcommands: [Ls.self, Du.self, Rm.self, Undo.self]
+        subcommands: [Ls.self, Du.self, Rm.self, Archive.self, Undo.self]
     )
 }
 
@@ -37,5 +37,15 @@ extension Domo {
     static func fail(_ error: Error) -> ExitCode {
         FileHandle.standardError.write(Data("domo: \(error.localizedDescription)\n".utf8))
         return .failure
+    }
+}
+
+/// Asks on a terminal; without one the user must pass --yes so scripts never change files by accident.
+func confirm(_ prompt: String) throws {
+    guard isatty(STDIN_FILENO) != 0 else { throw DomoError.confirmationRequired }
+    print(prompt, terminator: "")
+    guard let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased(),
+          answer == "y" || answer == "yes" else {
+        throw DomoError.cancelled
     }
 }
