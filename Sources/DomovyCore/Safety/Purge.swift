@@ -94,6 +94,17 @@ extension Executor {
         return entries
     }
 
+    /// "Free the space now": right after a tool command ran, permanently deletes the copies
+    /// Domovy kept for exactly these entries, nothing else. Their undo ends here.
+    @discardableResult
+    public func purgeKeptCopies(of entries: [UndoEntry]) throws -> PurgePlan {
+        let ids = Set(entries.map(\.id))
+        let plan = PurgePlan(items: try purgePlan([.toolCopy]).items.filter { ids.contains($0.entryID) })
+        guard !plan.isEmpty else { return plan }
+        try purge(plan)
+        return plan
+    }
+
     private func isInQuarantine(_ url: URL) -> Bool {
         guard let relative = FileSystem.relativePath(of: url, under: quarantineDirectory) else { return false }
         return !relative.isEmpty && !relative.split(separator: "/").contains("..")

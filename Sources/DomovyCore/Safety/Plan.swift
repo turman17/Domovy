@@ -175,6 +175,12 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         compressions.reduce(0) { $0 + $1.estimatedBytes }
     }
 
+    /// A command runs that Domovy keeps a copy for first (`codex delete`, `ollama rm`); the
+    /// space comes back only once that copy is purged.
+    public var keepsToolCopies: Bool {
+        commands.contains { !Executor.filesToKeep($0).isEmpty }
+    }
+
     public var isEmpty: Bool {
         moves.isEmpty && indexEdits.isEmpty && registryRemovals.isEmpty && compressions.isEmpty && commands.isEmpty && redactions.isEmpty
     }

@@ -214,7 +214,7 @@ extension CleanupPlanner {
         }
         let why = serverStore
             ? "Ollama's server is not answering, so Domovy moves the files itself."
-            : "Ollama's server may use another models folder than the one Domovy scanned (OLLAMA_MODELS is set, or the store is not ~/.ollama/models), so ollama rm could remove the wrong copy. Domovy moves the files itself."
+            : "Ollama's server may use another models folder than the one Domovy scanned (OLLAMA_MODELS is set here or in launchctl, or the store is not ~/.ollama/models), so ollama rm could remove the wrong copy. Domovy moves the files itself."
         remarks.insert("\(why) You can undo this while they are in \(destination.displayName).", at: 0)
         let plan = await fileMovePlan(agent: .ollama, label: label, items: items, matchers: [Self.ollamaMatcher],
                                       remarks: remarks, extraReasons: unknown, destination: destination)
@@ -222,10 +222,12 @@ extension CleanupPlanner {
     }
 
     /// `ollama rm` acts on the server's store, which Domovy cannot see. It only matches the scanned
-    /// one for sure when that is the home's default and nothing in the environment moves it.
+    /// one for sure when that is the home's default and nothing moves it: neither Domovy's
+    /// environment nor launchd's (`launchctl setenv OLLAMA_MODELS`, which the Ollama app inherits).
     private func servesScannedStore(_ stores: ModelStores) -> Bool {
         let standard = stores.ollamaHome.appendingPathComponent("models", isDirectory: true).standardizedFileURL
         return stores.ollamaModels.standardizedFileURL.path == standard.path && (environment["OLLAMA_MODELS"] ?? "").isEmpty
+            && (launchdEnvironment("OLLAMA_MODELS") ?? "").isEmpty
     }
 
     private func lmStudioRemoval(_ names: [String], stores: ModelStores, destination: Destination) async throws -> Plan {

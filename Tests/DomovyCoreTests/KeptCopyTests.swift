@@ -32,6 +32,48 @@ struct KeptCopyTests {
         #expect(D.qwenOwn.allSatisfy { fixture.exists(fixture.blob($0)) })
     }
 
+    @Test("undo skips a blob that is already back with the same content, and refuses a different file")
+    func undoSkipsIdenticalBlob() async throws {
+        let fixture = try ModelFixtureHome()
+        let planner = fixture.planner()
+        let executor = fixture.executor()
+        let entries = try await planner.execute(try await planner.modelRemovalPlan([try await fixture.model(.ollama, "qwen3:14b")]), with: executor)
+        let entry = try #require(entries.first)
+        let blob = fixture.url(fixture.blob(D.qwenOwn[0]))
+        let copy = try #require(entry.moved.first { $0.original.standardizedFileURL == blob.standardizedFileURL }?.current)
+        // Pulled again since: the same content-addressed blob is back at its place.
+        try FileManager.default.copyItem(at: copy, to: blob)
+        _ = try executor.undo(entry)
+        #expect(fixture.exists(F.qwenManifest))
+        #expect(D.qwenOwn.allSatisfy { fixture.exists(fixture.blob($0)) })
+        #expect(!FileManager.default.fileExists(atPath: copy.path))
+
+        let second = try #require(try await planner.execute(try await planner.modelRemovalPlan([try await fixture.model(.ollama, "qwen3:14b")]), with: executor).first)
+        try Data("different".utf8).write(to: blob)
+        #expect(throws: (any Error).self) { try executor.undo(second) }
+    }
+
+    @Test("free the space now purges only the kept copies of the entries just run")
+    func purgeNow() async throws {
+        let fixture = try ModelFixtureHome()
+        let planner = fixture.planner()
+        let executor = fixture.executor()
+        let removal = try await planner.modelRemovalPlan([try await fixture.model(.ollama, "qwen3:14b")])
+        #expect(removal.keepsToolCopies)
+        let first = try await planner.execute(removal, with: executor)
+        let other = try await planner.execute(try await planner.modelRemovalPlan([try await fixture.model(.ollama, "deepcoder:14b")]), with: executor)
+        let purged = try executor.purgeKeptCopies(of: first)
+        #expect(!purged.isEmpty && Set(purged.items.map(\.entryID)) == Set(first.map(\.id)))
+        let entries = try executor.undoLog.entries()
+        let firstIDs = Set(first.map(\.id)), otherIDs = Set(other.map(\.id))
+        let purgedStillUndoable = entries.contains { firstIDs.contains($0.id) && $0.isUndoable }
+        let othersUndoable = entries.filter { otherIDs.contains($0.id) }.allSatisfy { $0.isUndoable }
+        #expect(!purgedStillUndoable)
+        #expect(othersUndoable)
+        let again = try executor.purgeKeptCopies(of: first)
+        #expect(again.isEmpty)
+    }
+
     @Test("when neither a clone nor a copy works, the command never runs")
     func bothFail() async throws {
         let fixture = try ModelFixtureHome()
@@ -94,6 +136,12 @@ struct KeptCopyTests {
         let custom = try await fixture.planner(stores: elsewhere).modelRemovalPlan([model])
         #expect(custom.plans.first?.commands.isEmpty == true)
         #expect(!fixture.stubLog(".ollama/models/.stub-ollama.log").contains("ps"))
+
+        // launchctl setenv OLLAMA_MODELS (what the Ollama app inherits) counts too; empty does not.
+        let fromLaunchd = try await fixture.planner(launchd: ["OLLAMA_MODELS": "/Volumes/External/ollama"]).modelRemovalPlan([model])
+        #expect(fromLaunchd.plans.first?.commands.isEmpty == true)
+        let emptyLaunchd = try await fixture.planner(launchd: ["OLLAMA_MODELS": ""]).modelRemovalPlan([model])
+        #expect(emptyLaunchd.plans.first?.commands.isEmpty == false)
 
         // While Ollama runs, the fallback refuses.
         let running = try await fixture.planner(running: [RunningProcess(pid: 811, name: "ollama")], environment: ["OLLAMA_MODELS": "/x"]).modelRemovalPlan([model])

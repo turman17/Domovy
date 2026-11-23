@@ -33,6 +33,8 @@ public struct ModelRemovalPlan: Identifiable, Hashable, Sendable {
 
     /// Some of it is deleted by the tool itself; Domovy keeps a copy until it is purged.
     public var isPermanent: Bool { plans.contains { $0.isPermanent } }
+    /// Domovy keeps a copy before a tool command deletes; see `Plan.keepsToolCopies`.
+    public var keepsToolCopies: Bool { plans.contains { $0.keepsToolCopies } }
 
     /// "Remove qwen3:14b?" or "Remove 3 models?"
     public var title: String {

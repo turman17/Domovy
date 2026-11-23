@@ -62,6 +62,10 @@ extension Executor {
         if !FileSystem.itemExists(item.original) {
             try fileManager.createDirectory(at: item.original.deletingLastPathComponent(), withIntermediateDirectories: true)
             try fileManager.moveItem(at: item.current, to: item.original)
+        } else if Self.isSameBlob(item.original, item.current) {
+            // Content-addressed and already back (pulled again since): the copy adds nothing.
+            try? fileManager.removeItem(at: item.current)
+            return
         } else {
             guard FileSystem.isDirectory(item.original), FileSystem.isDirectory(item.current) else {
                 throw CocoaError(.fileWriteFileExists, userInfo: [NSLocalizedDescriptionKey: "something else now exists at its original place"])
@@ -82,6 +86,24 @@ extension Executor {
         guard missing.isEmpty else {
             throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "\(missing.count) of its files did not come back"])
         }
+    }
+
+    /// Two regular files of a content-addressed store (Ollama's `sha256-<hex>` blobs, Hugging
+    /// Face's `blobs/<hex>`) with the same name and size: the name is the digest of the content,
+    /// so they are the same file.
+    static func isSameBlob(_ original: URL, _ copy: URL) -> Bool {
+        guard isContentAddressed(original),
+              let a = try? original.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              let b = try? copy.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              a.isRegularFile == true, b.isRegularFile == true else { return false }
+        return a.fileSize == b.fileSize
+    }
+
+    static func isContentAddressed(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        let hex = name.hasPrefix("sha256-") ? String(name.dropFirst(7)) : name
+        let inBlobs = url.deletingLastPathComponent().lastPathComponent == "blobs"
+        return inBlobs && (hex.count == 64 || hex.count == 40) && hex.allSatisfy(\.isHexDigit)
     }
 
     private func uniqueTarget(in folder: URL, name: String) -> URL {

@@ -22,6 +22,9 @@ public struct CleanupPlanner: Sendable {
     let huggingFaceCLI: ToolChoice
     /// Domovy's own environment, for `OLLAMA_MODELS`. Tests pass a fixed one.
     let environment: [String: String]
+    /// Reads a variable from launchd's user environment (`launchctl getenv`), which the Ollama
+    /// app's server inherits. Tests and custom homes answer nothing.
+    let launchdEnvironment: @Sendable (String) -> String?
     let now: @Sendable () -> Date
 
     public init(
@@ -35,6 +38,7 @@ public struct CleanupPlanner: Sendable {
         processes: any RunningProcessLister = LibprocProcessLister(),
         git: GitWorktreeInspector = GitWorktreeInspector(),
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        launchdEnvironment: @escaping @Sendable (String) -> String? = { _ in nil },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.claudeCodeRoot = claudeCodeRoot.standardizedFileURL
@@ -47,6 +51,7 @@ public struct CleanupPlanner: Sendable {
         self.processes = processes
         self.git = git
         self.environment = environment
+        self.launchdEnvironment = launchdEnvironment
         self.now = now
     }
 
@@ -61,7 +66,8 @@ public struct CleanupPlanner: Sendable {
             ollamaCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "ollama", override: "DOMOVY_OLLAMA_CLI"),
             huggingFaceCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "hf", override: "DOMOVY_HF_CLI"),
             openHandles: openHandles,
-            processes: processes
+            processes: processes,
+            launchdEnvironment: LaunchdEnvironment.reader(isCustomHome: isCustomHome)
         )
     }
 

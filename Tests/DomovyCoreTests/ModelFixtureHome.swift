@@ -69,12 +69,14 @@ final class ModelFixtureHome: Sendable {
         ollama: ToolChoice? = nil,
         hf: ToolChoice? = ToolChoice.none,
         stores custom: ModelStores? = nil,
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        launchd: [String: String] = [:]
     ) -> CleanupPlanner {
         CleanupPlanner(
             claudeCodeRoot: url(".claude"), codexRoot: url(".codex"), desktopSupport: url("Library/Application Support/Claude"),
             models: custom ?? stores, ollamaCLI: ollama ?? .executable(ollamaStub), huggingFaceCLI: hf ?? .executable(hfStub),
-            openHandles: PrefixOpenHandleChecker(holders: holders), processes: FixedProcessLister(running), environment: environment
+            openHandles: PrefixOpenHandleChecker(holders: holders), processes: FixedProcessLister(running), environment: environment,
+            launchdEnvironment: { launchd[$0] }
         )
     }
 
