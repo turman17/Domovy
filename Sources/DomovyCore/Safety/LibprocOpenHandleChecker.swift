@@ -52,7 +52,7 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         return holders
     }
 
-    private static func listPIDs() -> [pid_t]? {
+    static func listPIDs() -> [pid_t]? {
         let needed = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
         guard needed > 0 else { return nil }
         // Leave headroom: processes may appear between the two calls.
@@ -89,7 +89,7 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         }
     }
 
-    private static func processName(of pid: pid_t) -> String? {
+    static func processName(of pid: pid_t) -> String? {
         var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
         guard proc_name(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
         let length = buffer.firstIndex(of: 0) ?? buffer.count

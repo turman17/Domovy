@@ -89,6 +89,12 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     public let moves: [FileMove]
     public let indexEdits: [IndexEdit]
     public let compressions: [FileCompression]
+    /// The agent's own commands, run before any move or edit (e.g. `codex delete`).
+    public let commands: [PlannedCommand]
+    /// Consequences the user should know before confirming ("3 rows stay in state_5.sqlite").
+    public let remarks: [String]
+    /// Apps that must not run while this plan executes; the executor checks again right before.
+    public let mustNotBeRunning: [ProcessMatcher]
     public let liveCheck: LiveCheckResult
 
     public init(
@@ -101,6 +107,9 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         moves: [FileMove],
         indexEdits: [IndexEdit],
         compressions: [FileCompression] = [],
+        commands: [PlannedCommand] = [],
+        remarks: [String] = [],
+        mustNotBeRunning: [ProcessMatcher] = [],
         liveCheck: LiveCheckResult
     ) {
         self.id = id
@@ -112,12 +121,15 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         self.moves = moves
         self.indexEdits = indexEdits
         self.compressions = compressions
+        self.commands = commands
+        self.remarks = remarks
+        self.mustNotBeRunning = mustNotBeRunning
         self.liveCheck = liveCheck
     }
 
     public var totalBytes: Int64 {
         moves.reduce(0) { $0 + $1.sizeBytes } + indexEdits.reduce(0) { $0 + $1.removedBytes }
-            + compressions.reduce(0) { $0 + $1.sizeBytes }
+            + compressions.reduce(0) { $0 + $1.sizeBytes } + commands.reduce(0) { $0 + $1.sizeBytes }
     }
 
     /// Estimated on-disk bytes of the compressed files after an archive.
@@ -126,19 +138,26 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     }
 
     public var isEmpty: Bool {
-        moves.isEmpty && indexEdits.isEmpty && compressions.isEmpty
+        moves.isEmpty && indexEdits.isEmpty && compressions.isEmpty && commands.isEmpty
     }
 
     /// Plain-language summary in the Domovy voice: say exactly what happens.
     public var summary: String {
         if liveCheck.isLive {
-            return "This session is live, so nothing will change. " + liveCheck.reasons.joined(separator: " ")
+            let lead = commands.isEmpty && mustNotBeRunning.isEmpty ? "This session is live, so nothing will change." : "Nothing will change yet."
+            return lead + " " + liveCheck.reasons.joined(separator: " ")
         }
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         formatter.allowsNonnumericFormatting = false
+        let commandText = commands.map(\.note).joined(separator: " ")
+        if action == .archive, !commands.isEmpty {
+            return commandText + " You can undo this."
+        }
         if action == .archive {
-            guard !compressions.isEmpty else { return "Nothing to compress: the files of this session are already compressed or too small to gain from it." }
+            guard !compressions.isEmpty else {
+                return remarks.first ?? "Nothing to compress: the files of this session are already compressed or too small to gain from it."
+            }
             let n = compressions.count
             let before = formatter.string(fromByteCount: totalBytes)
             let after = formatter.string(fromByteCount: estimatedBytesAfter)
@@ -153,7 +172,9 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
             let n = edit.lineNumbers.count
             parts.append("removes \(n) \(n == 1 ? "line" : "lines") from \(edit.file.lastPathComponent)")
         }
-        guard !parts.isEmpty else { return "Nothing to do." }
-        return parts.joined(separator: " and ") + ". You can undo this."
+        guard !parts.isEmpty || !commands.isEmpty else { return remarks.first ?? "Nothing to do." }
+        let rest = parts.isEmpty ? "" : parts.joined(separator: " and ") + ". "
+        let prefix = commandText.isEmpty ? "" : commandText + " "
+        return prefix + rest.prefix(1).uppercased() + rest.dropFirst() + "You can undo this."
     }
 }

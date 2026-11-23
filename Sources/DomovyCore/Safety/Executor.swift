@@ -9,6 +9,8 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
     case compressionFailed(URL, reason: String, doneSoFar: Int, total: Int)
     case alreadyUndone
     case nothingToUndo
+    case appRunning(reasons: [String])
+    case commandFailed(String, status: Int32, message: String)
 
     public var errorDescription: String? {
         switch self {
@@ -28,6 +30,10 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
             "This action was already undone."
         case .nothingToUndo:
             "There is nothing to undo."
+        case .appRunning(let reasons):
+            "Nothing was changed. " + reasons.joined(separator: " ")
+        case .commandFailed(let line, let status, let message):
+            "`\(line)` failed (exit status \(status))\(message.isEmpty ? "." : ": \(message)") Its files were left as they were."
         }
     }
 }
@@ -37,6 +43,8 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
 public struct Executor: Sendable {
     public let storeRoot: URL
     public let undoLog: UndoLog
+    let runner: any CommandRunner
+    let processes: any RunningProcessLister
     let now: @Sendable () -> Date
     var fileManager: FileManager { .default }
 
@@ -44,9 +52,18 @@ public struct Executor: Sendable {
 
     /// - Parameter storeRoot: Domovy's own folder (app: `~/Library/Application Support/Domovy`;
     ///   tests: a temp dir). Never a folder inside an agent's storage.
-    public init(storeRoot: URL, now: @escaping @Sendable () -> Date = { Date() }) {
+    ///   - runner: runs agent commands such as `codex delete`; tests point plans at a stub executable.
+    ///   - processes: checks right before execution that apps a plan must not run alongside are quit.
+    public init(
+        storeRoot: URL,
+        runner: any CommandRunner = ProcessCommandRunner(),
+        processes: any RunningProcessLister = LibprocProcessLister(),
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.storeRoot = storeRoot.standardizedFileURL
         self.undoLog = UndoLog(directory: self.storeRoot.appendingPathComponent("Undo", isDirectory: true))
+        self.runner = runner
+        self.processes = processes
         self.now = now
     }
 
@@ -68,6 +85,9 @@ public struct Executor: Sendable {
     private func execute(_ plan: Plan, batchID: UUID?) throws -> UndoEntry {
         guard !plan.liveCheck.isLive else { throw ExecutorError.sessionIsLive(reasons: plan.liveCheck.reasons) }
         guard !plan.isEmpty else { throw ExecutorError.nothingToDo }
+        // Checked again here: the app may have started while the user read the plan.
+        let blocking = processes.blockingReasons(plan.mustNotBeRunning)
+        guard blocking.isEmpty else { throw ExecutorError.appRunning(reasons: blocking) }
 
         var entry = UndoEntry(
             id: UUID(),
@@ -81,10 +101,16 @@ public struct Executor: Sendable {
             moved: [],
             indexRestores: [],
             compressed: [],
+            undoCommands: [],
+            mustNotBeRunning: plan.mustNotBeRunning,
+            leftovers: [],
             undoneAt: nil,
             failure: nil
         )
         try undoLog.write(entry)
+        for command in plan.commands {
+            try run(command, entry: &entry)
+        }
         if plan.action == .archive { return try compress(plan, entry: entry) }
         Log.executor.info("Executing plan \(plan.id, privacy: .public) for session \(plan.sessionID, privacy: .public): \(plan.moves.count) moves, \(plan.indexEdits.count) index edits")
 
@@ -142,6 +168,88 @@ public struct Executor: Sendable {
         return entry
     }
 
+    /// Runs one agent command: keeps copies of what it will remove, runs it, then checks what
+    /// it left behind. A failed command leaves the agent's files as they were.
+    private func run(_ command: PlannedCommand, entry: inout UndoEntry) throws {
+        let sessionID = entry.sessionID
+        Log.executor.info("Running \(command.executable.lastPathComponent, privacy: .public) \(command.arguments.first ?? "", privacy: .public) for session \(sessionID, privacy: .public)")
+        let folder = quarantineDirectory.appendingPathComponent(entry.id.uuidString, isDirectory: true)
+        var copies: [UndoEntry.MovedItem] = []
+        for (index, source) in command.copiesBeforeRun.enumerated() where FileSystem.exists(source) {
+            try fileManager.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let copy = folder.appendingPathComponent("copy-\(index)-\(source.lastPathComponent)")
+            // copyItem clones on APFS and keeps the modification time.
+            try fileManager.copyItem(at: source, to: copy)
+            copies.append(.init(original: source, current: copy))
+        }
+        var captured: [UndoEntry.IndexRestore] = []
+        for edit in command.indexLinesBeforeRun where FileSystem.exists(edit.file) {
+            if let restore = try snapshotLines(edit, entry: entry) { captured.append(restore) }
+        }
+
+        let result: CommandResult
+        do {
+            result = try runner.run(command)
+        } catch {
+            result = CommandResult(status: -1, errorOutput: error.localizedDescription)
+        }
+        guard result.status == 0 else {
+            for copy in copies { try? fileManager.removeItem(at: copy.current) }
+            entry.failure = "\(command.commandLine) exited with status \(result.status)"
+            try undoLog.write(entry)
+            Log.executor.error("\(command.commandLine, privacy: .public) failed with \(result.status, privacy: .public): \(result.errorOutput, privacy: .private)")
+            throw ExecutorError.commandFailed(command.commandLine, status: result.status, message: result.errorOutput)
+        }
+
+        // Keep the copies of what the command really removed; drop the rest.
+        for copy in copies {
+            if FileSystem.exists(copy.original) {
+                try? fileManager.removeItem(at: copy.current)
+            } else {
+                entry.moved.append(copy)
+            }
+        }
+        for restore in captured {
+            let data = (try? Data(contentsOf: restore.file)) ?? Data()
+            let remaining = restore.removedLines.filter { line in JSONLines.split(data).lines.contains(line.bytes) }
+            if remaining.count < restore.removedLines.count { entry.indexRestores.append(restore) }
+        }
+        entry.undoCommands.append(contentsOf: command.undo)
+        let leftovers = command.verifications.compactMap { $0.leftover() }
+        entry.leftovers.append(contentsOf: leftovers)
+        if !leftovers.isEmpty {
+            Log.executor.info("\(command.commandLine, privacy: .public) left \(leftovers.count, privacy: .public) things behind")
+        }
+        try undoLog.write(entry)
+    }
+
+    /// Records the lines an agent command is about to remove, with a byte-exact backup.
+    private func snapshotLines(_ edit: IndexEdit, entry: UndoEntry) throws -> UndoEntry.IndexRestore? {
+        let data = try Data(contentsOf: edit.file)
+        let split = JSONLines.split(data)
+        let indices = JSONLines.indices(in: split.lines, where: edit.matchKey, equals: edit.matchValue)
+        guard !indices.isEmpty else { return nil }
+        let mtime = FileSystem.modificationTime(of: edit.file)
+        let backup = try writeBackup(data, of: edit.file, entry: entry, modificationTime: mtime)
+        let removed = indices.map { UndoEntry.RemovedLine(index: $0, bytes: split.lines[$0]) }
+        return UndoEntry.IndexRestore(file: edit.file, backup: backup, removedLines: removed, modificationTime: mtime)
+    }
+
+    private func writeBackup(_ data: Data, of file: URL, entry: UndoEntry, modificationTime: FileTime?) throws -> URL {
+        let backupDir = undoLog.backupDirectory(for: entry)
+        try fileManager.createDirectory(at: backupDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var backup = backupDir.appendingPathComponent(file.lastPathComponent)
+        var n = 1
+        while FileSystem.exists(backup) {
+            backup = backupDir.appendingPathComponent("\(n)-\(file.lastPathComponent)")
+            n += 1
+        }
+        try data.write(to: backup, options: [.atomic])
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
+        if let modificationTime { try FileSystem.setModificationTime(modificationTime, of: backup) }
+        return backup
+    }
+
     private func relocate(_ source: URL, to destination: Destination, entry: UndoEntry, ordinal: Int) throws -> URL {
         switch destination {
         case .trash:
@@ -172,12 +280,7 @@ public struct Executor: Sendable {
         let mtime = FileSystem.modificationTime(of: edit.file)
         let permissions = FileSystem.posixPermissions(of: edit.file)
 
-        let backupDir = undoLog.backupDirectory(for: entry)
-        try fileManager.createDirectory(at: backupDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let backup = backupDir.appendingPathComponent(edit.file.lastPathComponent)
-        try data.write(to: backup, options: [.atomic])
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
-        if let mtime { try FileSystem.setModificationTime(mtime, of: backup) }
+        let backup = try writeBackup(data, of: edit.file, entry: entry, modificationTime: mtime)
 
         let removed = indices.map { UndoEntry.RemovedLine(index: $0, bytes: split.lines[$0]) }
         for index in indices.reversed() { split.lines.remove(at: index) }
@@ -210,6 +313,21 @@ public struct Executor: Sendable {
         var entry = original
         guard !entry.isUndone else { throw ExecutorError.alreadyUndone }
         Log.executor.info("Undoing entry \(entry.id, privacy: .public)")
+        let blocking = processes.blockingReasons(entry.mustNotBeRunning)
+        guard blocking.isEmpty else { throw ExecutorError.appRunning(reasons: blocking) }
+
+        // Reverse agent commands first (e.g. `codex unarchive`), newest first.
+        var pendingCommands = entry.undoCommands
+        for command in entry.undoCommands.reversed() {
+            let result = (try? runner.run(command)) ?? CommandResult(status: -1, errorOutput: "")
+            guard result.status == 0 else {
+                entry.undoCommands = pendingCommands
+                try undoLog.write(entry)
+                throw ExecutorError.commandFailed(command.commandLine, status: result.status, message: result.errorOutput)
+            }
+            pendingCommands.removeLast()
+        }
+        entry.undoCommands = []
 
         // Put files back, last moved first, so parent folders exist before their children.
         var remaining = entry.moved

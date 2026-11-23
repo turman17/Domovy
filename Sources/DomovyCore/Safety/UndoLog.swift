@@ -40,6 +40,12 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
     public var moved: [MovedItem]
     public var indexRestores: [IndexRestore]
     public var compressed: [CompressedItem]
+    /// Agent commands that reverse what the plan's commands did (e.g. `codex unarchive`).
+    public var undoCommands: [PlannedCommand]
+    /// Apps that must not run while undo runs `undoCommands` or rewrites their index.
+    public var mustNotBeRunning: [ProcessMatcher]
+    /// What an agent command left behind, found by checking after it ran.
+    public var leftovers: [String]
     public var undoneAt: Date?
     /// Set when execution stopped half way; `undo` still restores what did move.
     public var failure: String?
@@ -50,10 +56,10 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
 extension UndoEntry {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, planID, batchID, action, agent, sessionID, destination
-        case moved, indexRestores, compressed, undoneAt, failure
+        case moved, indexRestores, compressed, undoCommands, mustNotBeRunning, leftovers, undoneAt, failure
     }
 
-    /// Entries written before archive existed have no action, batch or compressed list.
+    /// Entries written by older versions lack the newer fields; they decode with empty defaults.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
@@ -68,6 +74,9 @@ extension UndoEntry {
             moved: try c.decodeIfPresent([MovedItem].self, forKey: .moved) ?? [],
             indexRestores: try c.decodeIfPresent([IndexRestore].self, forKey: .indexRestores) ?? [],
             compressed: try c.decodeIfPresent([CompressedItem].self, forKey: .compressed) ?? [],
+            undoCommands: try c.decodeIfPresent([PlannedCommand].self, forKey: .undoCommands) ?? [],
+            mustNotBeRunning: try c.decodeIfPresent([ProcessMatcher].self, forKey: .mustNotBeRunning) ?? [],
+            leftovers: try c.decodeIfPresent([String].self, forKey: .leftovers) ?? [],
             undoneAt: try c.decodeIfPresent(Date.self, forKey: .undoneAt),
             failure: try c.decodeIfPresent(String.self, forKey: .failure)
         )
