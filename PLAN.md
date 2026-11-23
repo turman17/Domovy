@@ -143,8 +143,8 @@ Each agent is one adapter. It implements: list sessions, list a session's artifa
 - v1 is read-only: show sizes and guide the user to "Developer: Delete Old Chats" and "Developer: GC Agent KV Blobs". Writing to the database comes later, only with Cursor quit and a backup made first.
 
 **Later adapters**
-- Gemini CLI: `~/.gemini/tmp/<hash>/{chats,checkpoints}`, `~/.gemini/history/<hash>`. Official `--delete-session`.
-- Antigravity: `~/.gemini/antigravity/{brain,conversations/*.db,annotations,presence}`. Retention keeps 500 conversations.
+- Gemini CLI: `~/.gemini/tmp/<project>/{chats,logs,tool-outputs,checkpoints}`, `~/.gemini/history/<project>` (`<project>` from `projects.json`; older versions used a hash). Official `--delete-session`, which also deletes chats sharing the id's first 8 characters and runs the retention sweep first (verified 0.43.0).
+- Antigravity: `~/.gemini/antigravity-cli/{brain,conversations/*.db}` for the `agy` CLI (verified 1.5.8), `~/.gemini/antigravity/{brain,conversations/*.db,annotations,presence}` for the app. Retention keeps 500 conversations. No delete command, so Domovy is read-only for it.
 - OpenCode: `~/.local/share/opencode/opencode.db`. Official `opencode session delete`; the `event` table bloats.
 - Copilot CLI: `~/.copilot/session-state/<id>/events.jsonl` and `session-store.db`. Its reindex syncs to the user's account, so warn before running it.
 - Models: Ollama (`ollama rm`, content-addressed blobs), LM Studio `~/.lmstudio/models`, Hugging Face (`hf cache rm` and `hf cache prune`).
@@ -237,4 +237,9 @@ DomovyCore        Swift package, no UI
 - [ ] Codex screenshot duplicates and Cursor `.pack` files: no sources yet.
 - [x] Ollama store and Hugging Face hub cache layouts, taken from a real install (verified 2026-11-23; see docs/research/agent_storage_formats.md).
 - [ ] LM Studio model layout and process names; `hf cache rm` / `hf cache prune` argument forms; the Ollama server's process name and `ollama ps` output while a model is loaded.
+- [x] Gemini CLI layout, chat format, `--delete-session` semantics and retention defaults, taken from a real install and its source (verified 2026-11-23; see docs/research/agent_storage_formats.md).
+- [x] Antigravity CLI (`agy`) store layout and SQLite schemas (verified 2026-11-23).
+- [ ] Antigravity desktop app: `~/.gemini/antigravity` layout, `presence/*.lock`, process names, and whether it has a safe delete. Not installed here.
+- [ ] Antigravity conversation format (`brain/<id>/.system_generated/logs/transcript.jsonl`, the `.db` step payloads), for a transcript preview.
+- [ ] Gemini CLI: does `--delete-session` work in an untrusted folder, and do project `.gemini/settings.json` files override `sessionRetention`?
 - [x] Name: Domovy (домовий, the Ukrainian house spirit who keeps the home in order). CLI: `domo`.
