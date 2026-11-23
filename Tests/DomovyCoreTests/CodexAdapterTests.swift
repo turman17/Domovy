@@ -88,7 +88,7 @@ struct CodexAdapterTests {
         #expect(command.verifications.contains { if case .rowsGone(_, "threads", "id", IDs.idle) = $0 { true } else { false } })
         #expect(plan.moves.map { FileSystem_relative($0.source, fixture.codexDirectory) } == ["generated_images/\(IDs.idle)"])
         #expect(plan.indexEdits.map(\.file.lastPathComponent) == ["history.jsonl"])
-        #expect(plan.mustNotBeRunning == [CodexAdapter.processMatcher])
+        #expect(plan.mustNotBeRunning == [fixture.adapter().processMatcher])
         #expect(!plan.liveCheck.isLive)
         #expect(plan.summary.hasPrefix("Runs `codex delete` for this session, then checks the result."))
     }
@@ -120,7 +120,7 @@ struct CodexAdapterTests {
         #expect(command.arguments == ["archive", IDs.idle])
         #expect(command.undo.map(\.arguments) == [["unarchive", IDs.idle]])
         #expect(plan.compressions.isEmpty)
-        #expect(plan.mustNotBeRunning == [CodexAdapter.processMatcher])
+        #expect(plan.mustNotBeRunning == [fixture.adapter().processMatcher])
 
         let archived = try await adapter.archivePlan(for: try await adapter.session(matching: IDs.archived))
         #expect(archived.isEmpty)
@@ -148,19 +148,47 @@ struct CodexAdapterTests {
         #expect(compressed.compressions.isEmpty, ".zst rollouts gain nothing from APFS compression")
     }
 
-    @Test("a running Codex blocks every plan that touches its index")
+    @Test("a Codex process using this CODEX_HOME blocks every plan that touches its index")
     func runningCodexRefusal() async throws {
         let fixture = try CodexFixtureHome()
-        let adapter = fixture.adapter(running: [RunningProcess(pid: 8_383, name: "codex")])
+        let codex = RunningProcess(pid: 8_383, name: "codex")
+        let adapter = fixture.adapter(running: [codex], openFiles: [8_383: [fixture.openStateDatabase]])
         let session = try await adapter.session(matching: IDs.idle)
         for plan in [try await adapter.deletePlan(for: session), try await adapter.archivePlan(for: session)] {
             #expect(plan.liveCheck.isLive)
-            #expect(plan.liveCheck.reasons.contains { $0.hasPrefix("Codex is running (codex, pid 8383).") })
-            #expect(throws: ExecutorError.self) { try fixture.executor().execute(plan) }
+            #expect(plan.liveCheck.reasons.contains { $0.hasPrefix("Codex is using ") && $0.hasSuffix("(pid 8383). Quit the ChatGPT app or Codex to change this session.") })
+            #expect(throws: ExecutorError.self) { try fixture.executor(running: [codex], openFiles: [8_383: [fixture.openStateDatabase]]).execute(plan) }
         }
-        let fallback = try await fixture.adapter(cli: CodexCLI.Choice.none, running: [RunningProcess(pid: 1, name: "codex-code-mode")]).deletePlan(for: session)
+        let helper = RunningProcess(pid: 1, name: "codex-code-mode")
+        let fallback = try await fixture.adapter(cli: CodexCLI.Choice.none, running: [helper], openFiles: [1: [fixture.openStateDatabase]]).deletePlan(for: session)
         #expect(fallback.liveCheck.isLive)
         #expect(fixture.exists(CodexFixtureHome.idleRollout))
+    }
+
+    @Test("a Codex daemon serving another CODEX_HOME does not block")
+    func otherCodexHomeDoesNotBlock() async throws {
+        let fixture = try CodexFixtureHome()
+        // The ChatGPT app's app-server keeps the real ~/.codex open, never this fixture.
+        let adapter = fixture.adapter(running: [RunningProcess(pid: 8_383, name: "codex")],
+                                      openFiles: [8_383: ["/Users/someone/.codex/state_5.sqlite", "/Users/someone/.codex/logs_2.sqlite"]])
+        let plan = try await adapter.deletePlan(for: try await adapter.session(matching: IDs.idle))
+        #expect(!plan.liveCheck.isLive)
+        #expect(plan.liveCheck.reasons.isEmpty)
+        #expect(plan.liveCheck.checkedSignals.contains("Codex processes"))
+    }
+
+    @Test("when Codex's open files or the process list cannot be read, plans are refused")
+    func uncheckableCodexRefusal() async throws {
+        let fixture = try CodexFixtureHome()
+        let unreadable = fixture.adapter(running: [RunningProcess(pid: 8_383, name: "codex")], unreadable: [8_383])
+        let session = try await unreadable.session(matching: IDs.idle)
+        let plan = try await unreadable.deletePlan(for: session)
+        #expect(plan.liveCheck.isLive)
+        #expect(plan.liveCheck.reasons.contains { $0.hasPrefix("Domovy could not see which files codex (pid 8383) has open") })
+
+        let noList = try await fixture.adapter(running: nil).deletePlan(for: session)
+        #expect(noList.liveCheck.isLive)
+        #expect(noList.liveCheck.reasons.contains { $0.hasPrefix("Domovy could not check whether Codex is running") })
     }
 
     @Test("a session Codex holds open is live and its plans are refused")
@@ -222,16 +250,5 @@ struct CodexAdapterTests {
         await #expect(throws: AdapterError.self) {
             try await adapter.transcript(of: try await adapter.session(matching: IDs.compressed), limit: 50)
         }
-    }
-
-    @Test("footprint marks what Codex needs as keep")
-    func footprint() async throws {
-        let fixture = try CodexFixtureHome()
-        let footprint = try await fixture.adapter().footprint()
-        let byName = Dictionary(uniqueKeysWithValues: footprint.categories.map { ($0.name, $0.disposition) })
-        #expect(byName["Sessions"] == .consequences)
-        #expect(byName["Plugins"] == .keep)
-        #expect(byName["Skills"] == .keep)
-        #expect(byName["State database"] == .keep)
     }
 }

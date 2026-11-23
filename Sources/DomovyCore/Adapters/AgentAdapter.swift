@@ -40,7 +40,7 @@ public enum AdapterError: Error, LocalizedError, Hashable, Sendable {
 }
 
 /// One adapter per agent. Adapters take an injected root and never assume `~`.
-public protocol AgentAdapter: Sendable {
+public protocol AgentAdapter: FootprintProvider {
     var kind: AgentKind { get }
     /// The agent's config directory (e.g. `<home>/.claude`).
     var root: URL { get }
@@ -52,7 +52,6 @@ public protocol AgentAdapter: Sendable {
     func liveCheck(_ session: Session) async throws -> LiveCheckResult
     func deletePlan(for session: Session, destination: Destination) async throws -> Plan
     func archivePlan(for session: Session) async throws -> Plan
-    func footprint() async throws -> Footprint
     /// The first `limit` messages of the conversation, for display only.
     func transcript(of session: Session, limit: Int) async throws -> Transcript
 }

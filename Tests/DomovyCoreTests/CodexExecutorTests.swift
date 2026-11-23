@@ -122,10 +122,10 @@ struct CodexExecutorTests {
         let plan = try await adapter.deletePlan(for: try await adapter.session(matching: IDs.idle))
         #expect(!plan.liveCheck.isLive)
         #expect {
-            try fixture.executor(running: [RunningProcess(pid: 4_321, name: "Codex")]).execute(plan)
+            try fixture.executor(running: [RunningProcess(pid: 4_321, name: "Codex")], openFiles: [4_321: [fixture.openStateDatabase]]).execute(plan)
         } throws: { error in
             guard case ExecutorError.appRunning(let reasons) = error else { return false }
-            return reasons.first?.hasPrefix("Codex is running") == true
+            return reasons.first?.hasPrefix("Codex is using") == true
         }
         #expect(fixture.exists(CodexFixtureHome.idleRollout))
         #expect(!fixture.stubInvocations().contains { $0.hasPrefix("delete") })

@@ -64,7 +64,7 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         return Array(buffer.prefix(Int(written) / MemoryLayout<pid_t>.stride))
     }
 
-    private static func listFDs(of pid: pid_t) -> [proc_fdinfo]? {
+    static func listFDs(of pid: pid_t) -> [proc_fdinfo]? {
         let needed = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
         guard needed > 0 else { return nil }
         var buffer = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(needed) / MemoryLayout<proc_fdinfo>.stride + 16)
@@ -75,7 +75,7 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         return Array(buffer.prefix(Int(written) / MemoryLayout<proc_fdinfo>.stride))
     }
 
-    private static func vnodePath(pid: pid_t, fd: Int32) -> String? {
+    static func vnodePath(pid: pid_t, fd: Int32) -> String? {
         var info = vnode_fdinfowithpath()
         let size = Int32(MemoryLayout<vnode_fdinfowithpath>.size)
         let written = withUnsafeMutablePointer(to: &info) { pointer in

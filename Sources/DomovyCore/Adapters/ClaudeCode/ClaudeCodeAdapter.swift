@@ -160,29 +160,6 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         ClaudeCodeSettings.load(from: layout.settings).cleanupPeriodDays
     }
 
-    public func footprint() async throws -> Footprint {
-        guard FileSystem.exists(root) else { throw AdapterError.notInstalled(kind) }
-        func category(_ name: String, _ url: URL, _ disposition: Footprint.Disposition, _ note: String) -> Footprint.Category? {
-            guard FileSystem.exists(url) else { return nil }
-            return Footprint.Category(name: name, url: url, sizeBytes: FileSystem.size(of: url), disposition: disposition, note: note)
-        }
-        let categories: [Footprint.Category?] = [
-            category("Transcripts", layout.projects, .consequences, "Session transcripts and auto memory. Deleting a session removes its history."),
-            category("Checkpoints", layout.fileHistory, .consequences, "File snapshots for /rewind, one folder per session."),
-            category("Uploads", layout.uploads, .consequences, "Files attached to sessions."),
-            category("Dev mods", layout.devMods, .consequences, "Per-session development modifications."),
-            category("Session environments", layout.sessionEnv, .safe, "Environment metadata per session; swept by Claude Code itself."),
-            category("Security state", layout.security, .consequences, "Security warning state and the agent SDK venv."),
-            category("Prompt history", layout.history, .consequences, "Typed prompts for the prompt history picker."),
-            category("Paste cache", root.appendingPathComponent("paste-cache"), .safe, "Cached pastes; swept by age."),
-            category("Shell snapshots", root.appendingPathComponent("shell-snapshots"), .safe, "Left behind after crashes; swept by age."),
-            category("Backups", root.appendingPathComponent("backups"), .safe, "Copies of ~/.claude.json; Claude Code keeps the newest five."),
-            category("Plugins", root.appendingPathComponent("plugins"), .keep, "Installed plugins. Claude Code needs them to run."),
-            category("Skills", root.appendingPathComponent("skills"), .keep, "Installed skills. Claude Code needs them to run."),
-        ]
-        return Footprint(agent: kind, root: root, categories: categories.compactMap { $0 })
-    }
-
     // MARK: Building sessions
 
     private func makeSession(id: String, transcript: URL, slug: URL, settings: ClaudeCodeSettings) async -> Session {

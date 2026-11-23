@@ -13,8 +13,18 @@ public struct CodexAdapter: AgentAdapter {
     let processes: any RunningProcessLister
     let cli: CodexCLIResolver
 
-    /// Any Codex process: the CLI, the app-server daemon, the desktop app and its helpers.
-    public static let processMatcher = ProcessMatcher(appName: "Codex", names: ["codex"], prefixes: ["codex-"])
+    /// Any Codex process (the CLI, the app-server daemon, the desktop app and its helpers) that
+    /// has a file open in this adapter's CODEX_HOME. The ChatGPT app keeps an app-server running
+    /// all the time; it only blocks a change when it is using this very folder.
+    public var processMatcher: ProcessMatcher {
+        ProcessMatcher(
+            appName: "Codex",
+            names: ["codex"],
+            prefixes: ["codex-"],
+            scope: root,
+            quitAdvice: "Quit the ChatGPT app or Codex to change this session."
+        )
+    }
 
     /// - Parameters:
     ///   - codexHome: the `.codex` folder to scan. Tests pass a copy of a fixture.
@@ -124,7 +134,7 @@ public struct CodexAdapter: AgentAdapter {
             indexEdits: edits,
             commands: commands,
             remarks: remarks,
-            mustNotBeRunning: [Self.processMatcher],
+            mustNotBeRunning: [processMatcher],
             liveCheck: check
         )
     }
@@ -164,7 +174,7 @@ public struct CodexAdapter: AgentAdapter {
             return Plan(agent: kind, sessionID: id, action: .archive, destination: nil, moves: [], indexEdits: [],
                         commands: [command],
                         remarks: ["Codex can still open it from its archive."],
-                        mustNotBeRunning: [Self.processMatcher],
+                        mustNotBeRunning: [processMatcher],
                         liveCheck: await planCheck(id: id, files: active, touchesIndex: true))
         }
 
@@ -189,31 +199,6 @@ public struct CodexAdapter: AgentAdapter {
     public func transcript(of session: Session, limit: Int) async throws -> Transcript {
         try requireOurs(session)
         return try CodexRollout.readTranscript(of: session.transcriptURL, maxMessages: limit)
-    }
-
-    public func footprint() async throws -> Footprint {
-        guard FileSystem.exists(root) else { throw AdapterError.notInstalled(kind) }
-        func category(_ name: String, _ relative: String, _ disposition: Footprint.Disposition, _ note: String) -> Footprint.Category? {
-            let url = root.appendingPathComponent(relative)
-            guard FileSystem.exists(url) else { return nil }
-            return Footprint.Category(name: name, url: url, sizeBytes: FileSystem.size(of: url), disposition: disposition, note: note)
-        }
-        let categories: [Footprint.Category?] = [
-            category("Sessions", "sessions", .consequences, "Rollouts of every session. Deleting a session removes its history."),
-            category("Archived sessions", "archived_sessions", .consequences, "Sessions archived in Codex; they can be unarchived."),
-            category("Thread history", "thread_history_1.sqlite", .consequences, "Codex's paginated copy of session history. Domovy never edits it."),
-            category("State database", Self.stateDatabase, .keep, "Codex's thread list and metadata. Domovy only reads it."),
-            category("Logs database", "logs_2.sqlite", .consequences, "Diagnostic logs. Domovy never edits it."),
-            category("Generated images", "generated_images", .consequences, "Images created in sessions, one folder per session."),
-            category("Attachments", "attachments", .consequences, "Pasted text and files attached to prompts."),
-            category("Worktrees", "worktrees", .consequences, "Git worktrees Codex created. They may hold uncommitted work."),
-            category("Prompt history", "history.jsonl", .consequences, "Typed prompts for the prompt history picker."),
-            category("Cache", "cache", .keep, "Codex's caches. Not verified what Codex rebuilds, so Domovy leaves it alone."),
-            category("Packages", "packages", .keep, "The app-server and its tools. Codex needs them to run."),
-            category("Plugins", "plugins", .keep, "Installed plugins. Codex needs them to run."),
-            category("Skills", "skills", .keep, "Installed skills. Codex needs them to run."),
-        ]
-        return Footprint(agent: kind, root: root, categories: categories.compactMap { $0 })
     }
 
     // MARK: Building sessions
@@ -324,7 +309,7 @@ public struct CodexAdapter: AgentAdapter {
     private func planCheck(id: String, files: [URL], touchesIndex: Bool) async -> LiveCheckResult {
         let base = await liveness(id: id, files: files)
         guard touchesIndex else { return base }
-        let blocking = processes.blockingReasons([Self.processMatcher])
+        let blocking = processes.blockingReasons([processMatcher])
         return LiveCheckResult(
             isLive: base.isLive || !blocking.isEmpty,
             reasons: base.reasons + blocking,

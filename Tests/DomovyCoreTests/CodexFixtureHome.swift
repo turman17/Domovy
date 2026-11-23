@@ -61,17 +61,26 @@ final class CodexFixtureHome: Sendable {
     }
 
     /// Deterministic: no libproc, no running Codex, and the stub CLI unless told otherwise.
+    /// - Parameters:
+    ///   - running: Codex processes; `nil` means the process list could not be read.
+    ///   - openFiles: paths each pid holds open; pids not listed hold nothing.
     func adapter(
         cli: CodexCLI.Choice? = nil,
         openHandles: any OpenHandleChecker = UnavailableOpenHandleChecker(),
-        running: [RunningProcess] = []
+        running: [RunningProcess]? = [],
+        openFiles: [Int32: [String]] = [:],
+        unreadable: Set<Int32> = []
     ) -> CodexAdapter {
-        CodexAdapter(codexHome: codexDirectory, cli: cli ?? .executable(stub), openHandles: openHandles, processes: FixedProcessLister(running))
+        CodexAdapter(codexHome: codexDirectory, cli: cli ?? .executable(stub), openHandles: openHandles,
+                     processes: FixedProcessLister(running, openFiles: openFiles, unreadable: unreadable))
     }
 
-    func executor(running: [RunningProcess] = []) -> Executor {
-        Executor(storeRoot: storeRoot, processes: FixedProcessLister(running))
+    func executor(running: [RunningProcess]? = [], openFiles: [Int32: [String]] = [:]) -> Executor {
+        Executor(storeRoot: storeRoot, processes: FixedProcessLister(running, openFiles: openFiles))
     }
+
+    /// A file below this fixture's CODEX_HOME, as a Codex process would hold it open.
+    var openStateDatabase: String { url("state_5.sqlite").standardizedFileURL.path }
 
     func url(_ relative: String) -> URL { codexDirectory.appendingPathComponent(relative) }
     func exists(_ relative: String) -> Bool { FileManager.default.fileExists(atPath: url(relative).path) }

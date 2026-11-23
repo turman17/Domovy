@@ -177,17 +177,6 @@ struct ClaudeCodeAdapterTests {
             try await adapter.deletePlan(for: session, destination: .trash)
         }
     }
-
-    @Test("footprint marks plugins and skills as keep")
-    func footprint() async throws {
-        let fixture = try FixtureHome()
-        let footprint = try await fixture.adapter().footprint()
-        #expect(footprint.totalBytes > 0)
-        let byName = Dictionary(uniqueKeysWithValues: footprint.categories.map { ($0.name, $0) })
-        #expect(byName["Plugins"]?.disposition == .keep)
-        #expect(byName["Skills"]?.disposition == .keep)
-        #expect(byName["Transcripts"]?.disposition == .consequences)
-    }
 }
 
 /// Path of `url` relative to `base`, for readable assertions.
