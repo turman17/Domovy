@@ -1,12 +1,16 @@
 import Foundation
 
-/// One quarantined file that still holds plaintext secrets.
+/// One quarantined file Purge originals can delete: plaintext secrets, or a copy kept before a
+/// tool deleted the original.
 public struct PurgeItem: Hashable, Codable, Sendable {
     public enum Reason: String, Codable, Sendable, CaseIterable {
         /// The original of a redacted file, kept for undo.
         case redactedOriginal
         /// A deleted session the secret scan had flagged, moved to the quarantine.
         case flaggedSession
+        /// A copy kept before a tool deleted the original (`ollama rm`, `hf cache rm`,
+        /// `codex delete`). Its disk space comes back only when it is purged.
+        case toolCopy
     }
 
     public let entryID: UUID
@@ -30,7 +34,7 @@ public struct PurgePlan: Sendable {
     public var entryCount: Int { Set(items.map(\.entryID)).count }
 
     public var summary: String {
-        guard !items.isEmpty else { return "Nothing to purge: Domovy's quarantine holds no originals with secrets." }
+        guard !items.isEmpty else { return "Nothing to purge: Domovy's quarantine holds no originals or kept copies." }
         let n = items.count
         let size = ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
         return "Permanently deletes \(n) \(n == 1 ? "file" : "files") (\(size)) from Domovy's quarantine. This cannot be undone, and Domovy can no longer undo \(entryCount == 1 ? "the action" : "the \(entryCount) actions") they came from."
@@ -40,7 +44,8 @@ public struct PurgePlan: Sendable {
 extension Executor {
     /// Quarantined files that hold plaintext secrets: originals of redactions that were not
     /// undone, and, with `.flaggedSession`, sessions deleted to the quarantine after the scan
-    /// flagged them. Computing the plan changes nothing.
+    /// flagged them. With `.toolCopy`, copies kept before a tool deleted the originals.
+    /// Computing the plan changes nothing.
     public func purgePlan(_ reasons: Set<PurgeItem.Reason> = Set(PurgeItem.Reason.allCases)) throws -> PurgePlan {
         var items: [PurgeItem] = []
         for entry in try undoLog.entries() where entry.isUndoable {
@@ -56,6 +61,13 @@ extension Executor {
                                            originalPath: item.original, sizeBytes: FileSystem.size(of: item.current), reason: .flaggedSession))
                 }
             }
+            if reasons.contains(.toolCopy) {
+                for item in entry.moved where item.kept != nil && isInQuarantine(item.current) && FileSystem.itemExists(item.current)
+                    && !items.contains(where: { $0.file == item.current }) {
+                    items.append(PurgeItem(entryID: entry.id, agent: entry.agent, sessionID: entry.sessionID, file: item.current,
+                                           originalPath: item.original, sizeBytes: FileSystem.size(of: item.current), reason: .toolCopy))
+                }
+            }
         }
         return PurgePlan(items: items)
     }
@@ -67,7 +79,7 @@ extension Executor {
         for item in plan.items where !isInQuarantine(item.file) { throw ExecutorError.notInQuarantine(item.file) }
         var entries = try undoLog.entries().filter { entry in plan.items.contains { $0.entryID == entry.id } }
         var removed = 0
-        for item in plan.items where FileSystem.exists(item.file) {
+        for item in plan.items where FileSystem.itemExists(item.file) {
             try fileManager.removeItem(at: item.file)
             removed += 1
         }

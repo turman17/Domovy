@@ -20,6 +20,8 @@ public struct CleanupPlanner: Sendable {
     /// Which `ollama` and `hf` a model plan may run. Tests and `.devhome` pass stubs.
     let ollamaCLI: ToolChoice
     let huggingFaceCLI: ToolChoice
+    /// Domovy's own environment, for `OLLAMA_MODELS`. Tests pass a fixed one.
+    let environment: [String: String]
     let now: @Sendable () -> Date
 
     public init(
@@ -32,6 +34,7 @@ public struct CleanupPlanner: Sendable {
         openHandles: any OpenHandleChecker = LibprocOpenHandleChecker(),
         processes: any RunningProcessLister = LibprocProcessLister(),
         git: GitWorktreeInspector = GitWorktreeInspector(),
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.claudeCodeRoot = claudeCodeRoot.standardizedFileURL
@@ -43,6 +46,7 @@ public struct CleanupPlanner: Sendable {
         self.openHandles = openHandles
         self.processes = processes
         self.git = git
+        self.environment = environment
         self.now = now
     }
 
@@ -104,7 +108,7 @@ public struct CleanupPlanner: Sendable {
     /// Reasons something has these files open, one per process; unsure counts as a reason.
     func openFileCheck(_ urls: [URL]) async -> (reasons: [String], status: LiveCheckResult.OpenHandleStatus, holders: [OpenHandleHolder]) {
         guard !urls.isEmpty else { return ([], .clear, []) }
-        guard let holders = await openHandles.holders(of: urls) else {
+        guard let holders = await openHandles.holders(of: urls, includingMapped: true) else {
             return (["Domovy could not check which files are open, so it changes nothing."], .unavailable, [])
         }
         var seen = Set<Int32>()

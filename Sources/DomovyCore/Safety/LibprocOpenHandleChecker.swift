@@ -2,15 +2,23 @@ import Darwin
 import Foundation
 
 /// Open-file-handle check via libproc: `proc_listpids` + `PROC_PIDLISTFDS` +
-/// `PROC_PIDFDVNODEPATHINFO`. Needs no root; processes of other users cannot be
-/// inspected and are skipped. Any failure to list processes reports the check as unavailable.
+/// `PROC_PIDFDVNODEPATHINFO`, plus memory-mapped files through the region path info
+/// (`mmap` keeps a file in use after its descriptor closed: model weights, databases). Needs
+/// no root; processes of other users cannot be inspected and are skipped. Any failure to list
+/// processes, or not being able to inspect a single one, reports the check as unavailable.
 ///
 /// Enumerating every descriptor of every process costs tens of milliseconds, and a scan
-/// asks once per session, so the snapshot is cached for a short moment.
+/// asks once per session, so each snapshot is cached for a short moment. Mapped regions cost
+/// more, so they are read only for large files or when the caller asks.
 public actor LibprocOpenHandleChecker: OpenHandleChecker {
+    /// Files at least this large are also looked for among mapped regions.
+    static let mappedFileThreshold: Int64 = 8 << 20
+
     private let cacheLifetime: TimeInterval
     private var snapshot: [OpenHandleHolder]?
     private var snapshotTakenAt: Date = .distantPast
+    private var mappedSnapshot: [OpenHandleHolder]?
+    private var mappedSnapshotTakenAt: Date = .distantPast
 
     /// - Parameter cacheLifetime: how long one process snapshot answers repeated calls.
     public init(cacheLifetime: TimeInterval = 1) {
@@ -18,13 +26,31 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
     }
 
     public func holders(of urls: [URL]) async -> [OpenHandleHolder]? {
+        await holders(of: urls, includingMapped: urls.contains(where: Self.mayBeMapped))
+    }
+
+    public func holders(of urls: [URL], includingMapped: Bool) async -> [OpenHandleHolder]? {
         guard !urls.isEmpty else { return [] }
         if snapshot == nil || Date().timeIntervalSince(snapshotTakenAt) > cacheLifetime {
             snapshot = Self.takeSnapshot()
             snapshotTakenAt = Date()
         }
         guard let snapshot else { return nil }
-        return matchOpenPaths(snapshot, against: urls)
+        var matches = matchOpenPaths(snapshot, against: urls)
+        guard includingMapped else { return matches }
+        if mappedSnapshot == nil || Date().timeIntervalSince(mappedSnapshotTakenAt) > cacheLifetime {
+            mappedSnapshot = Self.takeMappedSnapshot()
+            mappedSnapshotTakenAt = Date()
+        }
+        guard let mappedSnapshot else { return nil }
+        for holder in matchOpenPaths(mappedSnapshot, against: urls) where !matches.contains(holder) { matches.append(holder) }
+        return matches
+    }
+
+    /// A large regular file: the kind a process maps instead of reading.
+    static func mayBeMapped(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), values.isRegularFile == true else { return false }
+        return Int64(values.fileSize ?? 0) >= mappedFileThreshold
     }
 
     // MARK: libproc
@@ -50,6 +76,64 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         }
         guard inspected > 0 else { return nil }
         return holders
+    }
+
+    /// Every file mapped into a process we are allowed to inspect, or `nil` when no process
+    /// could be inspected at all.
+    static func takeMappedSnapshot() -> [OpenHandleHolder]? {
+        guard let pids = listPIDs() else {
+            Log.liveness.error("proc_listpids failed: \(String(cString: strerror(errno)), privacy: .public)")
+            return nil
+        }
+        let flavor = regionFlavor
+        var holders: [OpenHandleHolder] = []
+        var inspected = 0
+        for pid in pids where pid > 0 {
+            guard let paths = mappedPaths(of: pid, flavor: flavor) else { continue } // other user's process, or gone
+            inspected += 1
+            guard !paths.isEmpty else { continue }
+            let name = processName(of: pid) ?? "pid \(pid)"
+            holders += paths.map { OpenHandleHolder(pid: pid, processName: name, path: $0) }
+        }
+        guard inspected > 0 else {
+            Log.liveness.error("No process could be inspected for mapped files")
+            return nil
+        }
+        return holders
+    }
+
+    /// `PROC_PIDREGIONPATHINFO2` (22, in xnu but not in the public header) returns only regions
+    /// backed by a file, which makes a full scan about 15 times faster. If this macOS rejects
+    /// it, the public `PROC_PIDREGIONPATHINFO` walks every region instead.
+    static let regionFlavor: Int32 = {
+        let fileBackedOnly: Int32 = 22
+        var info = proc_regionwithpathinfo()
+        let size = Int32(MemoryLayout<proc_regionwithpathinfo>.size)
+        return proc_pidinfo(getpid(), fileBackedOnly, 0, &info, size) == size ? fileBackedOnly : PROC_PIDREGIONPATHINFO
+    }()
+
+    /// Paths of the files mapped into `pid`, or `nil` when it cannot be inspected. Each call
+    /// returns the region at or after an address; the walk goes region by region.
+    static func mappedPaths(of pid: pid_t, flavor: Int32) -> Set<String>? {
+        var paths = Set<String>()
+        var address: UInt64 = 0
+        var inspected = false
+        let size = Int32(MemoryLayout<proc_regionwithpathinfo>.size)
+        while true {
+            var info = proc_regionwithpathinfo()
+            guard proc_pidinfo(pid, flavor, address, &info, size) == size else { break }
+            inspected = true
+            if (info.prp_vip.vip_vi.vi_stat.vst_mode & S_IFMT) == S_IFREG {
+                let path = withUnsafePointer(to: &info.prp_vip.vip_path) { pointer in
+                    pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+                }
+                if !path.isEmpty { paths.insert(path) }
+            }
+            let next = info.prp_prinfo.pri_address &+ info.prp_prinfo.pri_size
+            guard next > address else { break }
+            address = next
+        }
+        return inspected ? paths : nil
     }
 
     static func listPIDs() -> [pid_t]? {

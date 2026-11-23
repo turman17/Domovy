@@ -9,8 +9,9 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
     public let environment: [String: String]
     /// One line for the user: "Runs codex delete for this session, then checks the result."
     public let note: String
-    /// Files the command removes for good. Domovy keeps a copy in its quarantine first, so undo
-    /// can put them back (safety rule 1).
+    /// Files the command removes for good. Domovy keeps a clone in its quarantine first, so undo
+    /// can put them back (safety rule 1). For a permanent command the executor adds whatever
+    /// its verifications expect to be gone.
     public let copiesBeforeRun: [URL]
     /// Index lines the command removes. Domovy records them first, so undo can reinsert them.
     public let indexLinesBeforeRun: [IndexEdit]
@@ -20,8 +21,8 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
     public let sizeBytes: Int64
     /// What undo runs to reverse this command (e.g. `codex unarchive <uuid>`).
     public let undo: [PlannedCommand]
-    /// The tool deletes for good and Domovy keeps no copy (`ollama rm`, `hf cache rm`): the
-    /// undo entry is marked irreversible, and the sheet says so before it runs.
+    /// The tool deletes for good (`ollama rm`, `hf cache rm`). The executor refuses to run it
+    /// unless it could keep a copy of every file the command is expected to remove.
     public let isPermanent: Bool
 
     public init(

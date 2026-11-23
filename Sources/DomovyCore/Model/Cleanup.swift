@@ -102,7 +102,7 @@ public struct CleanupPlan: Identifiable, Hashable, Sendable {
     /// "Moves 3 folders (6.3 MB) to the Trash. You can undo this."
     public var summary: String {
         if isBlocked { return "Nothing will change yet. " + plan.liveCheck.reasons.joined(separator: " ") }
-        if !plan.commands.isEmpty { return plan.commands.map(\.note).joined(separator: " ") + (plan.isPermanent ? "" : " You can undo this.") }
+        if !plan.commands.isEmpty { return plan.commands.map(\.note).joined(separator: " ") + (plan.isPermanent ? " " + Plan.keptCopyPromise : " You can undo this.") }
         if cleanup.compresses {
             guard !plan.compressions.isEmpty else { return "Nothing to compress: every large rollout is already compressed or in use." }
             let n = plan.compressions.count

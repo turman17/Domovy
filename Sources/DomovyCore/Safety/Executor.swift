@@ -15,6 +15,8 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
     case redactionFailed(URL, reason: String, doneSoFar: Int, total: Int)
     case originalsPurged
     case notInQuarantine(URL)
+    case copyFailed(URL, command: String, reason: String)
+    case nothingToKeep(command: String)
 
     public var errorDescription: String? {
         switch self {
@@ -46,6 +48,10 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
             "This cannot be undone: its originals were permanently deleted with Purge originals."
         case .notInQuarantine(let url):
             "Refusing to delete \(url.lastPathComponent): it is not inside Domovy's quarantine folder."
+        case .copyFailed(let url, let command, let reason):
+            "Domovy could not keep a copy of \(url.lastPathComponent) (\(reason)), so it did not run `\(command)`. Nothing was deleted."
+        case .nothingToKeep(let command):
+            "Domovy does not know which files `\(command)` deletes, so it cannot keep a copy and did not run it."
         }
     }
 }
@@ -57,6 +63,7 @@ public struct Executor: Sendable {
     public let undoLog: UndoLog
     let runner: any CommandRunner
     let processes: any RunningProcessLister
+    let copier: QuarantineCopier
     let now: @Sendable () -> Date
     var fileManager: FileManager { .default }
 
@@ -66,16 +73,19 @@ public struct Executor: Sendable {
     ///   tests: a temp dir). Never a folder inside an agent's storage.
     ///   - runner: runs agent commands such as `codex delete`; tests point plans at a stub executable.
     ///   - processes: checks right before execution that apps a plan must not run alongside are quit.
+    ///   - copier: keeps copies of what a tool command deletes; tests make it fail on purpose.
     public init(
         storeRoot: URL,
         runner: any CommandRunner = ProcessCommandRunner(),
         processes: any RunningProcessLister = LibprocProcessLister(),
+        copier: QuarantineCopier = .system,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.storeRoot = storeRoot.standardizedFileURL
         self.undoLog = UndoLog(directory: self.storeRoot.appendingPathComponent("Undo", isDirectory: true))
         self.runner = runner
         self.processes = processes
+        self.copier = copier
         self.now = now
     }
 
@@ -205,15 +215,7 @@ public struct Executor: Sendable {
     private func run(_ command: PlannedCommand, entry: inout UndoEntry) throws {
         let sessionID = entry.sessionID
         Log.executor.info("Running \(command.executable.lastPathComponent, privacy: .public) \(command.arguments.first ?? "", privacy: .public) for session \(sessionID, privacy: .public)")
-        let folder = quarantineDirectory.appendingPathComponent(entry.id.uuidString, isDirectory: true)
-        var copies: [UndoEntry.MovedItem] = []
-        for (index, source) in command.copiesBeforeRun.enumerated() where FileSystem.exists(source) {
-            try fileManager.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let copy = folder.appendingPathComponent("copy-\(index)-\(source.lastPathComponent)")
-            // copyItem clones on APFS and keeps the modification time.
-            try fileManager.copyItem(at: source, to: copy)
-            copies.append(.init(original: source, current: copy))
-        }
+        let copies = try keepCopies(for: command, entry: &entry)
         var captured: [UndoEntry.IndexRestore] = []
         for edit in command.indexLinesBeforeRun where FileSystem.exists(edit.file) {
             if let restore = try snapshotLines(edit, entry: entry) { captured.append(restore) }
@@ -233,12 +235,15 @@ public struct Executor: Sendable {
             throw ExecutorError.commandFailed(command.commandLine, status: result.status, message: result.errorOutput)
         }
 
-        // Keep the copies of what the command really removed; drop the rest.
+        // Keep the copies of what the command really removed, even in part; drop the rest.
         for copy in copies {
-            if FileSystem.exists(copy.original) {
+            if FileSystem.itemExists(copy.original), !Self.lostAnything(copy) {
                 try? fileManager.removeItem(at: copy.current)
             } else {
                 entry.moved.append(copy)
+                if copy.kept?.method == .copy {
+                    entry.notes.append("APFS could not clone \(copy.original.lastPathComponent), so Domovy kept a full copy (\(CleanupPlan.bytes(DiskUsage.measure(copy.current).allocated))) in its quarantine.")
+                }
             }
         }
         for restore in captured {
@@ -414,6 +419,7 @@ public struct Executor: Sendable {
     }
 
     private func restore(_ item: UndoEntry.MovedItem) throws {
+        if item.kept != nil { return try restoreKept(item) }
         guard FileSystem.exists(item.current) else {
             throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "it is no longer in \(item.current.deletingLastPathComponent().lastPathComponent) (was the Trash emptied?)"])
         }

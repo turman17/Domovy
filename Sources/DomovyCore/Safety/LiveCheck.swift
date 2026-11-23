@@ -50,6 +50,16 @@ public protocol OpenHandleChecker: Sendable {
     /// Processes holding one of `urls` (or something below them) open, or `nil` when the
     /// check could not run at all. An empty array means "checked, nothing open".
     func holders(of urls: [URL]) async -> [OpenHandleHolder]?
+    /// Also files mapped into memory (`mmap`), which stay in use after their descriptor
+    /// closed. Costs more; asked for before deleting model files and databases.
+    func holders(of urls: [URL], includingMapped: Bool) async -> [OpenHandleHolder]?
+}
+
+extension OpenHandleChecker {
+    /// Checkers that cannot see mappings answer with open descriptors only.
+    public func holders(of urls: [URL], includingMapped: Bool) async -> [OpenHandleHolder]? {
+        await holders(of: urls)
+    }
 }
 
 /// Reports the check as unavailable. Adapters then rely on the agents' own liveness files.

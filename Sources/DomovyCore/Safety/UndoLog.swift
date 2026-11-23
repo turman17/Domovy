@@ -6,6 +6,15 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
         public let original: URL
         /// Where the item is now (inside the Trash or the quarantine folder).
         public let current: URL
+        /// Set for a copy Domovy kept before a tool deleted the original (`ollama rm`). Older
+        /// entries decode without it.
+        public var kept: KeptCopy? = nil
+    }
+
+    /// How a kept copy was made and what the original looked like, for an exact undo.
+    public struct KeptCopy: Codable, Sendable, Hashable {
+        public let method: QuarantineCopier.Method
+        public let metadata: [KeptFileMetadata]
     }
 
     public struct RemovedLine: Codable, Sendable, Hashable {
@@ -87,9 +96,12 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
     public var secretFindingCount = 0
     /// When Purge originals deleted this entry's quarantined files; it cannot be undone after.
     public var originalsPurgedAt: Date?
-    /// A permanent tool command ran (`ollama rm`) and nothing else moved: there is nothing to
-    /// put back. Kept in the log as a record; never offered for undo.
+    /// A permanent tool command ran and nothing was kept or moved: there is nothing to put
+    /// back. Kept in the log as a record; never offered for undo. Entries of older versions
+    /// (before Domovy kept copies of `ollama rm` and `hf cache rm`) have it set.
     public var irreversible = false
+    /// Things the user should know about how it ran, e.g. a full copy instead of a clone.
+    public var notes: [String] = []
 
     public var isUndone: Bool { undoneAt != nil }
     /// Still pending and its files are still there to put back.
@@ -100,7 +112,7 @@ extension UndoEntry {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, planID, batchID, action, agent, sessionID, destination
         case moved, indexRestores, compressed, undoCommands, mustNotBeRunning, leftovers, undoneAt, failure
-        case redacted, secretFindingCount, originalsPurgedAt, registryRestores, irreversible
+        case redacted, secretFindingCount, originalsPurgedAt, registryRestores, irreversible, notes
     }
 
     /// Entries written by older versions lack the newer fields; they decode with empty defaults.
@@ -129,6 +141,7 @@ extension UndoEntry {
         originalsPurgedAt = try c.decodeIfPresent(Date.self, forKey: .originalsPurgedAt)
         registryRestores = try c.decodeIfPresent([RegistryRestore].self, forKey: .registryRestores) ?? []
         irreversible = try c.decodeIfPresent(Bool.self, forKey: .irreversible) ?? false
+        notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
     }
 }
 

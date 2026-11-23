@@ -2,8 +2,9 @@ import Foundation
 
 /// Local model cleanups (PLAN.md section 4 B): orphaned Ollama blobs, detached Hugging Face
 /// revisions, and removing whole models. The tool's own command is preferred (`ollama rm`,
-/// `hf cache rm`, `hf cache prune`) and its result verified; without it, files move to the
-/// Trash or the quarantine, and a blob or shared file another model uses never moves.
+/// `hf cache rm`, `hf cache prune`) and its result verified; the executor keeps a clone of
+/// every file it removes, so undo works. Without the command, files move to the Trash or the
+/// quarantine, and a blob or shared file another model uses never moves.
 extension CleanupPlanner {
     /// The Ollama app and its server (`ollama serve`) and runners. Assumed: process name
     /// `ollama` for the server and CLI, `Ollama` for the menu bar app (not seen running yet).
@@ -17,6 +18,10 @@ extension CleanupPlanner {
         appName: "LM Studio", names: ["lm studio"], prefixes: ["lm studio helper"],
         quitAdvice: "Quit LM Studio first; it may have the model loaded."
     )
+
+    /// Said of every tool command that deletes for good: what undo can do, and when the space
+    /// comes back.
+    static let keptCopyRemark = "Domovy keeps a clone of the files in its quarantine first, so undo can put them back. The disk space comes back when you purge that copy."
 
     func requireStores(_ id: CleanupID) throws -> ModelStores {
         guard let models else { throw CleanupError.notFound(id) }
@@ -71,12 +76,12 @@ extension CleanupPlanner {
             let size = DiskUsage.measure(all).allocated
             let command = PlannedCommand(
                 executable: cli.executable, arguments: ["cache", "prune", "--yes"], environment: HuggingFaceCLI.environment(hub),
-                note: "Runs hf cache prune, then checks the detached revisions are gone. Hugging Face deletes them; Undo can't bring them back.",
-                verifications: [.filesGone(snapshots, what: "detached revisions")], sizeBytes: size, isPermanent: true
+                note: "Runs hf cache prune, then checks the detached revisions are gone.",
+                copiesBeforeRun: all, verifications: [.filesGone(snapshots, what: "detached revisions")], sizeBytes: size, isPermanent: true
             )
             let plan = Plan(
                 agent: .huggingFace, sessionID: CleanupID.huggingFaceDetached.rawValue, action: .delete, destination: nil,
-                moves: [], indexEdits: [], commands: [command], remarks: [remark],
+                moves: [], indexEdits: [], commands: [command], remarks: [remark, Self.keptCopyRemark],
                 liveCheck: LiveCheckResult(isLive: !check.reasons.isEmpty, reasons: check.reasons, checkedSignals: ["open file handles"], openHandles: check.status)
             )
             return CleanupPlan(cleanup: .huggingFaceDetached, plan: plan, excluded: excluded, hasConsequences: false)
@@ -100,7 +105,7 @@ extension CleanupPlanner {
         var excluded: [CleanupExclusion] = []
         let ollama = models.filter { $0.agent == .ollama }
         if !ollama.isEmpty {
-            let result = try await ollamaRemoval(ollama.map(\.name), store: OllamaStore(models: stores.ollamaModels), destination: destination)
+            let result = try await ollamaRemoval(ollama.map(\.name), stores: stores, destination: destination)
             plans.append(result.plan)
             excluded += result.excluded
         }
@@ -142,9 +147,10 @@ extension CleanupPlanner {
         }
     }
 
-    /// `ollama rm` while the server answers; otherwise the manifests and the blobs only the
-    /// selected models use move, and blobs other models share stay.
-    private func ollamaRemoval(_ names: [String], store: OllamaStore, destination: Destination) async throws -> (plan: Plan, excluded: [CleanupExclusion]) {
+    /// `ollama rm` while the server answers and surely serves the scanned store; otherwise the
+    /// manifests and the blobs only the selected models use move, and blobs other models share stay.
+    private func ollamaRemoval(_ names: [String], stores: ModelStores, destination: Destination) async throws -> (plan: Plan, excluded: [CleanupExclusion]) {
+        let store = OllamaStore(models: stores.ollamaModels)
         let scan = store.scan()
         let manifests = try names.map { name in
             guard let manifest = scan.manifest(named: name) else { throw CleanupError.modelNotFound(name) }
@@ -176,19 +182,20 @@ extension CleanupPlanner {
         let label = manifests.map(\.name).joined(separator: ", ")
         let environment = ["OLLAMA_MODELS": store.models.path]
 
-        if let cli = OllamaCLI.resolve(ollamaCLI), let loaded = cli.loadedModels(storeEnvironment: environment) {
+        let serverStore = servesScannedStore(stores)
+        if serverStore, let cli = OllamaCLI.resolve(ollamaCLI), let loaded = cli.loadedModels(storeEnvironment: environment) {
             let commands = manifests.map { manifest in
                 let blobs = freed[manifest.name] ?? []
                 return PlannedCommand(
                     executable: cli.executable, arguments: ["rm", manifest.name], environment: environment,
                     note: "Runs ollama rm \(manifest.name).",
+                    copiesBeforeRun: [manifest.url] + blobs,
                     verifications: [.fileGone(manifest.url), .filesGone(blobs, what: "layers of \(manifest.name)")],
                     sizeBytes: DiskUsage.measure([manifest.url] + blobs).allocated, isPermanent: true
                 )
             }
             let pulls = manifests.map { "ollama pull \($0.name)" }.joined(separator: ", ")
-            // The plan's summary says it first: "Ollama deletes it (9.3 GB); Undo can't bring it back."
-            remarks.insert("Re-download with \(pulls).", at: 0)
+            remarks.insert(contentsOf: [Self.keptCopyRemark, "Or download it again with \(pulls)."], at: 0)
             // A loaded model shows in `ollama ps`, and its runner holds the weights open.
             let check = await openFileCheck(manifests.map(\.url) + freed.values.flatMap { $0 })
             let reasons = loadedReasons(manifests.map(\.name), loaded: loaded) + check.reasons
@@ -205,10 +212,20 @@ extension CleanupPlanner {
         let items = manifests.flatMap { manifest in
             [(manifest.url, "Manifest of \(manifest.name)")] + (freed[manifest.name] ?? []).map { ($0, "Layer only \(manifest.name) uses") }
         }
-        remarks.insert("Ollama's server is not answering, so Domovy moves the files itself. You can undo this while they are in \(destination.displayName).", at: 0)
+        let why = serverStore
+            ? "Ollama's server is not answering, so Domovy moves the files itself."
+            : "Ollama's server may use another models folder than the one Domovy scanned (OLLAMA_MODELS is set, or the store is not ~/.ollama/models), so ollama rm could remove the wrong copy. Domovy moves the files itself."
+        remarks.insert("\(why) You can undo this while they are in \(destination.displayName).", at: 0)
         let plan = await fileMovePlan(agent: .ollama, label: label, items: items, matchers: [Self.ollamaMatcher],
                                       remarks: remarks, extraReasons: unknown, destination: destination)
         return (plan, excluded)
+    }
+
+    /// `ollama rm` acts on the server's store, which Domovy cannot see. It only matches the scanned
+    /// one for sure when that is the home's default and nothing in the environment moves it.
+    private func servesScannedStore(_ stores: ModelStores) -> Bool {
+        let standard = stores.ollamaHome.appendingPathComponent("models", isDirectory: true).standardizedFileURL
+        return stores.ollamaModels.standardizedFileURL.path == standard.path && (environment["OLLAMA_MODELS"] ?? "").isEmpty
     }
 
     private func lmStudioRemoval(_ names: [String], stores: ModelStores, destination: Destination) async throws -> Plan {
@@ -264,13 +281,14 @@ extension CleanupPlanner {
                 PlannedCommand(
                     executable: cli.executable, arguments: ["cache", "rm", repo.cliArgument, "--yes"], environment: HuggingFaceCLI.environment(hub),
                     note: "Runs hf cache rm \(repo.cliArgument).",
+                    copiesBeforeRun: own.map(\.url),
                     verifications: [.fileGone(repo.url), .filesGone(Array(own.dropFirst().map(\.url)), what: "files of \(repo.name)")],
                     sizeBytes: DiskUsage.measure(own.map(\.url)).allocated, isPermanent: true
                 )
             }
             let plan = Plan(
                 agent: .huggingFace, sessionID: label, action: .delete, destination: nil, moves: [], indexEdits: [], commands: commands,
-                remarks: ["It downloads again the next time code asks for it."],
+                remarks: [Self.keptCopyRemark, "Or let it download again the next time code asks for it."],
                 liveCheck: LiveCheckResult(isLive: !check.reasons.isEmpty, reasons: check.reasons, checkedSignals: ["open file handles"], openHandles: check.status)
             )
             return (plan, excluded)

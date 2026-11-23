@@ -190,7 +190,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
             let lead = commands.isEmpty && mustNotBeRunning.isEmpty ? "This session is live, so nothing will change." : "Nothing will change yet."
             return lead + " " + liveCheck.reasons.joined(separator: " ")
         }
-        // The tool deletes for good: say that, never "You can undo this".
+        // The tool deletes for good: say that, and that Domovy keeps a copy.
         if isPermanent { return modelSummary }
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file

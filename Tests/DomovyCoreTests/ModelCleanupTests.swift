@@ -14,17 +14,19 @@ struct ModelCleanupTests {
 
     // MARK: Ollama
 
-    @Test("ollama rm runs, is permanent, and the check finds manifest and unshared layers gone")
+    @Test("ollama rm runs after Domovy cloned the files; undo brings the model back; purge drops the clone")
     func ollamaCLIRemoval() async throws {
         let fixture = try ModelFixtureHome()
         let planner = fixture.planner()
         let removal = try await planner.modelRemovalPlan([try await fixture.model(.ollama, "qwen3:14b")])
         let plan = try #require(removal.plans.first)
         #expect(plan.commands.map(\.commandLine) == ["ollama rm qwen3:14b"])
-        #expect(removal.isPermanent && !removal.isUndoable)
+        #expect(Set(plan.commands.first?.copiesBeforeRun.map(\.lastPathComponent) ?? []) == Set(["14b"] + D.qwenOwn))
+        #expect(removal.isPermanent)
         #expect(plan.summary.hasPrefix("Ollama deletes it ("))
-        #expect(plan.summary.hasSuffix("); Undo can't bring it back."))
-        #expect(plan.remarks.first == "Re-download with ollama pull qwen3:14b.")
+        #expect(plan.summary.hasSuffix("). You can undo this; Domovy keeps a copy in its quarantine until you purge it."))
+        #expect(plan.remarks.contains("Or download it again with ollama pull qwen3:14b."))
+        let manifestTime = fixture.modificationTime(F.qwenManifest)
         #expect(removal.excluded.map(\.url.lastPathComponent) == [D.shared])
         #expect(removal.excluded.first?.reason == "Shared with deepcoder:14b; stays.")
         #expect(removal.summary.hasPrefix("Ollama deletes it ("))
@@ -36,10 +38,29 @@ struct ModelCleanupTests {
         #expect(D.qwenOwn.allSatisfy { !fixture.exists(fixture.blob($0)) })
         #expect(fixture.exists(fixture.blob(D.shared)))
         #expect(fixture.exists(F.deepcoderManifest))
-        #expect(entries.first?.leftovers == [])
-        #expect(entries.first?.irreversible == true)
-        // Nothing to put back, so undo never offers it.
-        #expect(try fixture.executor().undoLog.latestPending() == nil)
+        let entry = try #require(entries.first)
+        #expect(entry.leftovers == [])
+        #expect(!entry.irreversible)
+        #expect(entry.moved.count == 5)
+        #expect(entry.moved.allSatisfy { $0.kept?.method == .clone })
+        #expect(entry.notes.isEmpty)
+
+        let executor = fixture.executor()
+        _ = try executor.undo(try #require(try executor.undoLog.latestPending()))
+        #expect(fixture.exists(F.qwenManifest))
+        #expect(D.qwenOwn.allSatisfy { fixture.exists(fixture.blob($0)) })
+        #expect(fixture.modificationTime(F.qwenManifest) == manifestTime)
+        #expect(try await fixture.model(.ollama, "qwen3:14b").sizeBytes > 0)
+
+        // Again, then purge: the clones leave the quarantine and undo is no longer offered.
+        let again = try await planner.execute(try await planner.modelRemovalPlan([try await fixture.model(.ollama, "qwen3:14b")]), with: executor)
+        let purge = try executor.purgePlan([.toolCopy])
+        #expect(purge.items.count == 5)
+        #expect(purge.items.allSatisfy { $0.reason == .toolCopy && $0.entryID == again.first?.id })
+        #expect(try executor.purgePlan([.redactedOriginal, .flaggedSession]).isEmpty)
+        try executor.purge(purge)
+        #expect(purge.items.allSatisfy { !FileManager.default.fileExists(atPath: $0.file.path) })
+        #expect(try executor.undoLog.latestPending() == nil)
     }
 
     @Test("a sloppy ollama rm is caught: the layers it left are reported")
@@ -87,7 +108,7 @@ struct ModelCleanupTests {
         #expect(plan.commands.isEmpty)
         #expect(Set(plan.moves.map(\.source.lastPathComponent)) == Set(["14b"] + D.qwenOwn))
         #expect(plan.mustNotBeRunning.map(\.appName) == ["Ollama"])
-        #expect(removal.isUndoable)
+        #expect(!removal.isPermanent)
         #expect(removal.summary.hasSuffix("to the Domovy quarantine folder. You can undo this."))
 
         let executor = fixture.executor()
@@ -215,13 +236,18 @@ struct ModelCleanupTests {
         let cleanup = try await planner.plan(.huggingFaceDetached)
         #expect(cleanup.plan.commands.map(\.commandLine) == ["hf cache prune --yes"])
         #expect(cleanup.plan.commands.first?.environment["HF_HUB_CACHE"] == fixture.hub.standardizedFileURL.path)
-        #expect(cleanup.summary.hasSuffix("Undo can't bring them back."))
-        let entry = try await planner.execute(cleanup, with: fixture.executor())
+        #expect(cleanup.summary.hasSuffix(" You can undo this; Domovy keeps a copy in its quarantine until you purge it."))
+        let executor = fixture.executor()
+        let entry = try await planner.execute(cleanup, with: executor)
         #expect(entry.leftovers.isEmpty)
-        #expect(entry.irreversible)
+        #expect(!entry.irreversible)
         #expect(!fixture.exists(F.tinyBert + "/snapshots/" + ModelFixtureHome.Revisions.detached))
         #expect(fixture.brokenLinks(in: F.tinyBert).isEmpty)
         #expect(fixture.brokenLinks(in: F.distilled).isEmpty)
+
+        _ = try executor.undo(entry)
+        #expect(fixture.exists(F.tinyBert + "/snapshots/" + ModelFixtureHome.Revisions.detached + "/model.safetensors"))
+        #expect(fixture.brokenLinks(in: F.tinyBert).isEmpty)
     }
 
     @Test("a sloppy hf cache prune is caught")
@@ -271,12 +297,21 @@ struct ModelCleanupTests {
         let model = try await fixture.model(.huggingFace, "acme/tiny-bert")
         let removal = try await planner.modelRemovalPlan([model])
         #expect(removal.plans.first?.commands.map(\.commandLine) == ["hf cache rm model/acme/tiny-bert --yes"])
-        let entries = try await planner.execute(removal, with: fixture.executor())
+        let snapshotTime = fixture.modificationTime(F.tinyBert + "/snapshots/" + ModelFixtureHome.Revisions.main)
+        let executor = fixture.executor()
+        let entries = try await planner.execute(removal, with: executor)
         #expect(entries.flatMap(\.leftovers).isEmpty)
         #expect(!fixture.exists(F.tinyBert))
         #expect(fixture.exists(F.sharedStoreFile))
         #expect(!fixture.exists(F.ownStoreFile))
         #expect(fixture.brokenLinks(in: F.distilled).isEmpty)
+
+        // Undo puts the repo back with its symlinks, and the store file only it used.
+        _ = try executor.undo(try #require(entries.first))
+        #expect(fixture.exists(F.tinyBert + "/snapshots/" + ModelFixtureHome.Revisions.main + "/config.json"))
+        #expect(fixture.brokenLinks(in: F.tinyBert).isEmpty)
+        #expect(fixture.exists(F.ownStoreFile))
+        #expect(fixture.modificationTime(F.tinyBert + "/snapshots/" + ModelFixtureHome.Revisions.main) == snapshotTime)
 
         let sloppy = try ModelFixtureHome()
         try sloppy.touch(".cache/huggingface/hub/.stub-sloppy")
@@ -285,6 +320,12 @@ struct ModelCleanupTests {
             try await sloppyPlanner.modelRemovalPlan([try await sloppy.model(.huggingFace, "acme/tiny-bert")]), with: sloppy.executor()
         ).flatMap(\.leftovers)
         #expect(leftovers.contains("models--acme--tiny-bert is still there."))
+        // The sloppy rm took refs/ out of the folder it left: undo puts just that back.
+        #expect(!sloppy.exists(F.tinyBert + "/refs/main"))
+        let sloppyExecutor = sloppy.executor()
+        _ = try sloppyExecutor.undo(try #require(try sloppyExecutor.undoLog.latestPending()))
+        #expect(sloppy.exists(F.tinyBert + "/refs/main"))
+        #expect(sloppy.brokenLinks(in: F.tinyBert).isEmpty)
     }
 
     @Test("a repo with a file open is refused")
@@ -308,15 +349,17 @@ struct ModelCleanupTests {
             try await fixture.model(.lmStudio, "bartowski/Llama-3.2-1B-Instruct-GGUF"),
         ], destination: .quarantine)
         #expect(removal.plans.map(\.agent) == [.ollama, .lmStudio])
-        #expect(removal.isPermanent && !removal.isUndoable)
+        #expect(removal.isPermanent)
         #expect(removal.summary.contains("Ollama deletes it ("))
         #expect(removal.summary.hasSuffix("to the Domovy quarantine folder. You can undo this."))
         let executor = fixture.executor()
         let entries = try await planner.execute(removal, with: executor)
         #expect(entries.count == 2)
-        // Only the LM Studio part can be undone.
+        // Both parts can be undone: Ollama's from the kept copy, LM Studio's from the quarantine.
         let pending = try executor.undoLog.latestPendingBatch()
-        #expect(pending.map(\.agent) == [.lmStudio])
+        #expect(Set(pending.map(\.agent)) == [.lmStudio, .ollama])
+        for entry in pending { _ = try executor.undo(entry) }
+        #expect(fixture.exists(".ollama/models/manifests/registry.ollama.ai/someuser/tinyllm/q4"))
     }
 
     @Test("an unknown model name is refused")

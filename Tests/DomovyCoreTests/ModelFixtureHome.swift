@@ -67,17 +67,26 @@ final class ModelFixtureHome: Sendable {
         running: [RunningProcess]? = [],
         holders: [OpenHandleHolder]? = [],
         ollama: ToolChoice? = nil,
-        hf: ToolChoice? = ToolChoice.none
+        hf: ToolChoice? = ToolChoice.none,
+        stores custom: ModelStores? = nil,
+        environment: [String: String] = [:]
     ) -> CleanupPlanner {
         CleanupPlanner(
             claudeCodeRoot: url(".claude"), codexRoot: url(".codex"), desktopSupport: url("Library/Application Support/Claude"),
-            models: stores, ollamaCLI: ollama ?? .executable(ollamaStub), huggingFaceCLI: hf ?? .executable(hfStub),
-            openHandles: PrefixOpenHandleChecker(holders: holders), processes: FixedProcessLister(running)
+            models: custom ?? stores, ollamaCLI: ollama ?? .executable(ollamaStub), huggingFaceCLI: hf ?? .executable(hfStub),
+            openHandles: PrefixOpenHandleChecker(holders: holders), processes: FixedProcessLister(running), environment: environment
         )
     }
 
-    func executor(running: [RunningProcess] = []) -> Executor {
-        Executor(storeRoot: storeRoot, processes: FixedProcessLister(running))
+    func executor(running: [RunningProcess] = [], copier: QuarantineCopier = .system) -> Executor {
+        Executor(storeRoot: storeRoot, processes: FixedProcessLister(running), copier: copier)
+    }
+
+    /// Nanosecond modification time, without following symlinks.
+    func modificationTime(_ relative: String) -> [Int]? {
+        var info = stat()
+        guard lstat(url(relative).path, &info) == 0 else { return nil }
+        return [info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec]
     }
 
     func footprint(_ agent: AgentKind) async throws -> Footprint {
