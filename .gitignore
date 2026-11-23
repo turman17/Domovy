@@ -1,0 +1,37 @@
+# Claude rules (local only)
+CLAUDE.md
+.claude/
+
+# Build artifacts
+.local/
+.build/
+DerivedData/
+build/
+*.xcarchive
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Xcode
+xcuserdata/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Logs and scratch
+*.log
+scratch/
+
+# Test fixtures generated at runtime (committed fixtures live in Tests/Fixtures)
+.fixtures-tmp/
+
+# Distribution
+*.dmg
+*.zip
+
+# Fake home for Debug runs (scripts/devhome.sh)
+.devhome/
+
+# SwiftPM workspace state
+.swiftpm/
