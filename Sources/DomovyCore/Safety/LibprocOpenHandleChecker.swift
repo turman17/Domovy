@@ -77,7 +77,7 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         var holders: [OpenHandleHolder] = []
         var inspected = 0
         for pid in pids where pid > 0 {
-            guard let fds = listFDs(of: pid) else {
+            guard let fds = retryingStartingProcess(pid, { listFDs(of: pid) }) else {
                 guard !isOwnRunningProcess(pid) else { return uninspectable(pid) }
                 continue // another user's process, or gone
             }
@@ -104,7 +104,7 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         var holders: [OpenHandleHolder] = []
         var inspected = 0
         for pid in pids where pid > 0 {
-            guard let paths = mappedPaths(of: pid, flavor: flavor) else {
+            guard let paths = retryingStartingProcess(pid, { mappedPaths(of: pid, flavor: flavor) }) else {
                 guard !isOwnRunningProcess(pid) else { return uninspectable(pid) }
                 continue // another user's process, or gone
             }
@@ -127,6 +127,19 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
         guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return false }
         return info.kp_eproc.e_ucred.cr_uid == getuid() && info.kp_proc.p_stat != CChar(SZOMB) && info.kp_proc.p_flag & P_WEXIT == 0
+    }
+
+    /// A process of this user that is starting (between fork and exec) or exiting cannot be
+    /// read for a few milliseconds. Asks again briefly before the caller treats it as
+    /// uninspectable; another user's process or a gone one fails at once.
+    static func retryingStartingProcess<T>(_ pid: pid_t, _ read: () -> T?) -> T? {
+        if let value = read() { return value }
+        for _ in 0..<5 {
+            guard isOwnRunningProcess(pid) else { return nil }
+            usleep(10_000)
+            if let value = read() { return value }
+        }
+        return nil
     }
 
     private static func uninspectable(_ pid: pid_t) -> [OpenHandleHolder]? {
