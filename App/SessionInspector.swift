@@ -12,6 +12,16 @@ struct SessionInspector: View {
 
     private var isLive: Bool { session.status == .live }
 
+    private var archivedHelp: String {
+        session.agent == .codex ? "Already archived in Codex." : "Already archived: its files are compressed on disk."
+    }
+
+    private var archiveHelp: String {
+        session.agent == .codex
+            ? "Archive this session in Codex (codex archive), or compress it on disk without the CLI. You can undo this."
+            : "Compress this session on disk. Claude Code can still resume it. You can undo this."
+    }
+
     private var footprintLine: String {
         let files = artifacts.filter { $0.kind != .indexEntry }.count
         let entries = artifacts.filter { $0.kind == .indexEntry }.count
@@ -67,13 +77,13 @@ struct SessionInspector: View {
             HStack(spacing: 8) {
                 Button("Archive…", systemImage: "archivebox", action: onArchive)
                     .disabled(isLive || session.isArchived)
-                    .help(session.isArchived ? "Already archived: its files are compressed on disk." : isLive ? "This session is live, so it cannot be archived." : "Compress this session on disk. Claude Code can still resume it. You can undo this.")
+                    .help(session.isArchived ? archivedHelp : isLive ? "This session is live, so it cannot be archived." : archiveHelp)
                 Button("Delete…", systemImage: "trash", action: onDelete)
                     .disabled(isLive)
-                    .help(isLive ? "This session is live, so it cannot be deleted." : "Move every file of this session to the Trash. You can undo this.")
+                    .help(isLive ? "This session is live, so it cannot be deleted." : "Remove every file and index entry of this session. Shows the plan first. You can undo this.")
             }
             if isLive {
-                Label("Live. Quit the Claude Code session using it before deleting.", systemImage: "dot.radiowaves.left.and.right")
+                Label("Live. Quit the \(session.agent.displayName) session using it before deleting.", systemImage: "dot.radiowaves.left.and.right")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

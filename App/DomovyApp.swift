@@ -3,7 +3,7 @@ import SwiftUI
 
 @main
 struct DomovyApp: App {
-    @State private var library = SessionLibrary(home: AppEnvironment.home, storeRoot: AppEnvironment.storeRoot)
+    @State private var library = SessionLibrary(home: AppEnvironment.home, storeRoot: AppEnvironment.storeRoot, isCustomHome: AppEnvironment.isDevHome)
 
     var body: some Scene {
         Window("Domovy", id: "main") {

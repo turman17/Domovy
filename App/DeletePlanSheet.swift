@@ -19,7 +19,7 @@ struct DeletePlanSheet: View {
         _destination = State(initialValue: request.plan.destination ?? .trash)
     }
 
-    private var root: URL { library.adapter.root }
+    private var root: URL { library.root(for: plan.agent) }
     private var confirmTitle: String { destination == .trash ? "Move to Trash" : "Move to Quarantine" }
 
     var body: some View {
@@ -29,6 +29,7 @@ struct DeletePlanSheet: View {
             Text(plan.summary)
                 .foregroundStyle(.secondary)
             LiveCheckRow(result: plan.liveCheck)
+            RemarksView(remarks: plan.remarks)
             changes
             if let failure {
                 Label(failure, systemImage: "exclamationmark.circle")
@@ -47,6 +48,7 @@ struct DeletePlanSheet: View {
 
     private var changes: some View {
         List {
+            CommandsSection(commands: plan.commands)
             Section("\(plan.agent.displayName) · \(abbreviatedRoot) · moved to \(destination.displayName)") {
                 ForEach(plan.moves, id: \.source) { move in
                     ChangeRow(
@@ -141,6 +143,39 @@ struct ChangeRow: View {
     }
 }
 
+/// The agent's own commands a plan runs, e.g. "Runs codex delete … then checks the result".
+struct CommandsSection: View {
+    let commands: [PlannedCommand]
+
+    var body: some View {
+        if !commands.isEmpty {
+            Section("\(commands.first?.executable.lastPathComponent ?? "Agent") command · run first, then checked") {
+                ForEach(commands, id: \.self) { command in
+                    ChangeRow(
+                        symbol: "terminal",
+                        path: command.commandLine,
+                        note: command.note,
+                        size: command.sizeBytes > 0 ? command.sizeBytes.formatted(.byteCount(style: .file)) : "–"
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Consequences the user should know before confirming, one line each.
+struct RemarksView: View {
+    let remarks: [String]
+
+    var body: some View {
+        ForEach(remarks, id: \.self) { remark in
+            Label(remark, systemImage: "info.circle")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 /// Green check when nothing uses the session; gray broadcast symbol with the reasons otherwise.
 struct LiveCheckRow: View {
     let result: LiveCheckResult
@@ -153,7 +188,9 @@ struct LiveCheckRow: View {
         case .open: parts.append("Open file handles found")
         case .unavailable: parts.append("File handles could not be checked")
         }
-        parts.append("not in Claude's session roster")
+        if result.checkedSignals.contains("daemon/roster.json") { parts.append("not in Claude's session roster") }
+        if result.checkedSignals.contains("thread-writer-locks") { parts.append("Codex does not have it open") }
+        if result.checkedSignals.contains("Codex processes") { parts.append("Codex is not running") }
         return parts.joined(separator: ", ") + ". Checked just now."
     }
 
@@ -161,7 +198,7 @@ struct LiveCheckRow: View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: result.isLive ? "dot.radiowaves.left.and.right" : "checkmark.circle.fill")
                 .foregroundStyle(result.isLive ? AnyShapeStyle(.secondary) : AnyShapeStyle(.green))
-            Text(result.isLive ? "Running" : "Not running")
+            Text(result.isLive ? (result.reasons.allSatisfy { $0.contains("is running") } ? "Blocked" : "Running") : "Not running")
                 .fontWeight(.semibold)
             Text(detail)
                 .foregroundStyle(.secondary)

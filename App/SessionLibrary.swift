@@ -66,13 +66,28 @@ final class SessionLibrary {
     /// Set by the menu bar popover so the main window opens on that filter.
     var requestedFilter: StatusFilter?
 
-    let adapter: ClaudeCodeAdapter
+    let claudeCode: ClaudeCodeAdapter
+    let codex: CodexAdapter
+    /// Every adapter, in sidebar order. Agents not installed at this home are skipped on scan.
+    let adapters: [any AgentAdapter]
     let executor: Executor
     private let logger = Logger(subsystem: "io.github.turman17.Domovy", category: "SessionLibrary")
 
-    init(home: URL, storeRoot: URL) {
-        adapter = ClaudeCodeAdapter(home: home)
+    init(home: URL, storeRoot: URL, isCustomHome: Bool) {
+        claudeCode = ClaudeCodeAdapter(home: home)
+        codex = CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: isCustomHome))
+        adapters = [claudeCode, codex]
         executor = Executor(storeRoot: storeRoot)
+    }
+
+    func adapter(for agent: AgentKind) throws -> any AgentAdapter {
+        guard let adapter = adapters.first(where: { $0.kind == agent }) else { throw AdapterError.notInstalled(agent) }
+        return adapter
+    }
+
+    /// The agent's storage folder, for showing plan paths relative to it.
+    func root(for agent: AgentKind) -> URL {
+        adapters.first { $0.kind == agent }?.root ?? claudeCode.root
     }
 
     // MARK: Derived
@@ -108,38 +123,47 @@ final class SessionLibrary {
     func reload() async {
         isLoading = true
         defer { isLoading = false }
-        do {
-            sessions = try await adapter.sessions()
-            footprints = [try await adapter.footprint()]
-            retentionDays = adapter.cleanupPeriodDays()
-            errorMessage = nil
-            lastScan = Date()
-        } catch {
-            logger.error("Scan failed: \(error.localizedDescription, privacy: .private)")
-            errorMessage = error.localizedDescription
+        var found: [Session] = []
+        var prints: [Footprint] = []
+        var failures: [String] = []
+        // One agent failing must not hide the others.
+        for adapter in adapters where await adapter.status() != .notInstalled {
+            do {
+                found += try await adapter.sessions()
+                prints.append(try await adapter.footprint())
+            } catch {
+                logger.error("Scan of \(adapter.kind.displayName, privacy: .public) failed: \(error.localizedDescription, privacy: .private)")
+                failures.append(error.localizedDescription)
+            }
         }
+        sessions = found.sorted { $0.lastActive > $1.lastActive }
+        footprints = prints
+        retentionDays = claudeCode.cleanupPeriodDays()
+        errorMessage = failures.isEmpty ? nil : failures.joined(separator: " ")
+        lastScan = Date()
     }
 
     func transcript(of session: Session) async throws -> Transcript {
-        try await adapter.transcript(of: session, limit: 200)
+        try await adapter(for: session.agent).transcript(of: session, limit: 200)
     }
 
     func artifacts(of session: Session) async throws -> [Artifact] {
-        try await adapter.artifacts(of: session)
+        try await adapter(for: session.agent).artifacts(of: session)
     }
 
     // MARK: Plans
 
     func deletePlan(for session: Session, destination: Destination) async throws -> Plan {
-        try await adapter.deletePlan(for: session, destination: destination)
+        try await adapter(for: session.agent).deletePlan(for: session, destination: destination)
     }
 
-    /// One archive plan per session; sessions with nothing to compress are left out.
+    /// One archive plan per session; sessions with nothing to do are left out. A batch also
+    /// leaves out blocked plans; a single blocked plan stays so the sheet can say why.
     func archivePlans(for sessions: [Session]) async throws -> [Plan] {
         var plans: [Plan] = []
         for session in sessions where session.status != .live {
-            let plan = try await adapter.archivePlan(for: session)
-            if !plan.isEmpty, !plan.liveCheck.isLive { plans.append(plan) }
+            let plan = try await adapter(for: session.agent).archivePlan(for: session)
+            if !plan.isEmpty, sessions.count == 1 || !plan.liveCheck.isLive { plans.append(plan) }
         }
         return plans
     }
@@ -150,7 +174,12 @@ final class SessionLibrary {
         let size = plan.totalBytes.formatted(.byteCount(style: .file))
         let action = UndoAction(name: "Move to Trash", entries: entries)
         register(action)
-        toast = Toast(message: "Moved \u{201C}\(session.displayTitle)\u{201D} (\(size)) to \((plan.destination ?? .trash).displayName).", undo: action)
+        let title = "\u{201C}\(session.displayTitle)\u{201D} (\(size))"
+        let destination = (plan.destination ?? .trash).displayName
+        let message = plan.commands.isEmpty
+            ? "Moved \(title) to \(destination)."
+            : "Deleted \(title) with \(plan.commands.map { "`\($0.executable.lastPathComponent) \($0.arguments.first ?? "")`" }.joined(separator: ", "))."
+        toast = Toast(message: message + Self.leftoverText(entries), undo: action)
         await reload()
     }
 
@@ -165,8 +194,16 @@ final class SessionLibrary {
             ? "\u{201C}\(sessions.first { $0.id == plans[0].sessionID }?.displayTitle ?? "session")\u{201D}"
             : "\(plans.count) sessions"
         let action = UndoAction(name: "Archive", entries: entries)
-        register(action)
-        toast = Toast(message: items.isEmpty ? "Nothing in \(what) needed compressing." : "Archived \(what) (\(before) \u{2192} ~\(after)).", undo: items.isEmpty ? nil : action)
+        let ranCommands = plans.contains { !$0.commands.isEmpty }
+        let message: String
+        if ranCommands {
+            message = items.isEmpty ? "Archived \(what)." : "Archived \(what); compressed \(before) \u{2192} ~\(after)."
+        } else {
+            message = items.isEmpty ? "Nothing in \(what) needed compressing." : "Archived \(what) (\(before) \u{2192} ~\(after))."
+        }
+        let undoable = !items.isEmpty || ranCommands
+        if undoable { register(action) }
+        toast = Toast(message: message + Self.leftoverText(entries), undo: undoable ? action : nil)
         await reload()
     }
 
@@ -182,6 +219,13 @@ final class SessionLibrary {
         let verb = action.entries.first?.action == .archive ? "Decompressed" : "Put back"
         toast = Toast(message: "\(verb) \(what).", undo: nil)
         await reload()
+    }
+
+    /// " Codex left 2 things behind: …" after a verified agent command, or nothing.
+    private static func leftoverText(_ entries: [UndoEntry]) -> String {
+        let leftovers = entries.flatMap(\.leftovers)
+        guard !leftovers.isEmpty else { return "" }
+        return " Checked afterwards: " + leftovers.joined(separator: " ")
     }
 
     private func run(_ plans: [Plan]) async throws -> [UndoEntry] {

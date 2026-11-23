@@ -26,3 +26,20 @@ if [ ! -d "$DEV/.claude" ]; then
   sed 's/"pid":4242/"pid":1/' "$CLAUDE/sessions/4242.json" > "$CLAUDE/sessions/1.json"
   rm "$CLAUDE/sessions/4242.json"
 fi
+if [ ! -d "$DEV/.codex" ]; then
+  mkdir -p "$DEV/bin"
+  cp -Rp "$ROOT/Tests/Fixtures/codex/0.169" "$DEV/.codex"
+  CODEX="$DEV/.codex"
+  for db in state_5 thread_history_1; do sqlite3 "$CODEX/$db.sqlite" < "$ROOT/Tests/Fixtures/codex/sql/$db.sql"; done
+  # The app and `domo --root .devhome` run this stub, never the real codex CLI.
+  cp "$ROOT/Tests/Fixtures/codex/stub-codex.sh" "$DEV/bin/codex"
+  chmod 755 "$DEV/bin/codex"
+  age() { touch -t "$(date -v-"$1"d +%Y%m%d%H%M)" "$2"; }
+  S="$CODEX/sessions/2026"
+  age 2  "$S/11/20/rollout-2026-11-20T09-15-00-01a1f011-1111-7111-8111-111111111111.jsonl"
+  age 2  "$S/11/20/rollout-2026-11-20T11-40-00-01a1f011-1111-7111-8111-111111111111_01a1f0aa-aaaa-7aaa-8aaa-aaaaaaaaaaaa.jsonl"
+  age 1  "$S/11/22/rollout-2026-11-22T08-00-00-01a1f022-2222-7222-8222-222222222222.jsonl"
+  age 24 "$S/10/30/rollout-2026-10-30T14-05-00-01a1f033-3333-7333-8333-333333333333.jsonl.zst"
+  age 42 "$S/10/12/rollout-2026-10-12T10-00-00-01a1f055-5555-7555-8555-555555555555.jsonl.zst"
+  age 8  "$CODEX/archived_sessions/rollout-2026-11-15T22-41-43-01a1f044-4444-7444-8444-444444444444.jsonl"
+fi

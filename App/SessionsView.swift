@@ -67,7 +67,7 @@ struct SessionsView: View {
                     sessions: library.expiringSessions,
                     retentionDays: library.retentionDays,
                     withinDays: library.expiringWithinDays,
-                    settingsURL: library.adapter.root.appendingPathComponent("settings.json"),
+                    settingsURL: library.claudeCode.root.appendingPathComponent("settings.json"),
                     archivableCount: archivableExpiring.count,
                     onArchiveAll: { requestArchive(archivableExpiring) },
                     onReview: { statusFilter = .expiring },
@@ -249,7 +249,9 @@ struct SessionsView: View {
             do {
                 let plans = try await library.archivePlans(for: sessions)
                 guard !plans.isEmpty else {
-                    errorMessage = "Nothing to compress: \(sessions.count == 1 ? "this session's files are" : "these sessions' files are") already compressed or too small to gain from it."
+                    errorMessage = sessions.count == 1 && sessions[0].agent == .codex
+                        ? "Nothing to archive: this session is already in Codex's archive or has nothing to compress."
+                        : "Nothing to compress: \(sessions.count == 1 ? "this session's files are" : "these sessions' files are") already compressed or too small to gain from it."
                     return
                 }
                 let planned = Set(plans.map(\.sessionID))

@@ -19,11 +19,12 @@ struct ArchivePlanSheet: View {
     @State private var isExecuting = false
     @State private var failure: String?
 
-    private var root: URL { library.adapter.root }
     private var files: [FileCompression] { request.plans.flatMap(\.compressions) }
     private var before: Int64 { files.reduce(0) { $0 + $1.sizeBytes } }
     private var after: Int64 { files.reduce(0) { $0 + $1.estimatedBytes } }
     private var isBatch: Bool { request.plans.count > 1 }
+    private var commandCount: Int { request.plans.reduce(0) { $0 + $1.commands.count } }
+    private var isBlocked: Bool { request.plans.contains { $0.liveCheck.isLive } }
     private var expiringCount: Int { request.sessions.filter { $0.status == .expiring }.count }
 
     private var title: String {
@@ -34,7 +35,14 @@ struct ArchivePlanSheet: View {
     private var summary: String {
         guard isBatch else { return request.plans.first?.summary ?? "Nothing to compress." }
         let n = files.count
-        return "Compresses \(n) \(n == 1 ? "file" : "files") (\(before.formatted(.byteCount(style: .file))) \u{2192} ~\(after.formatted(.byteCount(style: .file)))) in \(request.plans.count) sessions. Claude Code can still resume them. You can undo this."
+        var parts: [String] = []
+        if n > 0 {
+            parts.append("Compresses \(n) \(n == 1 ? "file" : "files") (\(before.formatted(.byteCount(style: .file))) \u{2192} ~\(after.formatted(.byteCount(style: .file)))); the agents can still resume them.")
+        }
+        if commandCount > 0 {
+            parts.append("Runs codex archive for \(commandCount) Codex \(commandCount == 1 ? "session" : "sessions"), then checks the result.")
+        }
+        return (parts + ["You can undo this."]).joined(separator: " ")
     }
 
     var body: some View {
@@ -45,6 +53,7 @@ struct ArchivePlanSheet: View {
                 .foregroundStyle(.secondary)
             if let plan = request.plans.first, !isBatch {
                 LiveCheckRow(result: plan.liveCheck)
+                RemarksView(remarks: plan.remarks.filter { $0 != summary })
             }
             if expiringCount > 0 {
                 Label(
@@ -68,14 +77,17 @@ struct ArchivePlanSheet: View {
     private var changes: some View {
         List {
             ForEach(request.plans) { plan in
-                Section(sectionTitle(plan)) {
-                    ForEach(plan.compressions, id: \.file) { item in
-                        ChangeRow(
-                            symbol: "doc.zipper",
-                            path: relativePath(item.file, under: root),
-                            note: item.note,
-                            size: "\(item.sizeBytes.formatted(.byteCount(style: .file))) \u{2192} ~\(item.estimatedBytes.formatted(.byteCount(style: .file)))"
-                        )
+                CommandsSection(commands: plan.commands)
+                if !plan.compressions.isEmpty {
+                    Section(sectionTitle(plan)) {
+                        ForEach(plan.compressions, id: \.file) { item in
+                            ChangeRow(
+                                symbol: "doc.zipper",
+                                path: relativePath(item.file, under: library.root(for: plan.agent)),
+                                note: item.note,
+                                size: "\(item.sizeBytes.formatted(.byteCount(style: .file))) \u{2192} ~\(item.estimatedBytes.formatted(.byteCount(style: .file)))"
+                            )
+                        }
                     }
                 }
             }
@@ -92,20 +104,22 @@ struct ArchivePlanSheet: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            Image(systemName: "arrow.down.right.and.arrow.up.left")
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            Text("\(before.formatted(.byteCount(style: .file))) \u{2192} ~\(after.formatted(.byteCount(style: .file))) on disk")
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .help("Estimate. \(before.formatted()) bytes on disk now.")
+            if !files.isEmpty {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text("\(before.formatted(.byteCount(style: .file))) \u{2192} ~\(after.formatted(.byteCount(style: .file))) on disk")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .help("Estimate. \(before.formatted()) bytes on disk now.")
+            }
             Spacer()
             Button("Cancel") { dismiss() }
                 .keyboardShortcut(.cancelAction)
             Button(isBatch ? "Archive \(request.plans.count)" : "Archive", action: execute)
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .disabled(files.isEmpty || isExecuting)
+                .disabled((files.isEmpty && commandCount == 0) || isBlocked || isExecuting)
         }
     }
 
