@@ -44,6 +44,7 @@ struct RootOptions: ParsableArguments {
             AntigravityAdapter(home: home),
             OpenCodeAdapter(home: home, cli: OpenCodeCLI.choice(home: home, isCustomHome: root != nil)),
             CopilotAdapter(home: home),
+            CursorAdapter(home: home),
         ]
     }
 

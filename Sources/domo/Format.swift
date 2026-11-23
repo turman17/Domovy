@@ -119,6 +119,17 @@ enum Format {
             lines.append("  \(bytes(edit.removedBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) index  \(edit.file.path)")
             lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) \(edit.note)")
         }
+        for edit in plan.databaseEdits {
+            lines.append("  \(bytes(edit.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) rows   \(edit.database.path)")
+            lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) keeps a copy of \(edit.files.map(\.lastPathComponent).joined(separator: ", ")) first, then checks PRAGMA integrity_check")
+            for rows in edit.rows {
+                let key = rows.isPrefix ? "\(rows.key)*" : rows.key
+                lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) delete \(rows.count) \(rows.count == 1 ? "row " : "rows") \(rows.table) \(key)  (\(rows.note))")
+            }
+            for removal in edit.listRemovals {
+                lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) edit   \(removal.table) \(removal.key)  (\(removal.note))")
+            }
+        }
         for removal in plan.registryRemovals {
             lines.append("  \(bytes(removal.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) entry  \(removal.file.path)")
             lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) \(removal.note)")

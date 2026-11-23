@@ -22,7 +22,7 @@ struct Rm: AsyncParsableCommand {
     @Option(name: .long, help: "Where removed files go: trash (default) or quarantine.")
     var to: Destination = .trash
 
-    @Flag(name: .long, help: "Accept that undo may stop working (OpenCode: once it writes to its database again). Required with --yes for such plans.")
+    @Flag(name: .long, help: "Accept that undo may stop working (OpenCode, Cursor: once the app writes to its database again). Required with --yes for such plans.")
     var acceptLimitedUndo = false
 
     func run() async throws {
@@ -42,6 +42,7 @@ struct Rm: AsyncParsableCommand {
             if plan.acknowledgement != nil, yes, !acceptLimitedUndo { throw DomoError.acknowledgementRequired }
             if !yes {
                 var steps = plan.commands.map { "run `\($0.commandLine)`" }
+                steps += plan.databaseEdits.map { "delete \($0.rowCount) rows from \($0.database.lastPathComponent)" }
                 if !plan.moves.isEmpty || steps.isEmpty {
                     steps.append("move \(plan.moves.count) items (\(Format.bytes(plan.totalBytes))) to \(to.displayName)")
                 }
@@ -54,7 +55,8 @@ struct Rm: AsyncParsableCommand {
             print("")
             let entry = try options.executor.execute(plan)
             let ran = plan.commands.isEmpty ? "" : "Ran \(plan.commands.map { "`\($0.commandLine)`" }.joined(separator: ", ")). "
-            print("Done. \(ran)Moved \(entry.moved.count) items and edited \(entry.indexRestores.count) index file(s). Undo with `domo undo`.")
+            let rows = plan.databaseEdits.isEmpty ? "" : "Deleted the chat's rows from \(plan.databaseEdits.map(\.database.lastPathComponent).joined(separator: ", ")) (integrity check passed). "
+            print("Done. \(ran)\(rows)Moved \(entry.moved.count) items and edited \(entry.indexRestores.count) index file(s). Undo with `domo undo`.")
             Domo.printLeftovers([entry])
         } catch {
             throw Domo.fail(error)
