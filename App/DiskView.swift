@@ -11,6 +11,7 @@ struct DiskView: View {
 
     @Environment(SessionLibrary.self) private var library
     @State private var orphanRequest: OrphanRequest?
+    @State private var cleanupRequest: CleanupRequest?
     @State private var errorMessage: String?
 
     /// Largest agent first, matching the breakdown bar and its legend.
@@ -36,7 +37,7 @@ struct DiskView: View {
                             OrphansSection(report: library.orphanReport, onCleanUp: requestCleanUp)
                         }
                         ForEach(ordered, id: \.agent) { footprint in
-                            AgentFootprintSection(footprint: footprint, onOpenSessions: onOpenSessions, onCleanUp: { requestCleanUp(.orphans) })
+                            AgentFootprintSection(footprint: footprint, onOpenSessions: onOpenSessions, onCleanUp: { requestCleanUp(.orphans) }, onGuidedCleanup: requestCleanup)
                         }
                     }
                     .padding(.horizontal, 24)
@@ -50,6 +51,16 @@ struct DiskView: View {
         .sheet(item: $orphanRequest) { request in
             OrphanPlanSheet(request: request)
         }
+        .sheet(item: $cleanupRequest) { request in
+            CleanupPlanSheet(request: request)
+        }
+        .task(id: library.footprints.isEmpty) {
+            // Debug only: DOMOVY_OPEN_CLEANUP=<id> opens that cleanup's sheet for a window capture.
+            guard let id = AppEnvironment.startCleanup, !library.footprints.isEmpty, cleanupRequest == nil else { return }
+            try? await Task.sleep(for: .seconds(1))
+            NSApp.activate()
+            requestCleanup(id)
+        }
         .alert("Something went wrong", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -59,6 +70,17 @@ struct DiskView: View {
             guard library.toast != nil else { return }
             try? await Task.sleep(for: .seconds(8))
             withAnimation { library.toast = nil }
+        }
+    }
+
+    /// Plans first, then the confirmation sheet. A blocked plan still opens it, to say why.
+    private func requestCleanup(_ id: CleanupID) {
+        Task {
+            do {
+                cleanupRequest = CleanupRequest(cleanup: try await library.cleanupPlan(id, destination: .trash))
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -134,6 +156,7 @@ private struct AgentFootprintSection: View {
     let footprint: Footprint
     let onOpenSessions: (AgentKind) -> Void
     let onCleanUp: () -> Void
+    let onGuidedCleanup: (CleanupID) -> Void
 
     /// Removable categories first, largest first; what the agent needs comes last.
     private var rows: [Footprint.Category] {
@@ -159,7 +182,7 @@ private struct AgentFootprintSection: View {
             VStack(spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, category in
                     if index > 0 { Divider() }
-                    CategoryRow(category: category, agent: footprint.agent, onOpenSessions: onOpenSessions, onCleanUp: onCleanUp)
+                    CategoryRow(category: category, agent: footprint.agent, onOpenSessions: onOpenSessions, onCleanUp: onCleanUp, onGuidedCleanup: onGuidedCleanup)
                 }
             }
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
@@ -173,6 +196,7 @@ private struct CategoryRow: View {
     let agent: AgentKind
     let onOpenSessions: (AgentKind) -> Void
     let onCleanUp: () -> Void
+    let onGuidedCleanup: (CleanupID) -> Void
 
     private var instructions: String? {
         if case .instructions(let text) = category.guidance { return text }
@@ -218,7 +242,9 @@ private struct CategoryRow: View {
 
     @ViewBuilder
     private var actionButton: some View {
-        if category.guidance == .manageInSessions {
+        if let id = category.cleanupID {
+            guidedButton(id)
+        } else if category.guidance == .manageInSessions {
             Button("Open Sessions") { onOpenSessions(agent) }
                 .help("Delete or archive \(agent.displayName) sessions one by one")
         } else if category.guidance == .cleanUpOrphans {
@@ -228,6 +254,18 @@ private struct CategoryRow: View {
         } else {
             Button("Show in Finder", action: reveal)
                 .help((category.url.path as NSString).abbreviatingWithTildeInPath)
+        }
+    }
+
+    /// Accent for safe rows; consequences rows get a plain button, and their sheet the red one.
+    @ViewBuilder
+    private func guidedButton(_ id: CleanupID) -> some View {
+        let button = Button(id.buttonTitle) { onGuidedCleanup(id) }
+            .help(id.compresses ? "Shows every file first. Compresses them in place; you can undo this." : "Shows every item first. Moves them to the Trash; you can undo this.")
+        if category.disposition == .safe {
+            button.buttonStyle(.borderedProminent)
+        } else {
+            button
         }
     }
 

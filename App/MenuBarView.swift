@@ -101,6 +101,20 @@ struct MenuBarView: View {
                     detail: live.prefix(3).map { "\($0.agent.displayName) · \($0.projectName ?? "no project")" }.joined(separator: ", ")
                 ) { open(filter: .live) }
             }
+            if let bytes = library.largeVMBundleBytes {
+                AttentionRow(
+                    symbol: "shippingbox",
+                    title: "Claude Desktop VM bundle: \(bytes.formatted(.byteCount(style: .file)))",
+                    detail: "Review what removing it costs on the Disk screen."
+                ) { open(section: .disk) }
+            }
+            if library.hasLargeSafeFootprint {
+                AttentionRow(
+                    symbol: "checkmark.circle",
+                    title: "\(library.safeFootprintBytes.formatted(.byteCount(style: .file))) safe to remove",
+                    detail: "Caches and leftovers the agents rebuild or never need."
+                ) { open(section: .disk) }
+            }
         }
     }
 
@@ -122,7 +136,14 @@ struct MenuBarView: View {
         .accessibilityElement(children: .combine)
     }
 
+    private func open(section: SidebarItem) {
+        library.requestedSection = section
+        openWindow(id: "main")
+        NSApp.activate()
+    }
+
     private func open(filter: StatusFilter?) {
+        library.requestedSection = filter == nil ? nil : .sessions
         library.requestedFilter = filter
         openWindow(id: "main")
         NSApp.activate()

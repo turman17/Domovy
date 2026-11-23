@@ -1,3 +1,4 @@
+import DomovyCore
 import Foundation
 
 /// Where Domovy looks for agent data.
@@ -34,6 +35,14 @@ enum AppEnvironment {
     static var startSelection: String? {
         #if DEBUG
         if let id = ProcessInfo.processInfo.environment["DOMOVY_SELECT"], !id.isEmpty { return id }
+        #endif
+        return nil
+    }
+
+    /// Debug only: `DOMOVY_OPEN_CLEANUP=<cleanup id>` opens that cleanup's sheet on the Disk screen.
+    static var startCleanup: CleanupID? {
+        #if DEBUG
+        if let raw = ProcessInfo.processInfo.environment["DOMOVY_OPEN_CLEANUP"] { return CleanupID(rawValue: raw) }
         #endif
         return nil
     }

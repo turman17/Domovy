@@ -53,7 +53,18 @@ struct ContentView: View {
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search")
-        .onAppear { library.undoManager = undoManager }
+        .onAppear {
+            library.undoManager = undoManager
+            openRequestedSection()
+        }
+        .onChange(of: library.requestedSection) { _, _ in openRequestedSection() }
         .onChange(of: undoManager) { _, manager in library.undoManager = manager }
+    }
+
+    /// The menu bar popover asks for a section ("Open Disk").
+    private func openRequestedSection() {
+        guard let section = library.requestedSection else { return }
+        selection = .section(section)
+        library.requestedSection = nil
     }
 }

@@ -112,3 +112,28 @@ if [ ! -f "$DEV/.desktop-seeded" ]; then
   printf '%s\n' "{\"display\":\"Run the evals with $OAI\",\"pastedContents\":{},\"timestamp\":1763629300000,\"project\":\"/Users/dev/code/orbit-api\",\"sessionId\":\"aaaaaaaa-1111-4111-8111-111111111111\"}" >> "$H"
   touch "$DEV/.desktop-seeded"
 fi
+if [ ! -f "$DEV/.cleanups-seeded" ]; then
+  # Disk cleanups: a large rollout (sparse past its first lines), a logs database, and a clean
+  # and a dirty git worktree under .codex/worktrees, from a throwaway repo in .devhome/code.
+  CODEX="$DEV/.codex"
+  BIG="$CODEX/sessions/2026/11/21/rollout-2026-11-21T10-00-00-01a1f066-6666-7666-8666-666666666666.jsonl"
+  mkdir -p "$(dirname "$BIG")"
+  printf '%s\n' '{"timestamp":"2026-11-21T10:00:00.000Z","type":"session_meta","payload":{"id":"01a1f066-6666-7666-8666-666666666666","cwd":"/Users/dev/code/orbit-api","cli_version":"0.169.0"}}' > "$BIG"
+  seq 1 200000 | sed 's/.*/{"timestamp":"2026-11-21T10:01:00.000Z","type":"compacted","payload":{"n":&,"message":"synthetic compaction snapshot of an earlier turn"}}/' >> "$BIG"
+  dd if=/dev/null of="$BIG" bs=1 count=0 seek=150m 2>/dev/null
+  touch -t "$(date -v-3d +%Y%m%d%H%M)" "$BIG"
+  sqlite3 "$CODEX/logs_2.sqlite" "CREATE TABLE logs(id INTEGER PRIMARY KEY, body BLOB); INSERT INTO logs(body) VALUES (randomblob(2000000));"
+  dd if=/dev/urandom of="$CODEX/logs_2.sqlite-wal" bs=1k count=512 2>/dev/null
+  G() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c user.name=Dev -c user.email=dev@example.invalid -c commit.gpgsign=false "$@" >/dev/null 2>&1; }
+  REPO="$DEV/code/orbit-api"
+  mkdir -p "$REPO"
+  G -C "$REPO" init -b main
+  printf '# orbit-api\n' > "$REPO/README.md"
+  G -C "$REPO" add README.md
+  G -C "$REPO" commit -m "Initial commit"
+  mkdir -p "$CODEX/worktrees/1f2e" "$CODEX/worktrees/7c9a"
+  G -C "$REPO" worktree add --detach "$CODEX/worktrees/1f2e/orbit-api" main
+  G -C "$REPO" worktree add --detach "$CODEX/worktrees/7c9a/orbit-api" main
+  printf 'work in progress\n' >> "$CODEX/worktrees/7c9a/orbit-api/README.md"
+  touch "$DEV/.cleanups-seeded"
+fi

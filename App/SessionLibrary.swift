@@ -66,6 +66,8 @@ final class SessionLibrary {
     weak var undoManager: UndoManager?
     /// Set by the menu bar popover so the main window opens on that filter.
     var requestedFilter: StatusFilter?
+    /// Set by the menu bar popover so the main window opens on that section.
+    var requestedSection: SidebarItem?
 
     // Secret scan state, changed only by SessionLibrary+Secrets. In memory only: findings are
     // never written to disk (they hold masked previews, never values, either way).
@@ -85,6 +87,8 @@ final class SessionLibrary {
     /// Every agent the Disk screen measures: the adapters plus Claude Desktop and Cursor.
     let footprintProviders: [any FootprintProvider]
     let executor: Executor
+    /// The Disk screen's guided cleanups.
+    let cleanupPlanner: CleanupPlanner
     let home: URL
     let logger = Logger(subsystem: "io.github.turman17.Domovy", category: "SessionLibrary")
 
@@ -95,6 +99,8 @@ final class SessionLibrary {
         adapters = [claudeCode, codex]
         footprintProviders = adapters + FootprintScanner.measuredOnly(home: home)
         executor = Executor(storeRoot: storeRoot)
+        cleanupPlanner = CleanupPlanner(claudeCodeRoot: claudeCode.root, codexRoot: codex.root,
+                                        desktopSupport: home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true))
     }
 
     func adapter(for agent: AgentKind) throws -> any AgentAdapter {
@@ -114,7 +120,16 @@ final class SessionLibrary {
     var safeFootprintBytes: Int64 { footprints.reduce(0) { $0 + $1.bytes(.safe) } }
     var expiringSessions: [Session] { sessions.filter { $0.status == .expiring } }
     var liveSessions: [Session] { sessions.filter { $0.status == .live } }
-    var needsAttention: Bool { !expiringSessions.isEmpty }
+    var needsAttention: Bool { !expiringSessions.isEmpty || hasDiskWarnings }
+
+    /// Below this, disk use is not worth a warning in the menu bar.
+    static let diskWarningBytes: Int64 = 500_000_000
+    /// The Claude Desktop VM bundle's size, when it is big enough to mention.
+    var largeVMBundleBytes: Int64? {
+        category(.claudeDesktopVM).map(\.sizeBytes).flatMap { $0 > Self.diskWarningBytes ? $0 : nil }
+    }
+    var hasLargeSafeFootprint: Bool { safeFootprintBytes > Self.diskWarningBytes }
+    var hasDiskWarnings: Bool { largeVMBundleBytes != nil || hasLargeSafeFootprint }
 
     /// Agents that have at least one session, in declaration order.
     var agentsPresent: [AgentKind] {
@@ -245,7 +260,9 @@ final class SessionLibrary {
         }.value
         let titles = Set(restored.map(\.sessionID)).compactMap { id in sessions.first { $0.id == id }?.displayTitle }
         let what: String
-        if let scope = restored.first.flatMap({ OrphanScope(rawValue: $0.sessionID) }) {
+        if let cleanup = restored.first.flatMap({ CleanupID(rawValue: $0.sessionID) }) {
+            what = cleanup.undoName
+        } else if let scope = restored.first.flatMap({ OrphanScope(rawValue: $0.sessionID) }) {
             what = scope == .orphans ? "the orphans" : "the duplicates"
         } else {
             what = titles.count == 1 ? "\u{201C}\(titles[0])\u{201D}" : "\(restored.count) sessions"
