@@ -11,7 +11,9 @@ public enum RedactionPlanner {
         case .ready: break
         }
         let own = findings.filter { $0.sessionID == session.id && $0.agent == session.agent }
-        let allowed = Set(SecretScanner.files(of: try await adapter.artifacts(of: session)))
+        let artifacts = try await adapter.artifacts(of: session)
+        let shared = Set(SecretScanner.indexLines(of: artifacts).map(\.file))
+        let allowed = Set(SecretScanner.files(of: artifacts)).union(shared)
 
         var skipped: [SkippedSecret] = []
         var byFile: [URL: [SecretFinding]] = [:]
@@ -45,7 +47,10 @@ public enum RedactionPlanner {
                 modificationTime: FileSystem.modificationTime(of: file),
                 wasCompressed: APFSCompression.isCompressed(file),
                 lines: lines.sorted { $0.offset < $1.offset },
-                note: "\(items.count) \(items.count == 1 ? "value" : "values") on \(lines.count) \(lines.count == 1 ? "line" : "lines")"
+                note: shared.contains(file)
+                    ? "\(items.count) \(items.count == 1 ? "value" : "values") on \(lines.count) of this session's \(lines.count == 1 ? "line" : "lines"); other lines stay as they are"
+                    : "\(items.count) \(items.count == 1 ? "value" : "values") on \(lines.count) \(lines.count == 1 ? "line" : "lines")",
+                isLineLevel: shared.contains(file)
             )
         }
 
@@ -56,7 +61,7 @@ public enum RedactionPlanner {
         if redactions.contains(where: \.wasCompressed) {
             remarks.append("Archived files are compressed again after the rewrite.")
         }
-        remarks.append(contentsOf: otherCopiesRemark(for: adapter))
+        remarks.append(contentsOf: otherCopiesRemark(for: adapter, redactsHistory: redactions.contains(where: \.isLineLevel)))
 
         let live = try await adapter.liveCheck(session)
         return Plan(
@@ -74,10 +79,10 @@ public enum RedactionPlanner {
     }
 
     /// Where the agent may keep the same text that Domovy does not change.
-    private static func otherCopiesRemark(for adapter: any AgentAdapter) -> [String] {
+    private static func otherCopiesRemark(for adapter: any AgentAdapter, redactsHistory: Bool) -> [String] {
         switch adapter.kind {
         case .claudeCode:
-            return ["Your prompt history (history.jsonl) is shared by all sessions; Domovy does not scan or change it."]
+            return redactsHistory ? ["Only this session's lines of your prompt history (history.jsonl) change; the file keeps its other lines and its modification time."] : []
         case .codex:
             let database = adapter.root.appendingPathComponent("thread_history_1.sqlite")
             guard FileSystem.exists(database) else { return [] }

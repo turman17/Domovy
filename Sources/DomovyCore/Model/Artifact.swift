@@ -15,11 +15,25 @@ public struct Artifact: Hashable, Codable, Sendable {
     public let sizeBytes: Int64
     /// One line that tells the user what this is ("Transcript", "Checkpoint snapshots").
     public let note: String
+    /// For an `indexEntry` of JSON lines: the key and value that pick this session's lines.
+    public let match: IndexMatch?
 
-    public init(url: URL, kind: Kind, sizeBytes: Int64, note: String) {
+    public init(url: URL, kind: Kind, sizeBytes: Int64, note: String, match: IndexMatch? = nil) {
         self.url = url
         self.kind = kind
         self.sizeBytes = sizeBytes
         self.note = note
+        self.match = match
+    }
+}
+
+/// Lines of a shared `.jsonl` file whose JSON object has `key` equal to `value`.
+public struct IndexMatch: Hashable, Codable, Sendable {
+    public let key: String
+    public let value: String
+
+    public init(key: String, value: String) {
+        self.key = key
+        self.value = value
     }
 }

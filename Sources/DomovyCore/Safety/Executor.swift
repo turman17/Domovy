@@ -126,7 +126,7 @@ public struct Executor: Sendable {
         }
         if plan.action == .archive { return try compress(plan, entry: entry) }
         if plan.action == .redact { return try redact(plan, entry: entry) }
-        Log.executor.info("Executing plan \(plan.id, privacy: .public) for session \(plan.sessionID, privacy: .public): \(plan.moves.count) moves, \(plan.indexEdits.count) index edits")
+        Log.executor.info("Executing plan \(plan.id, privacy: .public) for session \(plan.sessionID, privacy: .public): \(plan.moves.count) moves, \(plan.indexEdits.count) index edits, \(plan.registryRemovals.count) registry entries")
 
         let present = plan.moves.filter { FileSystem.exists($0.source) }
         for (index, move) in present.enumerated() {
@@ -148,6 +148,19 @@ public struct Executor: Sendable {
                 entry.failure = error.localizedDescription
                 try undoLog.write(entry)
                 throw ExecutorError.indexEditFailed(edit.file, reason: error.localizedDescription)
+            }
+        }
+
+        for (index, removal) in plan.registryRemovals.enumerated() where FileSystem.exists(removal.file) {
+            do {
+                if let restore = try removeRegistryFile(removal, destination: plan.destination ?? .trash, entry: entry, ordinal: present.count + index) {
+                    entry.registryRestores.append(restore)
+                    try undoLog.write(entry)
+                }
+            } catch {
+                entry.failure = error.localizedDescription
+                try undoLog.write(entry)
+                throw ExecutorError.indexEditFailed(removal.file, reason: error.localizedDescription)
             }
         }
 
@@ -249,7 +262,7 @@ public struct Executor: Sendable {
         return UndoEntry.IndexRestore(file: edit.file, backup: backup, removedLines: removed, modificationTime: mtime)
     }
 
-    private func writeBackup(_ data: Data, of file: URL, entry: UndoEntry, modificationTime: FileTime?) throws -> URL {
+    func writeBackup(_ data: Data, of file: URL, entry: UndoEntry, modificationTime: FileTime?) throws -> URL {
         let backupDir = undoLog.backupDirectory(for: entry)
         try fileManager.createDirectory(at: backupDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         var backup = backupDir.appendingPathComponent(file.lastPathComponent)
@@ -264,7 +277,7 @@ public struct Executor: Sendable {
         return backup
     }
 
-    private func relocate(_ source: URL, to destination: Destination, entry: UndoEntry, ordinal: Int) throws -> URL {
+    func relocate(_ source: URL, to destination: Destination, entry: UndoEntry, ordinal: Int) throws -> URL {
         switch destination {
         case .trash:
             var result: NSURL?
@@ -303,7 +316,7 @@ public struct Executor: Sendable {
         return UndoEntry.IndexRestore(file: edit.file, backup: backup, removedLines: removed, modificationTime: mtime)
     }
 
-    private func writePreservingMetadata(_ data: Data, to url: URL, modificationTime: FileTime?, permissions: Int?) throws {
+    func writePreservingMetadata(_ data: Data, to url: URL, modificationTime: FileTime?, permissions: Int?) throws {
         try data.write(to: url, options: [.atomic])
         if let permissions { try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path) }
         if let modificationTime { try FileSystem.setModificationTime(modificationTime, of: url) }
@@ -377,6 +390,7 @@ public struct Executor: Sendable {
         entry.compressed = []
 
         try restoreRedacted(&entry)
+        try restoreRegistryFiles(&entry)
 
         for restore in entry.indexRestores {
             do {

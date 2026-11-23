@@ -32,6 +32,8 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
     /// The transcript is compressed. True also when `status` reports something more urgent
     /// (live, expiring): compression keeps mtimes, so the agent's sweep still applies.
     public let isArchived: Bool
+    /// Claude Desktop also lists this session (a Claude Code session started from Desktop).
+    public let desktop: DesktopLink?
 
     public init(
         id: String,
@@ -43,7 +45,8 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         status: Status,
         expiresAt: Date?,
         transcriptURL: URL,
-        isArchived: Bool = false
+        isArchived: Bool = false,
+        desktop: DesktopLink? = nil
     ) {
         self.id = id
         self.agent = agent
@@ -55,6 +58,12 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         self.expiresAt = expiresAt
         self.transcriptURL = transcriptURL
         self.isArchived = isArchived
+        self.desktop = desktop
+    }
+
+    /// "Claude Code · Desktop" when Claude Desktop lists the session too.
+    public var agentLabel: String {
+        desktop == nil ? agent.displayName : "\(agent.displayName) \u{00B7} Desktop"
     }
 
     /// Last path component of the project, for compact display.

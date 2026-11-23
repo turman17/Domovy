@@ -38,6 +38,26 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
         public let modificationTime: FileTime?
         public let replacements: Int
         public let sizeBytes: Int64
+        /// Set for a shared index file (`history.jsonl`) redacted line by line: undo puts only
+        /// these lines back, so lines the agent appended since stay.
+        public var lines: [RedactedLine]?
+    }
+
+    /// One line a line-level redaction rewrote: where it sat in the original copy, and what
+    /// replaced which range. Never the value itself.
+    public struct RedactedLine: Codable, Sendable, Hashable {
+        public let offset: Int64
+        public let length: Int
+        public let replacements: [FileRedaction.Replacement]
+    }
+
+    /// A registry file the plan removed. Undo moves it back, or copies the backup when the
+    /// moved file is gone (the Trash was emptied).
+    public struct RegistryRestore: Codable, Sendable, Hashable {
+        public let file: URL
+        public let backup: URL
+        public let current: URL
+        public let modificationTime: FileTime?
     }
 
     public let id: UUID
@@ -62,6 +82,7 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
     /// Set when execution stopped half way; `undo` still restores what did move.
     public var failure: String?
     public var redacted: [RedactedItem] = []
+    public var registryRestores: [RegistryRestore] = []
     /// Possible secrets the scan had found in the session when it was deleted.
     public var secretFindingCount = 0
     /// When Purge originals deleted this entry's quarantined files; it cannot be undone after.
@@ -76,7 +97,7 @@ extension UndoEntry {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, planID, batchID, action, agent, sessionID, destination
         case moved, indexRestores, compressed, undoCommands, mustNotBeRunning, leftovers, undoneAt, failure
-        case redacted, secretFindingCount, originalsPurgedAt
+        case redacted, secretFindingCount, originalsPurgedAt, registryRestores
     }
 
     /// Entries written by older versions lack the newer fields; they decode with empty defaults.
@@ -103,6 +124,7 @@ extension UndoEntry {
         redacted = try c.decodeIfPresent([RedactedItem].self, forKey: .redacted) ?? []
         secretFindingCount = try c.decodeIfPresent(Int.self, forKey: .secretFindingCount) ?? 0
         originalsPurgedAt = try c.decodeIfPresent(Date.self, forKey: .originalsPurgedAt)
+        registryRestores = try c.decodeIfPresent([RegistryRestore].self, forKey: .registryRestores) ?? []
     }
 }
 

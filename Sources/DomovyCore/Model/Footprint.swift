@@ -26,6 +26,8 @@ public struct Footprint: Hashable, Codable, Sendable {
         case manageInSessions
         /// Steps the user takes in the agent itself.
         case instructions(String)
+        /// Domovy's orphan cleanup plan (Disk screen, `domo orphans`).
+        case cleanUpOrphans
     }
 
     public struct Category: Identifiable, Hashable, Codable, Sendable {

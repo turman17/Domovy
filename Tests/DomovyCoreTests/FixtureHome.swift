@@ -1,5 +1,6 @@
 import DomovyCore
 import Foundation
+import Testing
 
 /// A throwaway home directory built from `Tests/Fixtures/<agent>/<version>/`.
 /// Tests never touch the real home; everything happens under a unique temp folder.
@@ -57,16 +58,70 @@ final class FixtureHome: Sendable {
     static let markerPIDs: Set<Int32> = [4242, 9002]
 
     /// Deterministic liveness: no libproc, and only the fixture's own marker pids "run".
+    /// Linked to Claude Desktop's registry once `installDesktop()` copied it; Desktop is not
+    /// running unless `desktopProcesses` says so.
     func adapter(
         now: @escaping @Sendable () -> Date = { Date() },
         openHandles: any OpenHandleChecker = UnavailableOpenHandleChecker(),
-        processes: any ProcessProbe = FixedProcessProbe(running: FixtureHome.markerPIDs)
+        processes: any ProcessProbe = FixedProcessProbe(running: FixtureHome.markerPIDs),
+        desktopProcesses: any RunningProcessLister = FixedProcessLister([])
     ) -> ClaudeCodeAdapter {
-        ClaudeCodeAdapter(configDirectory: claudeDirectory, openHandles: openHandles, processes: processes, now: now)
+        ClaudeCodeAdapter(
+            configDirectory: claudeDirectory,
+            openHandles: openHandles,
+            processes: processes,
+            desktopRegistry: FileManager.default.fileExists(atPath: registryDirectory.path) ? ClaudeDesktopRegistry(directory: registryDirectory) : nil,
+            desktopProcesses: desktopProcesses,
+            now: now
+        )
     }
 
-    func executor() -> Executor {
-        Executor(storeRoot: storeRoot)
+    /// Never libproc: the apps a plan must not run alongside are whatever `running` says.
+    func executor(running: [RunningProcess] = []) -> Executor {
+        Executor(storeRoot: storeRoot, processes: FixedProcessLister(running))
+    }
+
+    // MARK: Claude Desktop
+
+    /// Synthetic ids of the claude-desktop fixture's registry (`claude-code-sessions/`).
+    enum Desktop {
+        static let folder = "3f6e1a2b-0c4d-4e5f-8a9b-1c2d3e4f5a6b/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+        /// Links the idle session.
+        static let idleEntry = 1
+        /// Two entries for the expiring session; the second is newer.
+        static let expiringOlder = 2
+        static let expiringNewer = 3
+        /// Its transcript does not exist.
+        static let orphanEntry = 4
+        static let orphanCLI = "ffffffff-6666-4666-8666-666666666666"
+    }
+
+    var desktopSupport: URL { home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true) }
+    var registryDirectory: URL { desktopSupport.appendingPathComponent("claude-code-sessions", isDirectory: true) }
+
+    func registryFile(_ number: Int) -> URL {
+        registryDirectory.appendingPathComponent("\(Desktop.folder)/local_5e1d2f3a-0000-4000-8000-00000000000\(number).json")
+    }
+
+    /// Copies `claude-desktop/1.0` into the home. Registry entries get pinned ages: all two
+    /// days old, the newer duplicate one day.
+    func installDesktop(now: Date = Date()) throws {
+        try FileManager.default.createDirectory(at: desktopSupport.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: Self.fixturesRoot.appendingPathComponent("claude-desktop/1.0", isDirectory: true), to: desktopSupport)
+        for number in 1...4 {
+            let age: TimeInterval = number == Desktop.expiringNewer ? 86_400 : 2 * 86_400
+            try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-age)], ofItemAtPath: registryFile(number).path)
+        }
+    }
+
+    /// Rewrites one registry entry's JSON, keeping its modification time.
+    func editRegistry(_ number: Int, _ change: (inout [String: Any]) -> Void) throws {
+        let url = registryFile(number)
+        let date = try #require(try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+        var object = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        change(&object)
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
     }
 
     func exists(_ relative: String) -> Bool {

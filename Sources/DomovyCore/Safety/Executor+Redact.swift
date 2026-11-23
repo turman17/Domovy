@@ -25,7 +25,11 @@ extension Executor {
         let matcher = SecretMatcher()
         for (index, item) in present.enumerated() {
             do {
-                try redactFile(item, ordinal: index, matcher: matcher, entry: &entry)
+                if item.isLineLevel {
+                    try redactLines(item, ordinal: index, matcher: matcher, entry: &entry)
+                } else {
+                    try redactFile(item, ordinal: index, matcher: matcher, entry: &entry)
+                }
             } catch {
                 entry.failure = error.localizedDescription
                 try undoLog.write(entry)
@@ -106,23 +110,30 @@ extension Executor {
             guard read.count >= edit.length, read.count == edit.length || read.last == UInt8(ascii: "\n") else {
                 throw RedactionError.lineMoved(line: edit.line)
             }
-            let line = read.prefix(edit.length)
-            let found = Set(matcher.matches(in: Data(line)).map { "\($0.ruleID)@\($0.range)" })
-            var bytes = [UInt8](line)
-            for replacement in edit.replacements.sorted(by: { $0.range.lowerBound > $1.range.lowerBound }) {
-                guard found.contains("\(replacement.ruleID)@\(replacement.range)"),
-                      JSONText.isInsideString(replacement.range, of: [UInt8](line)) else {
-                    throw RedactionError.valueMoved(line: edit.line)
-                }
-                bytes.replaceSubrange(replacement.range, with: Array(SecretRule.replacement(for: replacement.ruleID).utf8))
-            }
-            guard JSONText.isValidJSON(Data(bytes)) else { throw RedactionError.wouldBreakJSON(line: edit.line) }
+            let bytes = try Self.redactedLine(Data(read.prefix(edit.length)), edit: edit, matcher: matcher)
             try output.write(contentsOf: Data(bytes))
             if read.count > edit.length { try output.write(contentsOf: Data([UInt8(ascii: "\n")])) }
             cursor += Int64(read.count)
         }
         try copy(upTo: .max)
         try output.synchronize()
+    }
+
+    /// One line with its planned values replaced, after checking each value is still matched by
+    /// its rule, inside a JSON string, and that the line stays valid JSON.
+    static func redactedLine(_ line: Data, edit: FileRedaction.LineEdit, matcher: SecretMatcher) throws -> [UInt8] {
+        let found = Set(matcher.matches(in: line).map { "\($0.ruleID)@\($0.range)" })
+        let original = [UInt8](line)
+        var bytes = original
+        for replacement in edit.replacements.sorted(by: { $0.range.lowerBound > $1.range.lowerBound }) {
+            guard found.contains("\(replacement.ruleID)@\(replacement.range)"),
+                  JSONText.isInsideString(replacement.range, of: original) else {
+                throw RedactionError.valueMoved(line: edit.line)
+            }
+            bytes.replaceSubrange(replacement.range, with: Array(SecretRule.replacement(for: replacement.ruleID).utf8))
+        }
+        guard JSONText.isValidJSON(Data(bytes)) else { throw RedactionError.wouldBreakJSON(line: edit.line) }
+        return bytes
     }
 
     /// Puts each redacted file's original back, newest first. A file the agent wrote to since
@@ -133,6 +144,11 @@ extension Executor {
             do {
                 guard FileSystem.exists(item.original) else {
                     throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "its original is no longer in Domovy's quarantine"])
+                }
+                if let lines = item.lines {
+                    try restoreLines(lines, of: item)
+                    remaining.removeAll { $0 == item }
+                    continue
                 }
                 if FileSystem.exists(item.file), FileSystem.modificationTime(of: item.file) != item.modificationTime {
                     throw CocoaError(.fileWriteFileExists, userInfo: [NSLocalizedDescriptionKey: "it changed since it was redacted, so Domovy left it as it is"])

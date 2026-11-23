@@ -10,23 +10,47 @@ public struct ProcessMatcher: Hashable, Codable, Sendable {
     public let names: Set<String>
     /// Name prefixes of helper processes, lowercased ("codex-").
     public let prefixes: [String]
+    /// Exact process names matched case-sensitively, for apps whose name differs from
+    /// another tool's only by case (the `Claude` desktop app versus the `claude` CLI).
+    public let exactNames: Set<String>
     /// When set, a matching process blocks only while it holds a file open below this folder.
     /// A daemon that serves another home (the ChatGPT app's codex app-server) then does not block.
     public let scope: URL?
     /// What the user should do, e.g. "Quit the ChatGPT app or Codex to change this session."
     public let quitAdvice: String?
 
-    public init(appName: String, names: Set<String>, prefixes: [String] = [], scope: URL? = nil, quitAdvice: String? = nil) {
+    public init(appName: String, names: Set<String>, prefixes: [String] = [], exactNames: Set<String> = [], scope: URL? = nil, quitAdvice: String? = nil) {
         self.appName = appName
         self.names = names
         self.prefixes = prefixes
+        self.exactNames = exactNames
         self.scope = scope?.standardizedFileURL
         self.quitAdvice = quitAdvice
     }
 
     public func matches(_ processName: String) -> Bool {
+        if exactNames.contains(processName) { return true }
         let name = processName.lowercased()
         return names.contains(name) || prefixes.contains { name.hasPrefix($0) }
+    }
+}
+
+extension ProcessMatcher {
+    private enum CodingKeys: String, CodingKey {
+        case appName, names, prefixes, exactNames, scope, quitAdvice
+    }
+
+    /// Undo entries written before `exactNames` existed decode with none.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            appName: try c.decode(String.self, forKey: .appName),
+            names: try c.decode(Set<String>.self, forKey: .names),
+            prefixes: try c.decodeIfPresent([String].self, forKey: .prefixes) ?? [],
+            exactNames: try c.decodeIfPresent(Set<String>.self, forKey: .exactNames) ?? [],
+            scope: try c.decodeIfPresent(URL.self, forKey: .scope),
+            quitAdvice: try c.decodeIfPresent(String.self, forKey: .quitAdvice)
+        )
     }
 }
 
@@ -59,7 +83,8 @@ extension RunningProcessLister {
             guard !found.isEmpty else { return nil }
             guard let scope = matcher.scope else {
                 let pids = found.prefix(3).map { "\($0.name), pid \($0.pid)" }.joined(separator: "; ")
-                return "\(matcher.appName) is running (\(pids)). Quit \(matcher.appName) first; it may rewrite its index while this runs."
+                let advice = matcher.quitAdvice ?? "Quit \(matcher.appName) first; it may rewrite its index while this runs."
+                return "\(matcher.appName) is running (\(pids)). \(advice)"
             }
             return scopedReason(matcher, scope: scope, found: found)
         }

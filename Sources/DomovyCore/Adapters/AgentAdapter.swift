@@ -52,11 +52,17 @@ public protocol AgentAdapter: FootprintProvider {
     func liveCheck(_ session: Session) async throws -> LiveCheckResult
     func deletePlan(for session: Session, destination: Destination) async throws -> Plan
     func archivePlan(for session: Session) async throws -> Plan
-    /// The first `limit` messages of the conversation, for display only.
-    func transcript(of session: Session, limit: Int) async throws -> Transcript
+    /// The first `limit` messages of the conversation, for display only. Values of `findings`
+    /// in the transcript are replaced by their masked previews before anything is parsed.
+    func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript
 }
 
 extension AgentAdapter {
+    /// The first `limit` messages, unmasked.
+    public func transcript(of session: Session, limit: Int) async throws -> Transcript {
+        try await transcript(of: session, limit: limit, masking: [])
+    }
+
     /// Delete plan with the default, reversible destination.
     public func deletePlan(for session: Session) async throws -> Plan {
         try await deletePlan(for: session, destination: .trash)

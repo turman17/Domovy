@@ -83,9 +83,23 @@ public struct SecretScanProgress: Sendable {
 public struct SecretScanTarget: Sendable {
     public let session: Session
     public let files: [URL]
+    /// Shared index files (`history.jsonl`) of which only this session's lines are read.
+    public let indexLines: [IndexLines]
 
-    public init(session: Session, files: [URL]) {
+    public init(session: Session, files: [URL], indexLines: [IndexLines] = []) {
         self.session = session
         self.files = files
+        self.indexLines = indexLines
+    }
+}
+
+/// The lines of a shared `.jsonl` file that belong to one session.
+public struct IndexLines: Hashable, Sendable {
+    public let file: URL
+    public let match: IndexMatch
+
+    public init(file: URL, match: IndexMatch) {
+        self.file = file
+        self.match = match
     }
 }

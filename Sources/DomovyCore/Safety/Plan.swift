@@ -50,6 +50,26 @@ public struct IndexEdit: Hashable, Codable, Sendable {
     }
 }
 
+/// A whole index file that leaves an app's list, such as one Claude Desktop registry entry
+/// (`local_<uuid>.json`). The executor backs it up first and moves it like any other file;
+/// undo puts it back with its modification time.
+public struct RegistryRemoval: Hashable, Codable, Sendable {
+    public let file: URL
+    /// The executor removes the file only if its JSON still carries this key and value.
+    public let matchKey: String
+    public let matchValue: String
+    public let sizeBytes: Int64
+    public let note: String
+
+    public init(file: URL, matchKey: String, matchValue: String, sizeBytes: Int64, note: String) {
+        self.file = file
+        self.matchKey = matchKey
+        self.matchValue = matchValue
+        self.sizeBytes = sizeBytes
+        self.note = note
+    }
+}
+
 /// One file that an archive rewrites in place with APFS transparent compression.
 /// The agent reads it exactly as before; only the on-disk size changes.
 public struct FileCompression: Hashable, Codable, Sendable {
@@ -90,6 +110,8 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     public let destination: Destination?
     public let moves: [FileMove]
     public let indexEdits: [IndexEdit]
+    /// Index files removed whole (Claude Desktop registry entries).
+    public let registryRemovals: [RegistryRemoval]
     public let compressions: [FileCompression]
     /// The agent's own commands, run before any move or edit (e.g. `codex delete`).
     public let commands: [PlannedCommand]
@@ -115,6 +137,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         destination: Destination?,
         moves: [FileMove],
         indexEdits: [IndexEdit],
+        registryRemovals: [RegistryRemoval] = [],
         compressions: [FileCompression] = [],
         commands: [PlannedCommand] = [],
         redactions: [FileRedaction] = [],
@@ -131,6 +154,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         self.destination = destination
         self.moves = moves
         self.indexEdits = indexEdits
+        self.registryRemovals = registryRemovals
         self.compressions = compressions
         self.commands = commands
         self.redactions = redactions
@@ -142,6 +166,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
 
     public var totalBytes: Int64 {
         moves.reduce(0) { $0 + $1.sizeBytes } + indexEdits.reduce(0) { $0 + $1.removedBytes }
+            + registryRemovals.reduce(0) { $0 + $1.sizeBytes }
             + compressions.reduce(0) { $0 + $1.sizeBytes } + commands.reduce(0) { $0 + $1.sizeBytes }
     }
 
@@ -151,7 +176,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     }
 
     public var isEmpty: Bool {
-        moves.isEmpty && indexEdits.isEmpty && compressions.isEmpty && commands.isEmpty && redactions.isEmpty
+        moves.isEmpty && indexEdits.isEmpty && registryRemovals.isEmpty && compressions.isEmpty && commands.isEmpty && redactions.isEmpty
     }
 
     /// Values a redaction replaces, across all files.
@@ -190,6 +215,10 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         for edit in indexEdits {
             let n = edit.lineNumbers.count
             parts.append("removes \(n) \(n == 1 ? "line" : "lines") from \(edit.file.lastPathComponent)")
+        }
+        if !registryRemovals.isEmpty {
+            let n = registryRemovals.count
+            parts.append("takes \(n) \(n == 1 ? "entry" : "entries") off Claude Desktop's session list")
         }
         guard !parts.isEmpty || !commands.isEmpty else { return remarks.first ?? "Nothing to do." }
         let rest = parts.isEmpty ? "" : parts.joined(separator: " and ") + ". "
@@ -250,14 +279,18 @@ public struct FileRedaction: Hashable, Codable, Sendable {
     public let wasCompressed: Bool
     public let lines: [LineEdit]
     public let note: String
+    /// A shared index file (`history.jsonl`) the agent keeps appending to: only the planned
+    /// lines are checked and rewritten, and undo puts back only those lines.
+    public let isLineLevel: Bool
 
-    public init(file: URL, sizeBytes: Int64, modificationTime: FileTime?, wasCompressed: Bool, lines: [LineEdit], note: String) {
+    public init(file: URL, sizeBytes: Int64, modificationTime: FileTime?, wasCompressed: Bool, lines: [LineEdit], note: String, isLineLevel: Bool = false) {
         self.file = file
         self.sizeBytes = sizeBytes
         self.modificationTime = modificationTime
         self.wasCompressed = wasCompressed
         self.lines = lines
         self.note = note
+        self.isLineLevel = isLineLevel
     }
 
     public var replacementCount: Int { lines.reduce(0) { $0 + $1.replacements.count } }

@@ -12,7 +12,8 @@ public struct TranscriptReader: Sendable {
         self.maxBytes = maxBytes
     }
 
-    public func read(_ url: URL) throws -> Transcript {
+    public func read(_ url: URL, masking findings: [SecretFinding] = []) throws -> Transcript {
+        let mask = TranscriptMask(findings: findings, file: url)
         let handle: FileHandle
         do {
             handle = try FileHandle(forReadingFrom: url)
@@ -30,17 +31,22 @@ public struct TranscriptReader: Sendable {
         // A cut-off final line is not a complete record.
         if truncated, budget.last != UInt8(ascii: "\n") { lines.removeLast() }
         var cwd: String?
-        for (index, line) in lines.enumerated() {
+        var hidden = 0
+        for (index, raw) in lines.enumerated() {
             if messages.count >= maxMessages {
                 truncated = true
                 break
             }
-            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            guard let line = mask.apply(Data(raw), at: Int64(raw.startIndex - data.startIndex)) else {
+                hidden += 1
+                continue
+            }
+            guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             if cwd == nil, let dir = object["cwd"] as? String, !dir.isEmpty { cwd = dir }
             guard let message = Self.message(from: object, lineIndex: index, cwd: cwd) else { continue }
             messages.append(message)
         }
-        return Transcript(messages: messages, isTruncated: truncated)
+        return Transcript(messages: messages, isTruncated: truncated, hiddenLineCount: hidden)
     }
 
     // MARK: Records

@@ -6,10 +6,13 @@ public struct Transcript: Hashable, Sendable {
     public let messages: [TranscriptMessage]
     /// True when the file holds more than was read.
     public let isTruncated: Bool
+    /// Lines left out because they hold a possible secret that could not be masked.
+    public let hiddenLineCount: Int
 
-    public init(messages: [TranscriptMessage], isTruncated: Bool) {
+    public init(messages: [TranscriptMessage], isTruncated: Bool, hiddenLineCount: Int = 0) {
         self.messages = messages
         self.isTruncated = isTruncated
+        self.hiddenLineCount = hiddenLineCount
     }
 
     public static let empty = Transcript(messages: [], isTruncated: false)

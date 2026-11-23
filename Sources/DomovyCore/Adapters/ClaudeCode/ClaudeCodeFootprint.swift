@@ -21,7 +21,8 @@ extension ClaudeCodeAdapter {
 
         let orphans = orphanedCompanions(slugs: slugs)
         builder.add("Orphaned companions", orphans, reveal: root, .safe,
-                    "\(orphans.count) \(orphans.count == 1 ? "folder" : "folders") whose transcript is already gone.")
+                    "\(orphans.count) \(orphans.count == 1 ? "folder" : "folders") whose transcript is already gone.",
+                    guidance: .cleanUpOrphans)
 
         let transcripts = slugs.flatMap { builder.unclaimedChildren(of: $0) }
         let count = transcripts.filter { ClaudeCodeLayout.sessionID(ofTranscriptNamed: $0.lastPathComponent) != nil }.count

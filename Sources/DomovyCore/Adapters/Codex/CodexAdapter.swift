@@ -196,9 +196,9 @@ public struct CodexAdapter: AgentAdapter {
                     liveCheck: await planCheck(id: id, files: active, touchesIndex: false))
     }
 
-    public func transcript(of session: Session, limit: Int) async throws -> Transcript {
+    public func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript {
         try requireOurs(session)
-        return try CodexRollout.readTranscript(of: session.transcriptURL, maxMessages: limit)
+        return try CodexRollout.readTranscript(of: session.transcriptURL, maxMessages: limit, masking: findings)
     }
 
     // MARK: Building sessions

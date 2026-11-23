@@ -1,7 +1,7 @@
 import Foundation
 
-/// Disk use of Claude Desktop (`~/Library/Application Support/Claude`). Measuring only:
-/// Desktop sessions are not listed yet, and nothing here changes a file.
+/// Disk use of Claude Desktop (`~/Library/Application Support/Claude`). Measuring only;
+/// its Claude Code sessions are listed through `ClaudeDesktopRegistry`.
 public struct ClaudeDesktopFootprint: FootprintProvider {
     public let kind: AgentKind = .claudeDesktop
     public let root: URL
@@ -29,7 +29,7 @@ public struct ClaudeDesktopFootprint: FootprintProvider {
         builder.add("Cowork sessions", url("local-agent-mode-sessions"), .consequences,
                     "Cowork history and scheduled tasks. They are gone for good once removed.")
         builder.add("Session registry", url("claude-code-sessions"), .keep,
-                    "Desktop's list of Claude Code sessions. Domovy only reads it.")
+                    "Desktop's list of Claude Code sessions. Domovy changes it only while Claude Desktop is quit.")
         builder.add("Other", builder.unclaimedChildren(of: root), reveal: root, .keep,
                     "Settings, sign-in and app state Claude Desktop needs.")
         return builder.build()

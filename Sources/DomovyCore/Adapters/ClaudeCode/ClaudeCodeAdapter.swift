@@ -9,30 +9,48 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     public let expiringWindowDays: Int
     let layout: ClaudeCodeLayout
     let liveness: ClaudeCodeLiveness
+    /// Claude Desktop's list of Claude Code sessions, when this home has one.
+    let desktopRegistry: ClaudeDesktopRegistry?
+    /// Running-Claude-Desktop check before a plan touches its registry.
+    let desktopProcesses: any RunningProcessLister
     let now: @Sendable () -> Date
 
     /// - Parameters:
     ///   - configDirectory: the `.claude` folder to scan. Tests pass a copy of a fixture.
     ///   - openHandles: open-file-handle check; libproc by default, a stub in tests.
     ///   - processes: pid existence check used to ignore stale liveness markers.
+    ///   - desktopRegistry: Claude Desktop's session list to link sessions to; `nil` for none.
+    ///   - desktopProcesses: running-Claude-Desktop check; libproc by default, fixed in tests.
     ///   - now: clock, injectable for tests.
     public init(
         configDirectory: URL,
         expiringWindowDays: Int = 7,
         openHandles: any OpenHandleChecker = LibprocOpenHandleChecker(),
         processes: any ProcessProbe = KillProcessProbe(),
+        desktopRegistry: ClaudeDesktopRegistry? = nil,
+        desktopProcesses: any RunningProcessLister = LibprocProcessLister(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.root = configDirectory.standardizedFileURL
         self.expiringWindowDays = expiringWindowDays
         self.layout = ClaudeCodeLayout(root: self.root)
         self.liveness = ClaudeCodeLiveness(layout: layout, openHandles: openHandles, processes: processes)
+        self.desktopRegistry = desktopRegistry
+        self.desktopProcesses = desktopProcesses
         self.now = now
     }
 
-    /// Convenience for a home directory: `<home>/.claude`.
+    /// Convenience for a home directory: `<home>/.claude`, linked to Claude Desktop's list.
     public init(home: URL) {
-        self.init(configDirectory: home.appendingPathComponent(".claude", isDirectory: true))
+        self.init(
+            configDirectory: home.appendingPathComponent(".claude", isDirectory: true),
+            desktopRegistry: ClaudeDesktopRegistry(home: home)
+        )
+    }
+
+    /// Claude Desktop's registry as it is now, or an empty one.
+    func desktopSnapshot() -> ClaudeDesktopRegistry.Snapshot {
+        desktopRegistry?.snapshot() ?? .empty
     }
 
     // MARK: AgentAdapter
@@ -47,11 +65,12 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         case .ready, .readOnly: break
         }
         let settings = ClaudeCodeSettings.load(from: layout.settings)
+        let desktop = desktopSnapshot()
         var result: [Session] = []
         for slug in FileSystem.children(of: layout.projects) where FileSystem.isDirectory(slug) {
             for entry in FileSystem.children(of: slug) {
                 guard let id = ClaudeCodeLayout.sessionID(ofTranscriptNamed: entry.lastPathComponent) else { continue }
-                result.append(await makeSession(id: id, transcript: entry, slug: slug, settings: settings))
+                result.append(await makeSession(id: id, transcript: entry, slug: slug, settings: settings, desktop: desktop))
             }
         }
         return result.sorted { $0.lastActive > $1.lastActive }
@@ -59,7 +78,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
 
     public func artifacts(of session: Session) async throws -> [Artifact] {
         try requireOurs(session)
-        return collectArtifacts(id: session.id, transcript: session.transcriptURL)
+        return collectArtifacts(id: session.id, transcript: session.transcriptURL, desktop: desktopSnapshot())
     }
 
     public func liveCheck(_ session: Session) async throws -> LiveCheckResult {
@@ -72,20 +91,36 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         try requireOurs(session)
         try requireWritable()
 
-        let artifacts = collectArtifacts(id: session.id, transcript: session.transcriptURL)
+        let desktop = desktopSnapshot()
+        let artifacts = collectArtifacts(id: session.id, transcript: session.transcriptURL, desktop: desktop)
         var moves: [FileMove] = []
         var edits: [IndexEdit] = []
+        var removals: [RegistryRemoval] = []
+        var remarks: [String] = []
         for artifact in artifacts {
             // Defensive: collectArtifacts never produces protected paths, but a plan must prove it.
             if layout.isProtected(artifact.url) { throw AdapterError.protectedPathInPlan(artifact.url) }
             switch artifact.kind {
             case .file, .folder:
                 moves.append(FileMove(source: artifact.url, kind: artifact.kind, sizeBytes: artifact.sizeBytes, note: artifact.note))
-            case .indexEntry:
+            case .indexEntry where artifact.url == layout.history:
                 if let edit = historyEdit(for: session.id) { edits.append(edit) }
+            case .indexEntry:
+                guard let entry = desktop.entries.first(where: { $0.file == artifact.url }) else { continue }
+                if case .readOnly(let reason) = desktop.status {
+                    remarks.append("Claude Desktop still lists this session: \(reason)")
+                } else {
+                    removals.append(ClaudeDesktopRegistry.removal(of: entry, note: artifact.note))
+                }
             }
         }
-        let live = await liveness.check(sessionID: session.id, artifactURLs: moves.map(\.source))
+        if !removals.isEmpty {
+            remarks.append("Claude Desktop stops listing this session. Its entry is backed up first, so undo puts it back.")
+        }
+        let live = await desktopChecked(
+            await liveness.check(sessionID: session.id, artifactURLs: moves.map(\.source)),
+            touchesRegistry: !removals.isEmpty
+        )
         return Plan(
             agent: kind,
             sessionID: session.id,
@@ -93,6 +128,9 @@ public struct ClaudeCodeAdapter: AgentAdapter {
             destination: destination,
             moves: moves,
             indexEdits: edits,
+            registryRemovals: removals,
+            remarks: remarks,
+            mustNotBeRunning: removals.isEmpty ? [] : [ClaudeDesktopRegistry.processMatcher],
             liveCheck: live
         )
     }
@@ -150,9 +188,21 @@ public struct ClaudeCodeAdapter: AgentAdapter {
             .sorted { $0.path < $1.path }
     }
 
-    public func transcript(of session: Session, limit: Int) async throws -> Transcript {
+    public func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript {
         try requireOurs(session)
-        return try TranscriptReader(maxMessages: limit).read(session.transcriptURL)
+        return try TranscriptReader(maxMessages: limit).read(session.transcriptURL, masking: findings)
+    }
+
+    /// Adds "Claude Desktop is running" to a live check when the plan changes Desktop's list.
+    func desktopChecked(_ base: LiveCheckResult, touchesRegistry: Bool) async -> LiveCheckResult {
+        guard touchesRegistry else { return base }
+        let blocking = desktopProcesses.blockingReasons([ClaudeDesktopRegistry.processMatcher])
+        return LiveCheckResult(
+            isLive: base.isLive || !blocking.isEmpty,
+            reasons: base.reasons + blocking,
+            checkedSignals: base.checkedSignals + ["Claude Desktop processes"],
+            openHandles: base.openHandles
+        )
     }
 
     /// Claude Code's retention period in days (`cleanupPeriodDays`, default 30).
@@ -162,9 +212,10 @@ public struct ClaudeCodeAdapter: AgentAdapter {
 
     // MARK: Building sessions
 
-    private func makeSession(id: String, transcript: URL, slug: URL, settings: ClaudeCodeSettings) async -> Session {
+    private func makeSession(id: String, transcript: URL, slug: URL, settings: ClaudeCodeSettings, desktop: ClaudeDesktopRegistry.Snapshot) async -> Session {
         let header = ClaudeCodeTranscript.readHeader(of: transcript)
-        let artifacts = collectArtifacts(id: id, transcript: transcript)
+        let artifacts = collectArtifacts(id: id, transcript: transcript, desktop: desktop)
+        let link = Self.newest(desktop.byCLISessionID[id] ?? []).map { DesktopLink(file: $0.file, title: $0.title, isArchived: $0.isArchived) }
         let size = artifacts.reduce(0) { $0 + $1.sizeBytes }
         let lastActive = FileSystem.modificationDate(of: transcript) ?? .distantPast
         let expiresAt = lastActive.addingTimeInterval(TimeInterval(settings.cleanupPeriodDays) * 86_400)
@@ -186,15 +237,22 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         return Session(
             id: id,
             agent: kind,
-            title: header.title,
+            // Desktop's title is the one the user sees in its sidebar.
+            title: link?.title ?? header.title,
             projectPath: header.cwd ?? Self.guessProjectPath(fromSlug: slug.lastPathComponent),
             lastActive: lastActive,
             sizeBytes: size,
             status: status,
             expiresAt: expiresAt,
             transcriptURL: transcript,
-            isArchived: archived
+            isArchived: archived,
+            desktop: link
         )
+    }
+
+    /// The most recently modified registry entry, when Desktop lists a session more than once.
+    static func newest(_ entries: [DesktopRegistryEntry]) -> DesktopRegistryEntry? {
+        entries.max { ($0.modificationDate ?? .distantPast, $1.file.path) < ($1.modificationDate ?? .distantPast, $0.file.path) }
     }
 
     /// The slug replaces every `/` (and other punctuation) with `-`, so this is lossy; the
@@ -207,7 +265,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
 
     /// Every file, folder and index entry that belongs to one session. Protected paths
     /// (`memory/`, `plugins/`, ...) are never visited.
-    private func collectArtifacts(id: String, transcript: URL) -> [Artifact] {
+    func collectArtifacts(id: String, transcript: URL, desktop: ClaudeDesktopRegistry.Snapshot = .empty) -> [Artifact] {
         var artifacts: [Artifact] = []
         func add(_ url: URL, _ kind: Artifact.Kind, _ note: String) {
             guard FileSystem.exists(url), !layout.isProtected(url) else { return }
@@ -229,7 +287,11 @@ public struct ClaudeCodeAdapter: AgentAdapter {
             add(file, .file, "Security warning state")
         }
         if let edit = historyEdit(for: id) {
-            artifacts.append(Artifact(url: edit.file, kind: .indexEntry, sizeBytes: edit.removedBytes, note: edit.note))
+            artifacts.append(Artifact(url: edit.file, kind: .indexEntry, sizeBytes: edit.removedBytes, note: edit.note,
+                                      match: IndexMatch(key: edit.matchKey, value: edit.matchValue)))
+        }
+        for entry in desktop.byCLISessionID[id] ?? [] {
+            artifacts.append(Artifact(url: entry.file, kind: .indexEntry, sizeBytes: entry.sizeBytes, note: ArtifactNote.desktopEntry))
         }
         return artifacts
     }
@@ -251,7 +313,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         )
     }
 
-    private func requireWritable() throws {
+    func requireWritable() throws {
         switch layout.probe() {
         case .readOnly(let reason): throw AdapterError.readOnly(kind, reason: reason)
         case .notInstalled: throw AdapterError.notInstalled(kind)
@@ -273,4 +335,5 @@ private enum ArtifactNote {
     static let setAside = "Set-aside copy of the transcript"
     static let checkpoints = "Checkpoint snapshots"
     static let uploads = "Uploaded files"
+    static let desktopEntry = "Desktop registry entry, file removed"
 }

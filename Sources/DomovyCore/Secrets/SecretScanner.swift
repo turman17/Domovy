@@ -12,15 +12,23 @@ public struct SecretScanner: Sendable {
     }
 
     /// The files of each session worth reading: transcripts, set-aside copies and everything
-    /// below the session's folders. Shared index files (`history.jsonl`) are left out.
+    /// below the session's folders, plus the session's own lines of shared index files that
+    /// say which lines are whose (Claude Code's `history.jsonl`).
     public static func targets(for sessions: [Session], adapters: [any AgentAdapter]) async -> [SecretScanTarget] {
         var targets: [SecretScanTarget] = []
         for session in sessions {
             guard let adapter = adapters.first(where: { $0.kind == session.agent }),
                   let artifacts = try? await adapter.artifacts(of: session) else { continue }
-            targets.append(SecretScanTarget(session: session, files: files(of: artifacts)))
+            targets.append(SecretScanTarget(session: session, files: files(of: artifacts), indexLines: indexLines(of: artifacts)))
         }
         return targets
+    }
+
+    static func indexLines(of artifacts: [Artifact]) -> [IndexLines] {
+        artifacts.compactMap { artifact in
+            guard artifact.kind == .indexEntry, let match = artifact.match, APFSCompression.isRegularFile(artifact.url) else { return nil }
+            return IndexLines(file: artifact.url, match: match)
+        }
     }
 
     static func files(of artifacts: [Artifact]) -> [URL] {
@@ -64,6 +72,21 @@ public struct SecretScanner: Sendable {
             report.sessionsScanned += 1
             progress(SecretScanProgress(sessionsDone: index + 1, sessionsTotal: targets.count, findings: report.findings.count))
             await Task.yield()
+        }
+        // One pass per shared index file, however many sessions have lines in it.
+        let shared = Dictionary(grouping: targets.flatMap { target in target.indexLines.map { ($0, target.session) } }, by: { $0.0.file })
+        for (file, owners) in shared.sorted(by: { $0.key.path < $1.key.path }) {
+            try Task.checkCancellation()
+            switch try scanIndexFile(file, owners: owners, matcher: matcher) {
+            case .scanned(let findings, let bytes):
+                report.findings += findings
+                report.filesScanned += 1
+                report.bytesScanned += bytes
+            case .skipped(let reason):
+                for (_, session) in owners { report.skipped.append(SkippedFile(sessionID: session.id, file: file, reason: reason)) }
+            case .ignored:
+                break
+            }
         }
         SecretsLog.scanFinished(findings: report.findings.count, files: report.filesScanned, skipped: report.skipped.count)
         return report
@@ -124,6 +147,52 @@ public struct SecretScanner: Sendable {
                     lineOffset: line.offset,
                     lineLength: line.bytes.count,
                     redaction: Self.redaction(for: match, in: lineBytes, isJSONLines: isJSONLines, isPartial: line.isPartial, validJSON: validJSON)
+                ))
+            }
+        }
+        return .scanned(findings, bytes: bytes)
+    }
+
+    /// Scans the lines of a shared index file that belong to one of `owners`. A line is parsed
+    /// only when the matcher found something in it, to see whose it is.
+    func scanIndexFile(_ url: URL, owners: [(IndexLines, Session)], matcher: SecretMatcher) throws -> FileResult {
+        var stream: LineStream
+        do {
+            stream = try LineStream(url: url, maxLineBytes: maxLineBytes)
+        } catch {
+            return .skipped("Domovy could not open it: \(error.localizedDescription)")
+        }
+        defer { stream.close() }
+        let keys = Set(owners.map(\.0.match.key))
+        var sessions: [String: Session] = [:]
+        for (lines, session) in owners { sessions[lines.match.value.lowercased()] = session }
+
+        var findings: [SecretFinding] = []
+        var bytes: Int64 = 0
+        var checked = 0
+        while let line = try stream.next() {
+            checked += 1
+            if checked % 512 == 0, Task.isCancelled { throw CancellationError() }
+            bytes = line.offset + Int64(line.bytes.count)
+            guard !line.isPartial else { continue }
+            let matches = matcher.matches(in: line.bytes)
+            guard !matches.isEmpty,
+                  let object = try? JSONSerialization.jsonObject(with: line.bytes) as? [String: Any],
+                  let session = keys.lazy.compactMap({ (object[$0] as? String).flatMap { sessions[$0.lowercased()] } }).first else { continue }
+            let lineBytes = [UInt8](line.bytes)
+            for match in matches {
+                let start = line.offset + Int64(match.range.lowerBound)
+                findings.append(SecretFinding(
+                    sessionID: session.id,
+                    agent: session.agent,
+                    file: url,
+                    line: line.number,
+                    ruleID: match.ruleID,
+                    preview: match.preview,
+                    byteRange: start..<(line.offset + Int64(match.range.upperBound)),
+                    lineOffset: line.offset,
+                    lineLength: line.bytes.count,
+                    redaction: Self.redaction(for: match, in: lineBytes, isJSONLines: true, isPartial: false, validJSON: true)
                 ))
             }
         }

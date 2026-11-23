@@ -45,7 +45,7 @@ enum CodexRollout {
     }
 
     /// User and assistant messages with tool calls as one-line summaries, for the preview pane.
-    static func readTranscript(of url: URL, maxMessages: Int, maxBytes: Int = 4 * 1024 * 1024) throws -> Transcript {
+    static func readTranscript(of url: URL, maxMessages: Int, maxBytes: Int = 4 * 1024 * 1024, masking findings: [SecretFinding] = []) throws -> Transcript {
         guard !url.lastPathComponent.hasSuffix(".zst") else {
             throw AdapterError.unreadable(url, reason: "it is compressed with zstd, which Domovy cannot read yet")
         }
@@ -62,13 +62,19 @@ enum CodexRollout {
         var lines = budget.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true)
         if truncated, budget.last != UInt8(ascii: "\n") { lines.removeLast() }
 
+        let mask = TranscriptMask(findings: findings, file: url)
+        var hidden = 0
         var messages: [TranscriptMessage] = []
-        for (index, line) in lines.enumerated() {
+        for (index, raw) in lines.enumerated() {
             if messages.count >= maxMessages {
                 truncated = true
                 break
             }
-            guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            guard let line = mask.apply(Data(raw), at: Int64(raw.startIndex - data.startIndex)) else {
+                hidden += 1
+                continue
+            }
+            guard let record = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             let (type, payload) = unwrap(record)
             guard type == "response_item" || type == nil else { continue }
             let timestamp = (record["timestamp"] as? String).flatMap(parseDate)
@@ -96,7 +102,7 @@ enum CodexRollout {
                 continue
             }
         }
-        return Transcript(messages: messages, isTruncated: truncated)
+        return Transcript(messages: messages, isTruncated: truncated, hiddenLineCount: hidden)
     }
 
     // MARK: Helpers
