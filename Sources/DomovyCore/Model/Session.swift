@@ -34,6 +34,9 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
     public let isArchived: Bool
     /// Claude Desktop also lists this session (a Claude Code session started from Desktop).
     public let desktop: DesktopLink?
+    /// Why an expiring session is at risk when the agent's rule is not a date, e.g.
+    /// "Antigravity keeps the newest 500 conversations; this is number 487."
+    public let retentionNote: String?
 
     public init(
         id: String,
@@ -46,7 +49,8 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         expiresAt: Date?,
         transcriptURL: URL,
         isArchived: Bool = false,
-        desktop: DesktopLink? = nil
+        desktop: DesktopLink? = nil,
+        retentionNote: String? = nil
     ) {
         self.id = id
         self.agent = agent
@@ -59,6 +63,7 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         self.transcriptURL = transcriptURL
         self.isArchived = isArchived
         self.desktop = desktop
+        self.retentionNote = retentionNote
     }
 
     /// "Claude Code · Desktop" when Claude Desktop lists the session too.

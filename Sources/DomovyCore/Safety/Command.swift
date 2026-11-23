@@ -7,6 +7,8 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
     public let arguments: [String]
     /// Added to the inherited environment (e.g. `CODEX_HOME` pointing at the adapter root).
     public let environment: [String: String]
+    /// Where the command runs. Gemini CLI finds a project's chats from its working directory.
+    public let workingDirectory: URL?
     /// One line for the user: "Runs codex delete for this session, then checks the result."
     public let note: String
     /// Files the command removes for good. Domovy keeps a clone in its quarantine first, so undo
@@ -29,6 +31,7 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
         executable: URL,
         arguments: [String],
         environment: [String: String] = [:],
+        workingDirectory: URL? = nil,
         note: String,
         copiesBeforeRun: [URL] = [],
         indexLinesBeforeRun: [IndexEdit] = [],
@@ -40,6 +43,7 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
         self.executable = executable
         self.arguments = arguments
         self.environment = environment
+        self.workingDirectory = workingDirectory
         self.note = note
         self.copiesBeforeRun = copiesBeforeRun
         self.indexLinesBeforeRun = indexLinesBeforeRun
@@ -57,7 +61,7 @@ public struct PlannedCommand: Hashable, Codable, Sendable {
 
 extension PlannedCommand {
     private enum CodingKeys: String, CodingKey {
-        case executable, arguments, environment, note, copiesBeforeRun, indexLinesBeforeRun, verifications, sizeBytes, undo, isPermanent
+        case executable, arguments, environment, workingDirectory, note, copiesBeforeRun, indexLinesBeforeRun, verifications, sizeBytes, undo, isPermanent
     }
 
     /// Undo entries written before `isPermanent` existed decode as reversible.
@@ -67,6 +71,7 @@ extension PlannedCommand {
             executable: try c.decode(URL.self, forKey: .executable),
             arguments: try c.decode([String].self, forKey: .arguments),
             environment: try c.decodeIfPresent([String: String].self, forKey: .environment) ?? [:],
+            workingDirectory: try c.decodeIfPresent(URL.self, forKey: .workingDirectory),
             note: try c.decode(String.self, forKey: .note),
             copiesBeforeRun: try c.decodeIfPresent([URL].self, forKey: .copiesBeforeRun) ?? [],
             indexLinesBeforeRun: try c.decodeIfPresent([IndexEdit].self, forKey: .indexLinesBeforeRun) ?? [],
@@ -87,13 +92,16 @@ public enum Verification: Hashable, Codable, Sendable {
     /// Several files that should be gone, reported as one line: "2 of 3 layers of qwen3:14b
     /// (9.3 GB) are still in blobs/."
     case filesGone([URL], what: String)
+    /// Files the command must leave alone, reported as one line when some went missing:
+    /// "Gemini CLI also removed 2 other chats of this project; undo puts them back."
+    case filesStay([URL], what: String, tool: String)
 
     /// The files this check expects to be gone; they must not be open when the command runs.
     var urls: [URL] {
         switch self {
         case .fileGone(let url): [url]
         case .filesGone(let urls, _): urls
-        case .linesGone, .rowsGone, .fileAppears: []
+        case .linesGone, .rowsGone, .fileAppears, .filesStay: []
         }
     }
 
@@ -118,6 +126,10 @@ public enum Verification: Hashable, Codable, Sendable {
             let bytes = CleanupPlan.bytes(DiskUsage.measure(left).allocated)
             let place = first.deletingLastPathComponent().lastPathComponent
             return "\(left.count) of \(urls.count) \(what) (\(bytes)) \(left.count == 1 ? "is" : "are") still in \(place)/."
+        case .filesStay(let urls, let what, let tool):
+            let gone = urls.filter { !FileSystem.exists($0) }
+            guard !gone.isEmpty else { return nil }
+            return "\(tool) also removed \(gone.count) \(what); Domovy kept a copy, so undo puts \(gone.count == 1 ? "it" : "them") back."
         }
     }
 }
@@ -147,11 +159,13 @@ public struct ProcessCommandRunner: CommandRunner {
     }
 
     public func run(_ command: PlannedCommand) throws -> CommandResult {
-        try Self.run(command.executable, command.arguments, environment: command.environment, timeout: timeout)
+        try Self.run(command.executable, command.arguments, environment: command.environment,
+                     workingDirectory: command.workingDirectory, timeout: timeout)
     }
 
     /// Output goes to temporary files, so a chatty process can never block on a full pipe.
-    static func run(_ executable: URL, _ arguments: [String], environment: [String: String], timeout: TimeInterval) throws -> CommandResult {
+    static func run(_ executable: URL, _ arguments: [String], environment: [String: String],
+                    workingDirectory: URL? = nil, timeout: TimeInterval) throws -> CommandResult {
         let fm = FileManager.default
         let scratch = fm.temporaryDirectory.appendingPathComponent("domovy-run-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: scratch, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -171,6 +185,7 @@ public struct ProcessCommandRunner: CommandRunner {
         process.executableURL = executable
         process.arguments = arguments
         process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+        if let workingDirectory { process.currentDirectoryURL = workingDirectory }
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = outHandle
         process.standardError = errHandle

@@ -35,10 +35,15 @@ enum ProcessClassifier {
         if name == "Cursor" || lower.hasPrefix("cursor helper") { return .cursor }
         if lower == "ollama" || lower.hasPrefix("ollama ") { return .ollama }
         if lower == "lm studio" || lower.hasPrefix("lm studio helper") || lower == "lms" { return .lmStudio }
+        // `agy` is the Antigravity CLI (verified); the app's names are assumed.
+        if AntigravityAdapter.processMatcher.matches(name) { return .antigravity }
+        // `gemini`, lowercase only: Google's `Gemini` chat app is not Gemini CLI.
+        if name == "gemini" { return .gemini }
+        guard interpreters.contains(lower), let arguments = arguments() else { return nil }
         // Claude Code installed with npm runs as `node …/@anthropic-ai/claude-code/cli.js`.
-        if interpreters.contains(lower), arguments()?.contains(where: { $0.contains("@anthropic-ai/claude-code") }) == true {
-            return .claudeCode
-        }
+        if arguments.contains(where: { $0.contains("@anthropic-ai/claude-code") }) { return .claudeCode }
+        // Gemini CLI runs as `node …/@google/gemini-cli/bundle/gemini.js` (verified, Homebrew).
+        if arguments.contains(where: { $0.contains("@google/gemini-cli") }) { return .gemini }
         return nil
     }
 
@@ -49,6 +54,8 @@ enum ProcessClassifier {
         if path.contains("/.claude/") || path.contains("/Claude.app/") { return path.contains("/Claude.app/") ? .claudeDesktop : .claudeCode }
         if path.contains("/.codex/") || path.contains("/Codex.app/") || path.contains("/ChatGPT.app/") { return .codex }
         if path.contains("/.cursor/") || path.contains("/Cursor.app/") { return .cursor }
+        if path.contains("/.gemini/antigravity") || path.contains("/Antigravity.app/") { return .antigravity }
+        if path.contains("/.gemini/") || path.contains("/gemini-cli/") { return .gemini }
         return nil
     }
 

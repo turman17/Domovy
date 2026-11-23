@@ -51,6 +51,16 @@ enum APFSCompression {
     }
 
     /// Bytes the file occupies on disk (allocated blocks), as opposed to its logical size.
+    /// The file itself, or every regular file below a folder. Symlinks are never followed.
+    static func regularFiles(at url: URL) -> [URL] {
+        guard FileSystem.isDirectory(url) else { return isRegularFile(url) ? [url] : [] }
+        guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: []) else { return [] }
+        return enumerator.compactMap { $0 as? URL }
+            .map(\.standardizedFileURL)
+            .filter { isRegularFile($0) }
+            .sorted { $0.path < $1.path }
+    }
+
     static func allocatedBytes(of url: URL) -> Int64 {
         var info = stat()
         guard lstat(url.path, &info) == 0 else { return 0 }

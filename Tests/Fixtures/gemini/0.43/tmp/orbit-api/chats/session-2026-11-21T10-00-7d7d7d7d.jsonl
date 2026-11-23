@@ -1,0 +1,3 @@
+{"sessionId":"7d7d7d7d-2222-4222-8222-222222222222","projectHash":"7d6f2c54a19d1f6c8b2f0e0d6b1c7a3e9f4d2b8c6a0e1f3d5b7c9e2a4f6d8b0c","startTime":"2026-11-21T10:00:00.000Z","lastUpdated":"2026-11-21T10:05:00.000Z","kind":"main"}
+{"id":"m1","timestamp":"2026-11-21T10:00:05.000Z","type":"user","content":"Explain the rate limiter"}
+{"id":"m2","timestamp":"2026-11-21T10:00:30.000Z","type":"gemini","content":"It is a token bucket per API key."}

@@ -18,14 +18,19 @@ public struct ProcessMatcher: Hashable, Codable, Sendable {
     public let scope: URL?
     /// What the user should do, e.g. "Quit the ChatGPT app or Codex to change this session."
     public let quitAdvice: String?
+    /// For tools that run under an interpreter (Gemini CLI is `node …/@google/gemini-cli/…`):
+    /// an interpreter process matches when one of its arguments contains one of these.
+    public let argumentMarkers: [String]
 
-    public init(appName: String, names: Set<String>, prefixes: [String] = [], exactNames: Set<String> = [], scope: URL? = nil, quitAdvice: String? = nil) {
+    public init(appName: String, names: Set<String>, prefixes: [String] = [], exactNames: Set<String> = [], scope: URL? = nil,
+                quitAdvice: String? = nil, argumentMarkers: [String] = []) {
         self.appName = appName
         self.names = names
         self.prefixes = prefixes
         self.exactNames = exactNames
         self.scope = scope?.standardizedFileURL
         self.quitAdvice = quitAdvice
+        self.argumentMarkers = argumentMarkers
     }
 
     public func matches(_ processName: String) -> Bool {
@@ -33,11 +38,20 @@ public struct ProcessMatcher: Hashable, Codable, Sendable {
         let name = processName.lowercased()
         return names.contains(name) || prefixes.contains { name.hasPrefix($0) }
     }
+
+    /// Matches by name, or, for an interpreter, by its arguments. Arguments are read only when
+    /// needed and only compared here; they are never kept or logged.
+    public func matches(_ processName: String, arguments: () -> [String]?) -> Bool {
+        if matches(processName) { return true }
+        guard !argumentMarkers.isEmpty, ProcessClassifier.isInterpreter(processName),
+              let arguments = arguments() else { return false }
+        return arguments.contains { argument in argumentMarkers.contains { argument.contains($0) } }
+    }
 }
 
 extension ProcessMatcher {
     private enum CodingKeys: String, CodingKey {
-        case appName, names, prefixes, exactNames, scope, quitAdvice
+        case appName, names, prefixes, exactNames, scope, quitAdvice, argumentMarkers
     }
 
     /// Undo entries written before `exactNames` existed decode with none.
@@ -49,7 +63,8 @@ extension ProcessMatcher {
             prefixes: try c.decodeIfPresent([String].self, forKey: .prefixes) ?? [],
             exactNames: try c.decodeIfPresent(Set<String>.self, forKey: .exactNames) ?? [],
             scope: try c.decodeIfPresent(URL.self, forKey: .scope),
-            quitAdvice: try c.decodeIfPresent(String.self, forKey: .quitAdvice)
+            quitAdvice: try c.decodeIfPresent(String.self, forKey: .quitAdvice),
+            argumentMarkers: try c.decodeIfPresent([String].self, forKey: .argumentMarkers) ?? []
         )
     }
 }
@@ -119,7 +134,8 @@ public struct LibprocProcessLister: RunningProcessLister {
         guard let pids = LibprocOpenHandleChecker.listPIDs() else { return nil }
         let me = getpid()
         return pids.compactMap { pid in
-            guard pid > 0, pid != me, let name = LibprocOpenHandleChecker.processName(of: pid), matcher.matches(name) else { return nil }
+            guard pid > 0, pid != me, let name = LibprocOpenHandleChecker.processName(of: pid),
+                  matcher.matches(name, arguments: { LibprocProcessSource.arguments(of: pid) }) else { return nil }
             return RunningProcess(pid: pid, name: name)
         }
     }
@@ -141,15 +157,18 @@ public struct FixedProcessLister: RunningProcessLister {
     public let openFiles: [Int32: [String]]
     /// Pids whose open files cannot be read.
     public let unreadable: Set<Int32>
+    /// Command-line arguments per pid, for matchers that look at them.
+    public let arguments: [Int32: [String]]
 
-    public init(_ processes: [RunningProcess]?, openFiles: [Int32: [String]] = [:], unreadable: Set<Int32> = []) {
+    public init(_ processes: [RunningProcess]?, openFiles: [Int32: [String]] = [:], unreadable: Set<Int32> = [], arguments: [Int32: [String]] = [:]) {
         self.processes = processes
         self.openFiles = openFiles
         self.unreadable = unreadable
+        self.arguments = arguments
     }
 
     public func running(matching matcher: ProcessMatcher) -> [RunningProcess]? {
-        processes?.filter { matcher.matches($0.name) }
+        processes?.filter { process in matcher.matches(process.name, arguments: { arguments[process.pid] }) }
     }
 
     public func openFiles(of pid: Int32) -> [String]? {

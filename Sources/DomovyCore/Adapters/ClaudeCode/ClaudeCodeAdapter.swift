@@ -145,7 +145,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         var compressions: [FileCompression] = []
         for artifact in collectArtifacts(id: session.id, transcript: session.transcriptURL)
         where Self.archivedNotes.contains(artifact.note) {
-            for file in Self.regularFiles(at: artifact.url) {
+            for file in APFSCompression.regularFiles(at: artifact.url) {
                 if layout.isProtected(file) { throw AdapterError.protectedPathInPlan(file) }
                 guard !APFSCompression.isCompressed(file),
                       FileSystem.size(of: file) > APFSCompression.minimumUsefulSize else { continue }
@@ -177,16 +177,6 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         ArtifactNote.transcript, ArtifactNote.companions, ArtifactNote.setAside,
         ArtifactNote.checkpoints, ArtifactNote.uploads,
     ]
-
-    /// The file itself, or every regular file below a folder. Symlinks are never followed.
-    private static func regularFiles(at url: URL) -> [URL] {
-        guard FileSystem.isDirectory(url) else { return APFSCompression.isRegularFile(url) ? [url] : [] }
-        guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: []) else { return [] }
-        return enumerator.compactMap { $0 as? URL }
-            .map(\.standardizedFileURL)
-            .filter { APFSCompression.isRegularFile($0) }
-            .sorted { $0.path < $1.path }
-    }
 
     public func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript {
         try requireOurs(session)
