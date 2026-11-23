@@ -103,6 +103,22 @@ enum Format {
         return lines.joined(separator: "\n")
     }
 
+    /// A cleanup plan, then what it leaves alone and why.
+    static func cleanup(_ cleanup: CleanupPlan, home: URL) -> String {
+        var lines = [plan(cleanup.plan)
+            .replacingOccurrences(of: "Plan for session \(cleanup.plan.sessionID)", with: "Cleanup \(cleanup.cleanup.rawValue)")
+            .replacingOccurrences(of: "\n" + cleanup.plan.summary, with: "\n" + cleanup.summary)]
+        if !cleanup.excluded.isEmpty {
+            lines.append("")
+            lines.append("Kept:")
+            for item in cleanup.excluded {
+                lines.append("  \(bytes(item.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) \(displayPath(item.url, home: home))")
+                lines.append("  \(String(repeating: " ", count: 10)) \(item.reason)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// Orphans and duplicates, one per line, with what stays for each duplicate.
     static func orphans(_ report: OrphanReport, home: URL) -> String {
         var lines: [String] = []

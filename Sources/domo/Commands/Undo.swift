@@ -34,7 +34,9 @@ struct Undo: AsyncParsableCommand {
             }
             for entry in try executor.undoLatestBatch() {
                 let verb = entry.action == .archive ? "Decompressed" : entry.action == .redact ? "Put back the originals of" : "Restored"
-                if let scope = OrphanScope(rawValue: entry.sessionID) {
+                if let cleanup = CleanupID(rawValue: entry.sessionID) {
+                    print("\(entry.action == .archive ? "Decompressed" : "Put back") \(cleanup.undoName).")
+                } else if let scope = OrphanScope(rawValue: entry.sessionID) {
                     print("Put back the \(scope.rawValue) (\(entry.moved.count) items, \(entry.registryRestores.count) Desktop entries).")
                 } else {
                     print("\(verb) session \(entry.sessionID) (\(entry.agent.displayName)).")
