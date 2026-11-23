@@ -391,7 +391,20 @@ final class SessionLibrary {
 }
 
 extension Session {
-    var displayTitle: String { title ?? "Untitled session" }
+    /// The first prompt as plain text: markdown markers and paste placeholders removed.
+    var displayTitle: String {
+        guard var text = title else { return "Untitled session" }
+        if text.contains("<pasted_content") || text.contains("</pasted_content>") {
+            text = text.replacingOccurrences(of: #"</?pasted_content[^>]*>?"#, with: " ", options: .regularExpression)
+        }
+        if text.contains("**") || text.contains("`") || text.contains("__") {
+            text = text.replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: "__", with: "")
+                .replacingOccurrences(of: "`", with: "")
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "Pasted text" : text
+    }
 
     /// "Also in Claude Desktop's session list (archived there)."
     var desktopHelp: String? {

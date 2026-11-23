@@ -68,17 +68,18 @@ private struct MessageView: View {
             switch block {
             case .text(let text):
                 if message.role == .user {
-                    Text(text)
+                    MarkdownView(text)
                         .textSelection(.enabled)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                        .accessibilityElement(children: .combine)
                         .accessibilityLabel("You: \(text)")
                 } else {
-                    Text(text)
+                    MarkdownView(text)
                         .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .combine)
                         .accessibilityLabel("Assistant: \(text)")
                 }
             case .toolCall(let summary):
