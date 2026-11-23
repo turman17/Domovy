@@ -7,7 +7,7 @@ struct Domo: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "domo",
         abstract: "Domovy: tidy up after AI coding agents.",
-        subcommands: [Ls.self, Du.self, Rm.self, Archive.self, Orphans.self, Clean.self, Secrets.self, Redact.self, Purge.self, Undo.self]
+        subcommands: [Ls.self, Du.self, Rm.self, Archive.self, Orphans.self, Clean.self, Models.self, Secrets.self, Redact.self, Purge.self, Undo.self]
     )
 
     static func printLeftovers(_ entries: [UndoEntry]) {
@@ -57,6 +57,21 @@ struct RootOptions: ParsableArguments {
         }
         guard matches.count == 1, let match = matches.first else { throw AdapterError.sessionNotFound(idOrPrefix) }
         return match
+    }
+
+    /// Ollama, LM Studio and Hugging Face. A `--root` home ignores `OLLAMA_MODELS` and friends.
+    var modelStores: ModelStores {
+        ModelStores.at(home: home, isCustomHome: root != nil)
+    }
+
+    /// Every disk footprint: the adapters, the measured-only agents and the model stores.
+    var footprintProviders: [any FootprintProvider] {
+        adapters + FootprintScanner.measuredOnly(home: home) + FootprintScanner.modelStores(modelStores)
+    }
+
+    /// Guided cleanups and model removals. A `--root` home runs only stub CLIs from `<root>/bin`.
+    var cleanupPlanner: CleanupPlanner {
+        CleanupPlanner(home: home, isCustomHome: root != nil)
     }
 
     var executor: Executor {

@@ -26,7 +26,7 @@ struct Undo: AsyncParsableCommand {
                         e.agent.displayName,
                         String(e.sessionID.prefix(8)),
                         changes(e),
-                        e.isUndone ? "undone" : e.originalsPurgedAt != nil ? "purged" : (e.failure == nil ? "done" : "partial"),
+                        e.isUndone ? "undone" : e.originalsPurgedAt != nil ? "purged" : e.irreversible ? "permanent" : (e.failure == nil ? "done" : "partial"),
                     ]
                 }
                 print(Format.table(rows, header: ["ENTRY", "WHEN", "AGENT", "SESSION", "CHANGES", "STATE"]))
@@ -36,6 +36,8 @@ struct Undo: AsyncParsableCommand {
                 let verb = entry.action == .archive ? "Decompressed" : entry.action == .redact ? "Put back the originals of" : "Restored"
                 if let cleanup = CleanupID(rawValue: entry.sessionID) {
                     print("\(entry.action == .archive ? "Decompressed" : "Put back") \(cleanup.undoName).")
+                } else if entry.agent.isModelStore {
+                    print("Put back \(entry.sessionID) (\(entry.agent.displayName)).")
                 } else if let scope = OrphanScope(rawValue: entry.sessionID) {
                     print("Put back the \(scope.rawValue) (\(entry.moved.count) items, \(entry.registryRestores.count) Desktop entries).")
                 } else {

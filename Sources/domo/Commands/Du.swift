@@ -11,8 +11,7 @@ struct Du: AsyncParsableCommand {
     var ids = false
 
     func run() async throws {
-        let providers: [any FootprintProvider] = options.adapters + FootprintScanner.measuredOnly(home: options.home)
-        let result = await FootprintScanner.scan(providers)
+        let result = await FootprintScanner.scan(options.footprintProviders)
         for failure in result.failures { FileHandle.standardError.write(Data("domo: \(failure)\n".utf8)) }
         let footprints = result.footprints
         guard !footprints.isEmpty else {

@@ -31,7 +31,7 @@ struct Clean: AsyncParsableCommand {
 
     func run() async throws {
         do {
-            let planner = CleanupPlanner(home: options.home)
+            let planner = options.cleanupPlanner
             let cleanup = try await planner.plan(category, destination: to)
             print(Format.cleanup(cleanup, home: options.home))
             if dryRun {
@@ -44,13 +44,18 @@ struct Clean: AsyncParsableCommand {
                 return
             }
             if !yes {
-                let what = category.compresses ? "Compress \(cleanup.plan.compressions.count) file(s) in place" : "Move \(cleanup.plan.moves.count) item(s) (\(Format.bytes(cleanup.plan.totalBytes))) to \(to.displayName)"
+                let what = !cleanup.plan.commands.isEmpty
+                    ? "Run \(cleanup.plan.commands.map { "`\($0.commandLine)`" }.joined(separator: ", "))\(cleanup.plan.isPermanent ? " (permanent)" : "")"
+                    : category.compresses ? "Compress \(cleanup.plan.compressions.count) file(s) in place" : "Move \(cleanup.plan.moves.count) item(s) (\(Format.bytes(cleanup.plan.totalBytes))) to \(to.displayName)"
                 try confirm("\n\(what)? [y/N] ")
             }
             let entry = try await planner.execute(cleanup, with: options.executor)
             let n = category.compresses ? entry.compressed.count : entry.moved.count
-            let done = category.compresses ? "Compressed \(n) \(n == 1 ? "file" : "files")" : "Moved \(n) \(n == 1 ? "item" : "items")"
-            print("\nDone. \(done). Undo with `domo undo`.")
+            let done = !cleanup.plan.commands.isEmpty
+                ? "Ran \(cleanup.plan.commands.map { "`\($0.commandLine)`" }.joined(separator: ", "))"
+                : category.compresses ? "Compressed \(n) \(n == 1 ? "file" : "files")" : "Moved \(n) \(n == 1 ? "item" : "items")"
+            print("\nDone. \(done).\(entry.irreversible ? "" : " Undo with `domo undo`.")")
+            Domo.printLeftovers([entry])
         } catch {
             throw Domo.fail(error)
         }
