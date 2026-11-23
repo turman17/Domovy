@@ -11,6 +11,7 @@ struct Domo: AsyncParsableCommand {
     )
 
     static func printLeftovers(_ entries: [UndoEntry]) {
+        for note in entries.flatMap(\.notes) { print("\n\(note)") }
         let leftovers = entries.flatMap(\.leftovers)
         guard !leftovers.isEmpty else { return }
         print("\nChecked afterwards; left behind:")

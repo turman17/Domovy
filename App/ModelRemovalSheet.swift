@@ -7,7 +7,7 @@ struct ModelRemovalRequest: Identifiable {
     let removal: ModelRemovalPlan
 }
 
-/// Removing local models: per tool, the command it runs (and that it is permanent) or the files
+/// Removing local models: per tool, the command it runs (after Domovy keeps a copy) or the files
 /// that move, the running and loaded checks, and the shared layers that stay.
 struct ModelRemovalSheet: View {
     @Environment(SessionLibrary.self) private var library
@@ -33,7 +33,7 @@ struct ModelRemovalSheet: View {
                     .font(.system(size: 28, weight: .bold))
                     .monospacedDigit()
                     .help("\(removal.totalBytes.formatted()) bytes on disk")
-                Text("freed on disk")
+                Text(removal.isPermanent ? "freed when you purge Domovy's copy" : "freed on disk")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -62,7 +62,7 @@ struct ModelRemovalSheet: View {
         List {
             ForEach(removal.plans) { plan in
                 if !plan.commands.isEmpty {
-                    Section("\(plan.agent.displayName) · deleted by its own command, then checked") {
+                    Section("\(plan.agent.displayName) · copy kept, deleted by its own command, then checked") {
                         ForEach(plan.commands, id: \.self) { command in
                             ChangeRow(symbol: "terminal", path: command.commandLine, note: command.note,
                                       size: command.sizeBytes.formatted(.byteCount(style: .file)))
@@ -117,9 +117,9 @@ struct ModelRemovalSheet: View {
         }
     }
 
-    /// "Delete" when the tools delete for good, "Move to Trash" when everything can be undone.
+    /// "Delete" when the tools delete (Domovy keeps a copy), "Move to Trash" when files only move.
     private var confirmTitle: String {
-        if removal.isUndoable { return destination == .trash ? "Move to Trash" : "Move to Quarantine" }
+        if !removal.isPermanent { return destination == .trash ? "Move to Trash" : "Move to Quarantine" }
         return movesFiles ? "Remove" : "Delete"
     }
 

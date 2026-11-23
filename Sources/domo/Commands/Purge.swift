@@ -4,7 +4,7 @@ import Foundation
 
 struct Purge: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Permanently delete quarantined files that still hold secrets.",
+        abstract: "Permanently delete quarantined files: originals with secrets, or copies kept before a tool deleted them.",
         discussion: "This is the only permanent delete in Domovy. It lists exactly which files go, asks first, and cannot be undone."
     )
 
@@ -16,6 +16,9 @@ struct Purge: AsyncParsableCommand {
     @Flag(name: .long, help: "Sessions moved to the quarantine after the secret scan flagged them.")
     var flaggedSessions = false
 
+    @Flag(name: .long, help: "Copies kept before `ollama rm`, `hf cache rm` or `codex delete`. Frees their space; undo is no longer possible.")
+    var toolCopies = false
+
     @Flag(name: .long, help: "Print what would be deleted and change nothing.")
     var dryRun = false
 
@@ -23,8 +26,8 @@ struct Purge: AsyncParsableCommand {
     var yes = false
 
     func validate() throws {
-        guard redactedOriginals || flaggedSessions else {
-            throw ValidationError("Say what to purge: --redacted-originals and/or --flagged-sessions.")
+        guard redactedOriginals || flaggedSessions || toolCopies else {
+            throw ValidationError("Say what to purge: --redacted-originals, --flagged-sessions and/or --tool-copies.")
         }
     }
 
@@ -33,11 +36,12 @@ struct Purge: AsyncParsableCommand {
             var reasons: Set<PurgeItem.Reason> = []
             if redactedOriginals { reasons.insert(.redactedOriginal) }
             if flaggedSessions { reasons.insert(.flaggedSession) }
+            if toolCopies { reasons.insert(.toolCopy) }
             let executor = options.executor
             let plan = try executor.purgePlan(reasons)
             for item in plan.items {
                 print("  \(Format.bytes(item.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) \(item.file.path)")
-                print("  \(String(repeating: " ", count: 10)) \(item.reason == .redactedOriginal ? "original of" : "deleted from") \(item.originalPath.path)")
+                print("  \(String(repeating: " ", count: 10)) \(item.reason == .redactedOriginal ? "original of" : item.reason == .toolCopy ? "copy of" : "deleted from") \(item.originalPath.path)")
             }
             print((plan.items.isEmpty ? "" : "\n") + plan.summary)
             guard !plan.isEmpty, !dryRun else {

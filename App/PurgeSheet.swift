@@ -13,12 +13,12 @@ struct PurgeSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(plan.isEmpty ? "Nothing to purge" : "Permanently delete \(plan.items.count) \(plan.items.count == 1 ? "original" : "originals")?")
+            Text(plan.isEmpty ? "Nothing to purge" : "Permanently delete \(plan.items.count) \(plan.items.count == 1 ? "file" : "files")?")
                 .font(.title3.weight(.semibold))
             Text(plan.summary)
                 .foregroundStyle(.secondary)
             if !plan.isEmpty {
-                Label("These are the copies Domovy kept in its quarantine, with the secrets still in plain text. They do not go to the Trash.", systemImage: "info.circle")
+                Label(explanation, systemImage: "info.circle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 list
@@ -36,16 +36,31 @@ struct PurgeSheet: View {
     private var list: some View {
         List(plan.items, id: \.file) { item in
             ChangeRow(
-                symbol: item.reason == .redactedOriginal ? "doc.badge.ellipsis" : "folder",
+                symbol: item.reason == .redactedOriginal ? "doc.badge.ellipsis" : item.reason == .toolCopy ? "doc.on.doc" : "folder",
                 path: relativePath(item.originalPath, under: library.home),
-                note: (item.reason == .redactedOriginal ? "Original of a redacted file" : "Deleted session flagged by the secret scan")
-                    + " \u{00B7} quarantine/\(item.file.lastPathComponent)",
+                note: Self.note(item.reason) + " \u{00B7} quarantine/\(item.file.lastPathComponent)",
                 size: item.sizeBytes.formatted(.byteCount(style: .file))
             )
         }
         .frame(height: 220)
         .scrollContentBackground(.hidden)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var explanation: String {
+        let reasons = Set(plan.items.map(\.reason))
+        if reasons == [.toolCopy] {
+            return "These are the copies Domovy kept before the tools deleted the originals. Undo needs them; purging frees their space. They do not go to the Trash."
+        }
+        return "These are the copies Domovy kept in its quarantine, some with secrets still in plain text. They do not go to the Trash."
+    }
+
+    private static func note(_ reason: PurgeItem.Reason) -> String {
+        switch reason {
+        case .redactedOriginal: "Original of a redacted file"
+        case .flaggedSession: "Deleted session flagged by the secret scan"
+        case .toolCopy: "Copy kept before the tool deleted it"
+        }
     }
 
     private var footer: some View {

@@ -27,6 +27,7 @@ struct LocalModelsHeader: View {
     @Binding var unusedDays: Int
     @Binding var selected: Set<String>
     let onRemoveSelected: () -> Void
+    let onPurgeCopies: () -> Void
 
     static let thresholds = [30, 60, 90, 180]
     /// Scroll target on the Disk screen.
@@ -66,6 +67,17 @@ struct LocalModelsHeader: View {
                     .help("Shows exactly what happens to each model first.")
             }
             .font(.callout)
+            if library.keptCopyBytes > 0 {
+                HStack(spacing: 8) {
+                    Label("Domovy keeps \(library.keptCopyBytes.formatted(.byteCount(style: .file))) of copies of deleted models in its quarantine, so you can undo.", systemImage: "doc.on.doc")
+                        .foregroundStyle(.secondary)
+                        .help("\(library.keptCopyBytes.formatted()) bytes")
+                    Spacer()
+                    Button("Purge Kept Copies\u{2026}", action: onPurgeCopies)
+                        .help("Shows every copy first. Deleting them frees the space; undo is no longer possible.")
+                }
+                .font(.callout)
+            }
             Text("No store records when a model was last used, so Domovy goes by the date each one knows: when Ollama added it, LM Studio's newest file, the newest Hugging Face download.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

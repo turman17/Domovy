@@ -92,9 +92,10 @@ extension SessionLibrary {
 
     // MARK: Purge
 
-    func purgePlan() async throws -> PurgePlan {
+    /// Secrets by default; the Disk screen asks for the copies kept before tool deletes.
+    func purgePlan(_ reasons: Set<PurgeItem.Reason> = [.redactedOriginal, .flaggedSession]) async throws -> PurgePlan {
         let executor = self.executor
-        return try await Task.detached { try executor.purgePlan() }.value
+        return try await Task.detached { try executor.purgePlan(reasons) }.value
     }
 
     /// The only permanent delete in Domovy. The actions it ends leave the undo stack.
@@ -106,7 +107,10 @@ extension SessionLibrary {
             undoManager?.removeAllActions(withTarget: action)
         }
         registeredUndoActions.removeAll { action in action.entries.contains { ended.contains($0.id) } }
+        if plan.items.contains(where: { $0.reason == .toolCopy }) {
+            keptCopyBytes = (try? await Task.detached { try executor.purgePlan([.toolCopy]).totalBytes }.value) ?? 0
+        }
         let size = plan.totalBytes.formatted(.byteCount(style: .file))
-        toast = Toast(message: "Permanently deleted \(plan.items.count) \(plan.items.count == 1 ? "original" : "originals") (\(size)) from Domovy's quarantine.", undo: nil)
+        toast = Toast(message: "Permanently deleted \(plan.items.count) \(plan.items.count == 1 ? "file" : "files") (\(size)) from Domovy's quarantine.", undo: nil)
     }
 }

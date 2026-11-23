@@ -53,9 +53,10 @@ struct Models: AsyncParsableCommand {
             commandName: "rm",
             abstract: "Remove local models.",
             discussion: """
-            Uses the tool's own command where there is one (`ollama rm`, `hf cache rm`), which deletes \
-            for good, then checks the result. Otherwise files move to the Trash (or the quarantine with \
-            --to quarantine) and `domo undo` puts them back. Layers and files another model uses stay. \
+            Uses the tool's own command where there is one (`ollama rm`, `hf cache rm`) and checks the \
+            result; Domovy first keeps a clone of the files in its quarantine, so `domo undo` brings the \
+            model back until you run `domo purge --tool-copies`. Otherwise files move to the Trash (or the \
+            quarantine with --to quarantine) and `domo undo` puts them back. Layers and files another model uses stay. \
             Refuses while a model is loaded in Ollama, LM Studio runs, or anything has the files open.
             """
         )
@@ -95,11 +96,11 @@ struct Models: AsyncParsableCommand {
                 }
                 guard !removal.isBlocked else { throw CleanupError.inUse(reasons: removal.reasons) }
                 if !yes {
-                    try confirm("\n\(removal.title.dropLast())\(removal.isPermanent ? " (some of it for good)" : "")? [y/N] ")
+                    try confirm("\n\(removal.title.dropLast())? [y/N] ")
                 }
                 let entries = try await planner.execute(removal, with: options.executor)
                 let undoable = entries.contains { $0.isUndoable }
-                print("\nDone.\(undoable ? " Undo what moved with `domo undo`." : "")")
+                print("\nDone.\(undoable ? " Undo with `domo undo`." : "")")
                 Domo.printLeftovers(entries)
             } catch {
                 throw Domo.fail(error)

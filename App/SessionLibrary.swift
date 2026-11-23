@@ -81,6 +81,8 @@ final class SessionLibrary {
     var registeredUndoActions: [UndoAction] = []
     /// Orphans and duplicates of Claude Code and Claude Desktop, for the Disk screen.
     var orphanReport: OrphanReport = .empty
+    /// Copies Domovy kept before `ollama rm` and friends deleted the originals, until purged.
+    var keptCopyBytes: Int64 = 0
 
     let claudeCode: ClaudeCodeAdapter
     let codex: CodexAdapter
@@ -181,8 +183,11 @@ final class SessionLibrary {
         }
         let claudeCode = self.claudeCode
         let orphans = Task.detached { await claudeCode.orphanReport() }
+        let executor = self.executor
+        let kept = Task.detached { (try? executor.purgePlan([.toolCopy]).totalBytes) ?? 0 }
         let measured = await measuring.value
         orphanReport = await orphans.value
+        keptCopyBytes = await kept.value
         failures += measured.failures
         sessions = found.sorted { $0.lastActive > $1.lastActive }
         footprints = measured.footprints
@@ -291,11 +296,13 @@ final class SessionLibrary {
         }
     }
 
-    /// " Codex left 2 things behind: …" after a verified agent command, or nothing.
+    /// " Checked afterwards: …" after a verified agent command, and how its copy was kept when
+    /// that is worth knowing (a full copy instead of a clone), or nothing.
     static func leftoverText(_ entries: [UndoEntry]) -> String {
+        let notes = entries.flatMap(\.notes)
         let leftovers = entries.flatMap(\.leftovers)
-        guard !leftovers.isEmpty else { return "" }
-        return " Checked afterwards: " + leftovers.joined(separator: " ")
+        return (notes.isEmpty ? "" : " " + notes.joined(separator: " "))
+            + (leftovers.isEmpty ? "" : " Checked afterwards: " + leftovers.joined(separator: " "))
     }
 
     func run(_ plans: [Plan]) async throws -> [UndoEntry] {

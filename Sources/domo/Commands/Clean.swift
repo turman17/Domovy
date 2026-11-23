@@ -45,7 +45,7 @@ struct Clean: AsyncParsableCommand {
             }
             if !yes {
                 let what = !cleanup.plan.commands.isEmpty
-                    ? "Run \(cleanup.plan.commands.map { "`\($0.commandLine)`" }.joined(separator: ", "))\(cleanup.plan.isPermanent ? " (permanent)" : "")"
+                    ? "Run \(cleanup.plan.commands.map { "`\($0.commandLine)`" }.joined(separator: ", "))\(cleanup.plan.isPermanent ? " (Domovy keeps a copy first)" : "")"
                     : category.compresses ? "Compress \(cleanup.plan.compressions.count) file(s) in place" : "Move \(cleanup.plan.moves.count) item(s) (\(Format.bytes(cleanup.plan.totalBytes))) to \(to.displayName)"
                 try confirm("\n\(what)? [y/N] ")
             }

@@ -13,6 +13,7 @@ struct DiskView: View {
     @State private var orphanRequest: OrphanRequest?
     @State private var cleanupRequest: CleanupRequest?
     @State private var modelRequest: ModelRemovalRequest?
+    @State private var purgeRequest: PurgeRequest?
     @State private var errorMessage: String?
     /// Local models ticked for "Remove Selected…", by `LocalModel.id`.
     @State private var selectedModels: Set<String> = []
@@ -51,7 +52,7 @@ struct DiskView: View {
                             AgentFootprintSection(footprint: footprint, onOpenSessions: onOpenSessions, onCleanUp: { requestCleanUp(.orphans) }, onGuidedCleanup: requestCleanup)
                         }
                         if !library.modelFootprints.isEmpty {
-                            LocalModelsHeader(unusedDays: $unusedDays, selected: $selectedModels, onRemoveSelected: removeSelected)
+                            LocalModelsHeader(unusedDays: $unusedDays, selected: $selectedModels, onRemoveSelected: removeSelected, onPurgeCopies: requestPurge)
                                 .id(LocalModelsHeader.anchor)
                             ForEach(library.modelFootprints, id: \.agent) { footprint in
                                 AgentFootprintSection(footprint: footprint, models: selection, onOpenSessions: onOpenSessions,
@@ -82,6 +83,9 @@ struct DiskView: View {
         }
         .sheet(item: $modelRequest) { request in
             ModelRemovalSheet(request: request)
+        }
+        .sheet(item: $purgeRequest) { request in
+            PurgeSheet(plan: request.plan)
         }
         .onChange(of: library.footprints) { _, _ in
             // Models removed since are no longer selectable.
@@ -120,6 +124,17 @@ struct DiskView: View {
         Task {
             do {
                 cleanupRequest = CleanupRequest(cleanup: try await library.cleanupPlan(id, destination: .trash))
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// The copies kept before tools deleted models; the sheet names each one first.
+    private func requestPurge() {
+        Task {
+            do {
+                purgeRequest = PurgeRequest(plan: try await library.purgePlan([.toolCopy]))
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -321,7 +336,7 @@ private struct CategoryRow: View {
         if let model, let selection {
             Button("Remove\u{2026}") { selection.onRemove(model) }
                 .help(model.agent == .lmStudio ? "Shows every file first. Moves the folder to the Trash; you can undo this."
-                      : "Shows exactly what happens first. \(model.agent.displayName)'s own command deletes it for good when it is available.")
+                      : "Shows exactly what happens first. \(model.agent.displayName)'s own command deletes it when it is available; Domovy keeps a copy so you can undo.")
         } else if let id = category.cleanupID {
             guidedButton(id)
         } else if category.guidance == .manageInSessions {

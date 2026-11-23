@@ -2,7 +2,8 @@ import DomovyCore
 import Foundation
 
 /// Local models on the Disk screen: the "unused for N days" selection and removal, run like
-/// every other plan. `ollama rm` and `hf cache rm` delete for good; moved files can be undone.
+/// every other plan. `ollama rm` and `hf cache rm` run after Domovy keeps a copy; both those and
+/// moved files can be undone.
 extension SessionLibrary {
     /// Below this, local models are not worth a line in the menu bar.
     static let modelWarningBytes: Int64 = 5_000_000_000
@@ -35,10 +36,10 @@ extension SessionLibrary {
         let message: String
         if undoable.isEmpty {
             message = "Removed \(names) (\(size)). It's gone for good; download it again to use it."
-        } else if undoable.count == entries.count {
-            message = "Moved \(names) (\(size)) to \((removal.plans.first?.destination ?? .trash).displayName)."
+        } else if removal.isPermanent {
+            message = "Removed \(names) (\(size)). Domovy keeps a copy in its quarantine until you purge it."
         } else {
-            message = "Removed \(names) (\(size)). The moved files can be put back; what the tools deleted cannot."
+            message = "Moved \(names) (\(size)) to \((removal.plans.first?.destination ?? .trash).displayName)."
         }
         let action = UndoAction(name: "Remove Models", entries: undoable)
         if !undoable.isEmpty { register(action) }
