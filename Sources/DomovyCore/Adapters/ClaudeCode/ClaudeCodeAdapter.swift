@@ -70,8 +70,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
 
     public func deletePlan(for session: Session, destination: Destination = .trash) async throws -> Plan {
         try requireOurs(session)
-        if case .readOnly(let reason) = layout.probe() { throw AdapterError.readOnly(kind, reason: reason) }
-        if case .notInstalled = layout.probe() { throw AdapterError.notInstalled(kind) }
+        try requireWritable()
 
         let artifacts = collectArtifacts(id: session.id, transcript: session.transcriptURL)
         var moves: [FileMove] = []
@@ -98,9 +97,57 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         )
     }
 
+    /// Compresses the session's cold files in place with APFS transparent compression.
+    /// Claude Code reads them unchanged and can resume the session; mtimes stay, so its
+    /// retention sweep still applies. `history.jsonl` is shared and stays as it is.
     public func archivePlan(for session: Session) async throws -> Plan {
         try requireOurs(session)
-        throw AdapterError.notImplemented(kind, feature: "archive")
+        try requireWritable()
+
+        var compressions: [FileCompression] = []
+        for artifact in collectArtifacts(id: session.id, transcript: session.transcriptURL)
+        where Self.archivedNotes.contains(artifact.note) {
+            for file in Self.regularFiles(at: artifact.url) {
+                if layout.isProtected(file) { throw AdapterError.protectedPathInPlan(file) }
+                guard !APFSCompression.isCompressed(file),
+                      FileSystem.size(of: file) > APFSCompression.minimumUsefulSize else { continue }
+                compressions.append(FileCompression(
+                    file: file,
+                    sizeBytes: APFSCompression.allocatedBytes(of: file),
+                    estimatedBytes: APFSCompression.estimatedCompressedBytes(of: file),
+                    modificationTime: FileSystem.modificationTime(of: file),
+                    note: artifact.note
+                ))
+            }
+        }
+        let live = await liveness.check(sessionID: session.id, artifactURLs: compressions.map(\.file))
+        return Plan(
+            agent: kind,
+            sessionID: session.id,
+            action: .archive,
+            destination: nil,
+            moves: [],
+            indexEdits: [],
+            compressions: compressions,
+            liveCheck: live
+        )
+    }
+
+    /// Artifacts worth compressing: transcripts and their bulky companions. Small state the
+    /// agent may still rewrite (session env, security state) and shared indexes are left out.
+    private static let archivedNotes: Set<String> = [
+        ArtifactNote.transcript, ArtifactNote.companions, ArtifactNote.setAside,
+        ArtifactNote.checkpoints, ArtifactNote.uploads,
+    ]
+
+    /// The file itself, or every regular file below a folder. Symlinks are never followed.
+    private static func regularFiles(at url: URL) -> [URL] {
+        guard FileSystem.isDirectory(url) else { return APFSCompression.isRegularFile(url) ? [url] : [] }
+        guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: []) else { return [] }
+        return enumerator.compactMap { $0 as? URL }
+            .map(\.standardizedFileURL)
+            .filter { APFSCompression.isRegularFile($0) }
+            .sorted { $0.path < $1.path }
     }
 
     public func transcript(of session: Session, limit: Int) async throws -> Transcript {
@@ -146,11 +193,16 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         let expiresAt = lastActive.addingTimeInterval(TimeInterval(settings.cleanupPeriodDays) * 86_400)
         let live = await liveness.check(sessionID: id, artifactURLs: artifacts.map(\.url))
 
+        let archived = APFSCompression.isCompressed(transcript)
+
+        // Expiring wins over archived: compression keeps the mtime, so the sweep still comes.
         let status: Session.Status
         if live.isLive {
             status = .live
         } else if expiresAt.timeIntervalSince(now()) <= TimeInterval(expiringWindowDays) * 86_400 {
             status = .expiring
+        } else if archived {
+            status = .archived
         } else {
             status = .idle
         }
@@ -163,7 +215,8 @@ public struct ClaudeCodeAdapter: AgentAdapter {
             sizeBytes: size,
             status: status,
             expiresAt: expiresAt,
-            transcriptURL: transcript
+            transcriptURL: transcript,
+            isArchived: archived
         )
     }
 
@@ -185,13 +238,13 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         }
 
         let slug = transcript.deletingLastPathComponent()
-        add(transcript, .file, "Transcript")
-        add(slug.appendingPathComponent(id, isDirectory: true), .folder, "Subagent transcripts, tool results and MCP tasks")
+        add(transcript, .file, ArtifactNote.transcript)
+        add(slug.appendingPathComponent(id, isDirectory: true), .folder, ArtifactNote.companions)
         for sibling in FileSystem.children(of: slug) where ClaudeCodeLayout.sessionID(ofSetAsideCopyNamed: sibling.lastPathComponent) == id {
-            add(sibling, .file, "Set-aside copy of the transcript")
+            add(sibling, .file, ArtifactNote.setAside)
         }
-        add(layout.fileHistory.appendingPathComponent(id, isDirectory: true), .folder, "Checkpoint snapshots")
-        add(layout.uploads.appendingPathComponent(id, isDirectory: true), .folder, "Uploaded files")
+        add(layout.fileHistory.appendingPathComponent(id, isDirectory: true), .folder, ArtifactNote.checkpoints)
+        add(layout.uploads.appendingPathComponent(id, isDirectory: true), .folder, ArtifactNote.uploads)
         add(layout.devMods.appendingPathComponent(id, isDirectory: true), .folder, "Development modifications")
         let env = layout.sessionEnv.appendingPathComponent(id)
         add(env, FileSystem.isDirectory(env) ? .folder : .file, "Session environment")
@@ -221,9 +274,26 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         )
     }
 
+    private func requireWritable() throws {
+        switch layout.probe() {
+        case .readOnly(let reason): throw AdapterError.readOnly(kind, reason: reason)
+        case .notInstalled: throw AdapterError.notInstalled(kind)
+        case .ready: break
+        }
+    }
+
     private func requireOurs(_ session: Session) throws {
         guard session.agent == kind, FileSystem.relativePath(of: session.transcriptURL, under: root) != nil else {
             throw AdapterError.sessionNotFound(session.id)
         }
     }
+}
+
+/// Artifact notes shown to the user; the archive plan selects artifacts by them.
+private enum ArtifactNote {
+    static let transcript = "Transcript"
+    static let companions = "Subagent transcripts, tool results and MCP tasks"
+    static let setAside = "Set-aside copy of the transcript"
+    static let checkpoints = "Checkpoint snapshots"
+    static let uploads = "Uploaded files"
 }

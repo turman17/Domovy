@@ -22,19 +22,56 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
         public let modificationTime: FileTime?
     }
 
+    /// A file an archive compressed in place; undo decompresses it again.
+    public struct CompressedItem: Codable, Sendable, Hashable {
+        public let file: URL
+        public let sizeBytes: Int64
+    }
+
     public let id: UUID
     public let createdAt: Date
     public let planID: UUID
+    /// Entries executed together (e.g. "Archive all") share an id and are undone together.
+    public let batchID: UUID?
+    public let action: Plan.Action
     public let agent: AgentKind
     public let sessionID: String
-    public let destination: Destination
+    public let destination: Destination?
     public var moved: [MovedItem]
     public var indexRestores: [IndexRestore]
+    public var compressed: [CompressedItem]
     public var undoneAt: Date?
     /// Set when execution stopped half way; `undo` still restores what did move.
     public var failure: String?
 
     public var isUndone: Bool { undoneAt != nil }
+}
+
+extension UndoEntry {
+    private enum CodingKeys: String, CodingKey {
+        case id, createdAt, planID, batchID, action, agent, sessionID, destination
+        case moved, indexRestores, compressed, undoneAt, failure
+    }
+
+    /// Entries written before archive existed have no action, batch or compressed list.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try c.decode(UUID.self, forKey: .id),
+            createdAt: try c.decode(Date.self, forKey: .createdAt),
+            planID: try c.decode(UUID.self, forKey: .planID),
+            batchID: try c.decodeIfPresent(UUID.self, forKey: .batchID),
+            action: try c.decodeIfPresent(Plan.Action.self, forKey: .action) ?? .delete,
+            agent: try c.decode(AgentKind.self, forKey: .agent),
+            sessionID: try c.decode(String.self, forKey: .sessionID),
+            destination: try c.decodeIfPresent(Destination.self, forKey: .destination),
+            moved: try c.decodeIfPresent([MovedItem].self, forKey: .moved) ?? [],
+            indexRestores: try c.decodeIfPresent([IndexRestore].self, forKey: .indexRestores) ?? [],
+            compressed: try c.decodeIfPresent([CompressedItem].self, forKey: .compressed) ?? [],
+            undoneAt: try c.decodeIfPresent(Date.self, forKey: .undoneAt),
+            failure: try c.decodeIfPresent(String.self, forKey: .failure)
+        )
+    }
 }
 
 /// A folder of JSON entries, newest last. Lives under the Domovy store root, never in `~/.claude`.
@@ -58,6 +95,14 @@ public struct UndoLog: Sendable {
 
     public func latestPending() throws -> UndoEntry? {
         try entries().last { !$0.isUndone }
+    }
+
+    /// The latest pending entry together with the pending entries of its batch, newest first.
+    public func latestPendingBatch() throws -> [UndoEntry] {
+        let pending = try entries().filter { !$0.isUndone }
+        guard let last = pending.last else { return [] }
+        guard let batch = last.batchID else { return [last] }
+        return pending.filter { $0.batchID == batch }.reversed()
     }
 
     /// Folder for backups that belong to one entry.

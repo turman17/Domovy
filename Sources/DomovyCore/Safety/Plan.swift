@@ -50,6 +50,27 @@ public struct IndexEdit: Hashable, Codable, Sendable {
     }
 }
 
+/// One file that an archive rewrites in place with APFS transparent compression.
+/// The agent reads it exactly as before; only the on-disk size changes.
+public struct FileCompression: Hashable, Codable, Sendable {
+    public let file: URL
+    /// Bytes on disk now. The logical size never changes.
+    public let sizeBytes: Int64
+    /// Estimated bytes on disk afterwards.
+    public let estimatedBytes: Int64
+    /// Modification time at plan time. The executor leaves a file alone if it changed since.
+    public let modificationTime: FileTime?
+    public let note: String
+
+    public init(file: URL, sizeBytes: Int64, estimatedBytes: Int64, modificationTime: FileTime?, note: String) {
+        self.file = file
+        self.sizeBytes = sizeBytes
+        self.estimatedBytes = estimatedBytes
+        self.modificationTime = modificationTime
+        self.note = note
+    }
+}
+
 /// Exact description of a mutating action, computed before anything changes.
 /// The same value drives the UI preview, `domo rm --dry-run` and the executor.
 public struct Plan: Identifiable, Hashable, Codable, Sendable {
@@ -63,9 +84,11 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     public let agent: AgentKind
     public let sessionID: String
     public let action: Action
-    public let destination: Destination
+    /// Where moved files go. `nil` for an archive, which changes files in place.
+    public let destination: Destination?
     public let moves: [FileMove]
     public let indexEdits: [IndexEdit]
+    public let compressions: [FileCompression]
     public let liveCheck: LiveCheckResult
 
     public init(
@@ -74,9 +97,10 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         agent: AgentKind,
         sessionID: String,
         action: Action,
-        destination: Destination,
+        destination: Destination?,
         moves: [FileMove],
         indexEdits: [IndexEdit],
+        compressions: [FileCompression] = [],
         liveCheck: LiveCheckResult
     ) {
         self.id = id
@@ -87,15 +111,22 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         self.destination = destination
         self.moves = moves
         self.indexEdits = indexEdits
+        self.compressions = compressions
         self.liveCheck = liveCheck
     }
 
     public var totalBytes: Int64 {
         moves.reduce(0) { $0 + $1.sizeBytes } + indexEdits.reduce(0) { $0 + $1.removedBytes }
+            + compressions.reduce(0) { $0 + $1.sizeBytes }
+    }
+
+    /// Estimated on-disk bytes of the compressed files after an archive.
+    public var estimatedBytesAfter: Int64 {
+        compressions.reduce(0) { $0 + $1.estimatedBytes }
     }
 
     public var isEmpty: Bool {
-        moves.isEmpty && indexEdits.isEmpty
+        moves.isEmpty && indexEdits.isEmpty && compressions.isEmpty
     }
 
     /// Plain-language summary in the Domovy voice: say exactly what happens.
@@ -103,13 +134,20 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         if liveCheck.isLive {
             return "This session is live, so nothing will change. " + liveCheck.reasons.joined(separator: " ")
         }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowsNonnumericFormatting = false
+        if action == .archive {
+            guard !compressions.isEmpty else { return "Nothing to compress: the files of this session are already compressed or too small to gain from it." }
+            let n = compressions.count
+            let before = formatter.string(fromByteCount: totalBytes)
+            let after = formatter.string(fromByteCount: estimatedBytesAfter)
+            return "Compresses \(n) \(n == 1 ? "file" : "files") (\(before) \u{2192} ~\(after)). \(agent.displayName) can still resume it. You can undo this."
+        }
         var parts: [String] = []
         if !moves.isEmpty {
-            let formatter = ByteCountFormatter()
-            formatter.countStyle = .file
-            formatter.allowsNonnumericFormatting = false
             let bytes = formatter.string(fromByteCount: moves.reduce(0) { $0 + $1.sizeBytes })
-            parts.append("Moves \(moves.count) \(moves.count == 1 ? "item" : "items") (\(bytes)) to \(destination.displayName)")
+            parts.append("Moves \(moves.count) \(moves.count == 1 ? "item" : "items") (\(bytes)) to \((destination ?? .trash).displayName)")
         }
         for edit in indexEdits {
             let n = edit.lineNumbers.count

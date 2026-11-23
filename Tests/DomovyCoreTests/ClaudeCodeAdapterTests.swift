@@ -178,16 +178,6 @@ struct ClaudeCodeAdapterTests {
         }
     }
 
-    @Test("archive is a typed notImplemented for now")
-    func archive() async throws {
-        let fixture = try FixtureHome()
-        let adapter = fixture.adapter()
-        let session = try await adapter.session(matching: IDs.idle)
-        await #expect(throws: AdapterError.notImplemented(.claudeCode, feature: "archive")) {
-            try await adapter.archivePlan(for: session)
-        }
-    }
-
     @Test("footprint marks plugins and skills as keep")
     func footprint() async throws {
         let fixture = try FixtureHome()

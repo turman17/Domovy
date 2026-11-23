@@ -6,6 +6,7 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
     case moveFailed(URL, reason: String, movedSoFar: Int, total: Int)
     case indexEditFailed(URL, reason: String)
     case restoreFailed(URL, reason: String)
+    case compressionFailed(URL, reason: String, doneSoFar: Int, total: Int)
     case alreadyUndone
     case nothingToUndo
 
@@ -19,6 +20,8 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
             "Could not move \(url.lastPathComponent): \(reason). \(moved) of \(total) items were moved; run undo to put them back."
         case .indexEditFailed(let url, let reason):
             "Could not edit \(url.lastPathComponent): \(reason). Files already moved can be restored with undo."
+        case .compressionFailed(let url, let reason, let done, let total):
+            "Could not compress \(url.lastPathComponent): \(reason) \(done) of \(total) files were compressed; run undo to decompress them."
         case .restoreFailed(let url, let reason):
             "Could not restore \(url.lastPathComponent): \(reason)"
         case .alreadyUndone:
@@ -50,6 +53,19 @@ public struct Executor: Sendable {
     // MARK: Execute
 
     public func execute(_ plan: Plan) throws -> UndoEntry {
+        try execute(plan, batchID: nil)
+    }
+
+    /// Executes several plans as one undoable batch. Refuses up front if any plan is live or
+    /// empty; stops at the first failure, leaving what ran so far undoable as a batch.
+    public func execute(_ plans: [Plan]) throws -> [UndoEntry] {
+        if let live = plans.first(where: { $0.liveCheck.isLive }) { throw ExecutorError.sessionIsLive(reasons: live.liveCheck.reasons) }
+        guard !plans.isEmpty, !plans.contains(where: \.isEmpty) else { throw ExecutorError.nothingToDo }
+        let batch = plans.count > 1 ? UUID() : nil
+        return try plans.map { try execute($0, batchID: batch) }
+    }
+
+    private func execute(_ plan: Plan, batchID: UUID?) throws -> UndoEntry {
         guard !plan.liveCheck.isLive else { throw ExecutorError.sessionIsLive(reasons: plan.liveCheck.reasons) }
         guard !plan.isEmpty else { throw ExecutorError.nothingToDo }
 
@@ -57,21 +73,25 @@ public struct Executor: Sendable {
             id: UUID(),
             createdAt: now(),
             planID: plan.id,
+            batchID: batchID,
+            action: plan.action,
             agent: plan.agent,
             sessionID: plan.sessionID,
             destination: plan.destination,
             moved: [],
             indexRestores: [],
+            compressed: [],
             undoneAt: nil,
             failure: nil
         )
         try undoLog.write(entry)
+        if plan.action == .archive { return try compress(plan, entry: entry) }
         Log.executor.info("Executing plan \(plan.id, privacy: .public) for session \(plan.sessionID, privacy: .public): \(plan.moves.count) moves, \(plan.indexEdits.count) index edits")
 
         let present = plan.moves.filter { FileSystem.exists($0.source) }
         for (index, move) in present.enumerated() {
             do {
-                let current = try relocate(move.source, to: plan.destination, entry: entry, ordinal: index)
+                let current = try relocate(move.source, to: plan.destination ?? .trash, entry: entry, ordinal: index)
                 entry.moved.append(.init(original: move.source, current: current))
             } catch {
                 entry.failure = error.localizedDescription
@@ -91,6 +111,33 @@ public struct Executor: Sendable {
             }
         }
 
+        try undoLog.write(entry)
+        return entry
+    }
+
+    /// Archive: compress each planned file in place. Files that changed since planning are
+    /// skipped (the agent may be writing), not treated as failures.
+    private func compress(_ plan: Plan, entry original: UndoEntry) throws -> UndoEntry {
+        var entry = original
+        Log.executor.info("Archiving session \(plan.sessionID, privacy: .public): \(plan.compressions.count) files")
+        let present = plan.compressions.filter { FileSystem.exists($0.file) }
+        for item in present {
+            do {
+                switch try APFSCompression.compress(item.file, expected: item.modificationTime) {
+                case .rewritten:
+                    entry.compressed.append(.init(file: item.file, sizeBytes: item.sizeBytes))
+                case .skipped(let reason):
+                    Log.executor.info("Left \(item.file.path, privacy: .private) as is: \(reason, privacy: .public)")
+                }
+            } catch CompressionError.changedSincePlan(let url) {
+                Log.executor.info("Left \(url.path, privacy: .private) as is: it changed since the plan")
+            } catch {
+                entry.failure = error.localizedDescription
+                try undoLog.write(entry)
+                Log.executor.error("Compression failed for \(item.file.path, privacy: .private): \(error.localizedDescription, privacy: .public)")
+                throw ExecutorError.compressionFailed(item.file, reason: error.localizedDescription, doneSoFar: entry.compressed.count, total: present.count)
+            }
+        }
         try undoLog.write(entry)
         return entry
     }
@@ -152,6 +199,13 @@ public struct Executor: Sendable {
         return try undo(entry)
     }
 
+    /// Undoes the latest action; for a batch ("Archive all") every entry of it, newest first.
+    public func undoLatestBatch() throws -> [UndoEntry] {
+        let batch = try undoLog.latestPendingBatch()
+        guard !batch.isEmpty else { throw ExecutorError.nothingToUndo }
+        return try batch.map { try undo($0) }
+    }
+
     public func undo(_ original: UndoEntry) throws -> UndoEntry {
         var entry = original
         guard !entry.isUndone else { throw ExecutorError.alreadyUndone }
@@ -170,6 +224,24 @@ public struct Executor: Sendable {
             }
         }
         entry.moved = []
+
+        // Decompress archived files. A file the agent rewrote or removed since is left as is.
+        var stillCompressed = entry.compressed
+        for item in entry.compressed {
+            do {
+                if FileSystem.exists(item.file) {
+                    if case .skipped(let reason) = try APFSCompression.decompress(item.file) {
+                        Log.executor.info("Left \(item.file.path, privacy: .private) as is: \(reason, privacy: .public)")
+                    }
+                }
+                stillCompressed.removeAll { $0 == item }
+            } catch {
+                entry.compressed = stillCompressed
+                try undoLog.write(entry)
+                throw ExecutorError.restoreFailed(item.file, reason: error.localizedDescription)
+            }
+        }
+        entry.compressed = []
 
         for restore in entry.indexRestores {
             do {

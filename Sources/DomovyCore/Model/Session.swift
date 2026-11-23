@@ -7,7 +7,7 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         case idle
         /// An agent process currently references this session. Never touch it.
         case live
-        /// Kept by the agent in an archived form.
+        /// Compressed by Domovy (APFS transparent compression); the agent can still resume it.
         case archived
         /// The agent's own retention sweep will delete it soon.
         case expiring
@@ -29,6 +29,9 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
     public let expiresAt: Date?
     /// The primary transcript file. Adapters use it to locate companions.
     public let transcriptURL: URL
+    /// The transcript is compressed. True also when `status` reports something more urgent
+    /// (live, expiring): compression keeps mtimes, so the agent's sweep still applies.
+    public let isArchived: Bool
 
     public init(
         id: String,
@@ -39,7 +42,8 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         sizeBytes: Int64,
         status: Status,
         expiresAt: Date?,
-        transcriptURL: URL
+        transcriptURL: URL,
+        isArchived: Bool = false
     ) {
         self.id = id
         self.agent = agent
@@ -50,6 +54,7 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         self.status = status
         self.expiresAt = expiresAt
         self.transcriptURL = transcriptURL
+        self.isArchived = isArchived
     }
 
     /// Last path component of the project, for compact display.
