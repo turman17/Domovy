@@ -24,6 +24,8 @@ struct SessionsView: View {
     @State private var selection: Session.ID? = AppEnvironment.startSelection
     @State private var statusFilter: StatusFilter = .all
     @State private var sortOrder = [KeyPathComparator(\SessionRow.lastActive, order: .reverse)]
+    /// Column widths, kept here so they survive the table being rebuilt on a sort.
+    @State private var columns = TableColumnCustomization<SessionRow>()
     @State private var showInspector = true
     @State private var dismissedBanners: Set<AgentKind> = []
     @State private var deleteRequest: DeleteRequest?
@@ -171,7 +173,20 @@ struct SessionsView: View {
     // MARK: Pieces
 
     private var table: some View {
-        Table(rows, selection: $selection, sortOrder: $sortOrder) {
+        ScrollViewReader { proxy in
+            sessionsTable
+                // A new sort rebuilds the table: letting it animate every row to its new
+                // place takes AppKit seconds with hundreds of rows.
+                .id(sortOrder.map { "\($0.keyPath)\($0.order == .forward)" })
+                .onChange(of: sortOrder) {
+                    guard let selection else { return }
+                    Task { proxy.scrollTo(selection, anchor: .center) }
+                }
+        }
+    }
+
+    private var sessionsTable: some View {
+        Table(rows, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columns) {
             TableColumn("Title", value: \.title) { row in
                 HStack(spacing: 6) {
                     if row.memberCount > 1 {
@@ -183,6 +198,7 @@ struct SessionsView: View {
                 }
             }
                 .width(min: 180, ideal: 320)
+                .customizationID("title")
             TableColumn("Agent", value: \.agentLabel) { row in
                 HStack(spacing: 6) {
                     AgentGlyph(agent: row.session.agent)
@@ -192,14 +208,17 @@ struct SessionsView: View {
                 .help(row.agentHelp)
             }
             .width(min: 100, ideal: 150)
+            .customizationID("agent")
             TableColumn("Project", value: \.project) { Text($0.project.isEmpty ? "—" : $0.project).foregroundStyle(.secondary) }
                 .width(min: 80, ideal: 100)
+                .customizationID("project")
             TableColumn("Last active", value: \.lastActive) { row in
                 Text(row.relativeDate)
                     .foregroundStyle(.secondary)
                     .help(row.absoluteDate)
             }
                 .width(min: 90, ideal: 100)
+                .customizationID("lastActive")
             TableColumn("Size", value: \.sizeBytes) { row in
                 Text(row.sizeText)
                     .font(.system(.body, design: .monospaced))
@@ -208,6 +227,7 @@ struct SessionsView: View {
                     .help(row.exactBytes)
             }
             .width(min: 60, ideal: 70)
+            .customizationID("size")
             TableColumn("Status", value: \.statusSortKey) { row in
                 HStack(spacing: 6) {
                     StatusLabel(session: row.session)
@@ -215,6 +235,7 @@ struct SessionsView: View {
                 }
             }
             .width(min: 96, ideal: 116)
+            .customizationID("status")
         }
         .contextMenu(forSelectionType: Session.ID.self) { ids in
             if let id = ids.first, let session = library.sessions.first(where: { $0.id == id }) {
