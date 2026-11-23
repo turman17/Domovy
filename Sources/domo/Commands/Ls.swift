@@ -29,7 +29,7 @@ struct Ls: AsyncParsableCommand {
         }
         let rows = sessions.map { s in
             [
-                full ? s.id : String(s.id.prefix(8)),
+                full ? s.id : Format.shortID(s.id),
                 s.agentLabel,
                 s.projectName ?? "-",
                 Format.relative(s.lastActive),

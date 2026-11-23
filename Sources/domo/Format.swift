@@ -72,6 +72,11 @@ enum Format {
         }.joined(separator: "\n")
     }
 
+    /// The first 8 characters; OpenCode's `ses_` ids share their first characters, so 14.
+    static func shortID(_ id: String) -> String {
+        String(id.prefix(id.hasPrefix("ses_") ? 14 : 8))
+    }
+
     static func plan(_ plan: Plan) -> String {
         var lines: [String] = []
         lines.append("Plan for session \(plan.sessionID) (\(plan.agent.displayName))")
@@ -83,6 +88,10 @@ enum Format {
             lines.append("         \(command.note)")
             if !command.copiesBeforeRun.isEmpty {
                 lines.append("         keeps a copy of \(command.copiesBeforeRun.count) file(s) first, for undo")
+            }
+            if !command.snapshotsBeforeRun.isEmpty {
+                let names = command.snapshotsBeforeRun.map(\.lastPathComponent).joined(separator: ", ")
+                lines.append("         keeps a copy of \(names) first; undo works only while nothing else changes them")
             }
         }
         for move in plan.moves {
@@ -124,6 +133,9 @@ enum Format {
         lines.append(plan.summary)
         for remark in plan.remarks where remark != plan.summary {
             lines.append("Note: \(remark)")
+        }
+        if let acknowledgement = plan.acknowledgement {
+            lines.append("Needs your OK: \(acknowledgement)")
         }
         return lines.joined(separator: "\n")
     }

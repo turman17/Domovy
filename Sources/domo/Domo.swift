@@ -35,13 +35,15 @@ struct RootOptions: ParsableArguments {
         ClaudeCodeAdapter(home: home)
     }
 
-    /// Every adapter, in display order. A `--root` home never gets the real codex or gemini CLI.
+    /// Every adapter, in display order. A `--root` home never gets the real codex or opencode CLI.
     var adapters: [any AgentAdapter] {
         [
             claudeCode,
             CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: root != nil)),
-            GeminiAdapter(home: home, cli: GeminiCLI.choice(home: home, isCustomHome: root != nil)),
+            GeminiAdapter(home: home),
             AntigravityAdapter(home: home),
+            OpenCodeAdapter(home: home, cli: OpenCodeCLI.choice(home: home, isCustomHome: root != nil)),
+            CopilotAdapter(home: home),
         ]
     }
 
@@ -56,8 +58,9 @@ struct RootOptions: ParsableArguments {
     func session(matching idOrPrefix: String) async throws -> (adapter: any AgentAdapter, session: Session) {
         var matches: [(adapter: any AgentAdapter, session: Session)] = []
         for adapter in await installedAdapters() {
-            for session in try await adapter.sessions() where session.id.hasPrefix(idOrPrefix.lowercased()) {
-                if session.id == idOrPrefix.lowercased() { return (adapter, session) }
+            // OpenCode ids are mixed case; the others are lowercase.
+            for session in try await adapter.sessions() where session.id.lowercased().hasPrefix(idOrPrefix.lowercased()) {
+                if session.id.lowercased() == idOrPrefix.lowercased() { return (adapter, session) }
                 matches.append((adapter, session))
             }
         }
