@@ -23,7 +23,7 @@ struct SessionsView: View {
     @Environment(SessionLibrary.self) private var library
     @State private var selection: Session.ID? = AppEnvironment.startSelection
     @State private var statusFilter: StatusFilter = .all
-    @State private var sortOrder = [KeyPathComparator(\Session.lastActive, order: .reverse)]
+    @State private var sortOrder = [KeyPathComparator(\SessionRow.lastActive, order: .reverse)]
     @State private var showInspector = true
     @State private var dismissedBanners: Set<AgentKind> = []
     @State private var deleteRequest: DeleteRequest?
@@ -34,17 +34,20 @@ struct SessionsView: View {
     @State private var showsFlaggedOnly = false
     @State private var errorMessage: String?
 
-    private var visible: [Session] {
-        library.sessions
-            .filter { agentFilter == nil || $0.agent == agentFilter }
-            .filter { statusFilter.matches($0) }
-            .filter { !showsFlaggedOnly || !library.findings(for: $0).isEmpty }
-            .filter {
-                search.isEmpty
-                    || $0.displayTitle.localizedCaseInsensitiveContains(search)
-                    || ($0.projectName ?? "").localizedCaseInsensitiveContains(search)
-            }
-            .sorted(using: sortOrder)
+    /// Filtered, sorted rows with their text formatted once. Rebuilt only when an input
+    /// changes, so scrolling draws cells without filtering, sorting or formatting.
+    @State private var rows: [SessionRow] = []
+
+    private var rowInputs: RowInputs {
+        RowInputs(
+            sessions: library.sessions,
+            findingCounts: library.secretFindings.mapValues(\.count),
+            agentFilter: agentFilter,
+            statusFilter: statusFilter,
+            showsFlaggedOnly: showsFlaggedOnly,
+            search: search,
+            sortOrder: sortOrder
+        )
     }
 
     private var selectedSession: Session? {
@@ -99,7 +102,8 @@ struct SessionsView: View {
         .overlay { emptyState }
         .overlay(alignment: .bottom) { toastOverlay }
         .navigationTitle(showsFlaggedOnly ? "Flagged by the secret scan" : statusFilter == .expiring ? "Expiring soon" : (agentFilter?.displayName ?? "Sessions"))
-        .navigationSubtitle("\(visible.count) \(visible.count == 1 ? "session" : "sessions") · \(visible.reduce(0) { $0 + $1.sizeBytes }.formatted(.byteCount(style: .file)))")
+        .navigationSubtitle("\(rows.count) \(rows.count == 1 ? "session" : "sessions") · \(rows.reduce(0) { $0 + $1.sizeBytes }.formatted(.byteCount(style: .file)))")
+        .onChange(of: rowInputs, initial: true) { _, inputs in rows = SessionRow.rows(for: inputs) }
         .toolbar { toolbar }
         .inspector(isPresented: $showInspector) {
             if let selectedSession {
@@ -152,42 +156,47 @@ struct SessionsView: View {
     // MARK: Pieces
 
     private var table: some View {
-        Table(visible, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("Title", value: \.displayTitle) { session in
+        Table(rows, selection: $selection, sortOrder: $sortOrder) {
+            TableColumn("Title", value: \.title) { row in
                 HStack(spacing: 6) {
-                    if session.memberCount > 1 {
+                    if row.memberCount > 1 {
                         Image(systemName: "square.stack")
                             .foregroundStyle(.secondary)
-                            .help("\(session.memberCount) chats shown as one row")
+                            .help("\(row.memberCount) chats shown as one row")
                     }
-                    Text(session.displayTitle).lineLimit(1)
+                    Text(row.title).lineLimit(1)
                 }
             }
                 .width(min: 180, ideal: 320)
-            TableColumn("Agent", value: \.agentLabel) { session in
+            TableColumn("Agent", value: \.agentLabel) { row in
                 HStack(spacing: 6) {
-                    AgentGlyph(agent: session.agent)
-                    Text(session.agentLabel)
+                    AgentGlyph(agent: row.session.agent)
+                    Text(row.agentLabel)
                         .lineLimit(1)
                 }
-                .help(session.desktopHelp ?? session.agent.displayName)
+                .help(row.agentHelp)
             }
             .width(min: 100, ideal: 150)
-            TableColumn("Project", value: \.sortProject) { Text($0.projectName ?? "—").foregroundStyle(.secondary) }
+            TableColumn("Project", value: \.project) { Text($0.project.isEmpty ? "—" : $0.project).foregroundStyle(.secondary) }
                 .width(min: 80, ideal: 100)
-            TableColumn("Last active", value: \.lastActive) { RelativeDateText(date: $0.lastActive).foregroundStyle(.secondary) }
+            TableColumn("Last active", value: \.lastActive) { row in
+                Text(row.relativeDate)
+                    .foregroundStyle(.secondary)
+                    .help(row.absoluteDate)
+            }
                 .width(min: 90, ideal: 100)
-            TableColumn("Size", value: \.sizeBytes) { session in
-                SizeText(bytes: session.sizeBytes)
+            TableColumn("Size", value: \.sizeBytes) { row in
+                Text(row.sizeText)
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help(row.exactBytes)
             }
             .width(min: 60, ideal: 70)
-            TableColumn("Status", value: \.status.rawValue) { session in
+            TableColumn("Status", value: \.statusSortKey) { row in
                 HStack(spacing: 6) {
-                    StatusLabel(session: session)
-                    SecretMarker(count: library.findings(for: session).count)
+                    StatusLabel(session: row.session)
+                    SecretMarker(count: row.secretCount)
                 }
             }
             .width(min: 96, ideal: 116)
@@ -280,7 +289,7 @@ struct SessionsView: View {
                 systemImage: "house",
                 description: Text(library.errorMessage ?? "No agent sessions in this home folder. The house is in order.")
             )
-        } else if visible.isEmpty && !library.isLoading {
+        } else if rows.isEmpty && !library.isLoading {
             ContentUnavailableView.search(text: search.isEmpty ? statusFilter.rawValue : search)
         }
     }
@@ -358,5 +367,66 @@ struct SessionsView: View {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+}
+
+/// Everything the sessions table shows. Equal inputs give equal rows.
+struct RowInputs: Equatable {
+    let sessions: [Session]
+    let findingCounts: [Session.ID: Int]
+    let agentFilter: AgentKind?
+    let statusFilter: StatusFilter
+    let showsFlaggedOnly: Bool
+    let search: String
+    let sortOrder: [KeyPathComparator<SessionRow>]
+}
+
+/// One sessions-table row with its text formatted up front: cells only read strings.
+struct SessionRow: Identifiable {
+    let session: Session
+    let title: String
+    let agentLabel: String
+    let agentHelp: String
+    let project: String
+    let lastActive: Date
+    let relativeDate: String
+    let absoluteDate: String
+    let sizeBytes: Int64
+    let sizeText: String
+    let exactBytes: String
+    let statusSortKey: String
+    let secretCount: Int
+
+    var id: Session.ID { session.id }
+    var memberCount: Int { session.memberCount }
+
+    init(_ session: Session, secretCount: Int) {
+        self.session = session
+        title = session.displayTitle
+        agentLabel = session.agentLabel
+        agentHelp = session.desktopHelp ?? session.agent.displayName
+        project = session.sortProject
+        lastActive = session.lastActive
+        relativeDate = session.lastActive.formatted(.relative(presentation: .named))
+        absoluteDate = session.lastActive.formatted(date: .abbreviated, time: .shortened)
+        sizeBytes = session.sizeBytes
+        sizeText = session.sizeBytes.formatted(.byteCount(style: .file))
+        exactBytes = "\(session.sizeBytes.formatted()) bytes"
+        statusSortKey = session.status.rawValue
+        self.secretCount = secretCount
+    }
+
+    static func rows(for inputs: RowInputs) -> [SessionRow] {
+        inputs.sessions
+            .filter { inputs.agentFilter == nil || $0.agent == inputs.agentFilter }
+            .filter { inputs.statusFilter.matches($0) }
+            .filter { !inputs.showsFlaggedOnly || (inputs.findingCounts[$0.id] ?? 0) > 0 }
+            .filter {
+                inputs.search.isEmpty
+                    || $0.displayTitle.localizedCaseInsensitiveContains(inputs.search)
+                    || ($0.projectName ?? "").localizedCaseInsensitiveContains(inputs.search)
+            }
+            .map { SessionRow($0, secretCount: inputs.findingCounts[$0.id] ?? 0) }
+            .sorted(using: inputs.sortOrder)
     }
 }
