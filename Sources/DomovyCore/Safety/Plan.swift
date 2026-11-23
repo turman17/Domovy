@@ -77,6 +77,8 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     public enum Action: String, Codable, Sendable {
         case delete
         case archive
+        /// Rewrites lines with secrets replaced; the original goes to the quarantine.
+        case redact
     }
 
     public let id: UUID
@@ -91,6 +93,13 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     public let compressions: [FileCompression]
     /// The agent's own commands, run before any move or edit (e.g. `codex delete`).
     public let commands: [PlannedCommand]
+    /// Files a redaction rewrites, with every value it replaces.
+    public let redactions: [FileRedaction]
+    /// Findings a redaction leaves alone, each with the reason.
+    public let skippedSecrets: [SkippedSecret]
+    /// Possible secrets the scan found in this session. Set by the caller before a delete, so
+    /// the undo entry knows its quarantined files hold plaintext secrets and can be purged.
+    public var secretFindingCount = 0
     /// Consequences the user should know before confirming ("3 rows stay in state_5.sqlite").
     public let remarks: [String]
     /// Apps that must not run while this plan executes; the executor checks again right before.
@@ -108,6 +117,8 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         indexEdits: [IndexEdit],
         compressions: [FileCompression] = [],
         commands: [PlannedCommand] = [],
+        redactions: [FileRedaction] = [],
+        skippedSecrets: [SkippedSecret] = [],
         remarks: [String] = [],
         mustNotBeRunning: [ProcessMatcher] = [],
         liveCheck: LiveCheckResult
@@ -122,6 +133,8 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         self.indexEdits = indexEdits
         self.compressions = compressions
         self.commands = commands
+        self.redactions = redactions
+        self.skippedSecrets = skippedSecrets
         self.remarks = remarks
         self.mustNotBeRunning = mustNotBeRunning
         self.liveCheck = liveCheck
@@ -138,7 +151,12 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     }
 
     public var isEmpty: Bool {
-        moves.isEmpty && indexEdits.isEmpty && compressions.isEmpty && commands.isEmpty
+        moves.isEmpty && indexEdits.isEmpty && compressions.isEmpty && commands.isEmpty && redactions.isEmpty
+    }
+
+    /// Values a redaction replaces, across all files.
+    public var redactionCount: Int {
+        redactions.reduce(0) { $0 + $1.replacementCount }
     }
 
     /// Plain-language summary in the Domovy voice: say exactly what happens.
@@ -154,6 +172,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         if action == .archive, !commands.isEmpty {
             return commandText + " You can undo this."
         }
+        if action == .redact { return redactionSummary }
         if action == .archive {
             guard !compressions.isEmpty else {
                 return remarks.first ?? "Nothing to compress: the files of this session are already compressed or too small to gain from it."
@@ -176,5 +195,87 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         let rest = parts.isEmpty ? "" : parts.joined(separator: " and ") + ". "
         let prefix = commandText.isEmpty ? "" : commandText + " "
         return prefix + rest.prefix(1).uppercased() + rest.dropFirst() + "You can undo this."
+    }
+
+    /// The quarantine sentence is required wording: the user must know the plaintext stays.
+    private var redactionSummary: String {
+        guard !redactions.isEmpty else {
+            return "Nothing can be redacted safely here, so nothing will change."
+        }
+        let n = redactionCount, files = redactions.count
+        let what = "Replaces \(n) possible \(n == 1 ? "secret" : "secrets") in \(files) \(files == 1 ? "file" : "files") with [REDACTED:<rule>]."
+        let kept = files == 1
+            ? "The original, with the secrets, is kept in Domovy's quarantine so you can undo. Remove it with Purge originals."
+            : "The originals, with the secrets, are kept in Domovy's quarantine so you can undo. Remove them with Purge originals."
+        return what + " " + kept
+    }
+}
+
+/// One file a redaction rewrites. Positions and masked previews only, never the values.
+public struct FileRedaction: Hashable, Codable, Sendable {
+    public struct Replacement: Hashable, Codable, Sendable {
+        public let ruleID: String
+        /// Byte range of the value within its line.
+        public let range: Range<Int>
+        public let preview: String
+
+        public init(ruleID: String, range: Range<Int>, preview: String) {
+            self.ruleID = ruleID
+            self.range = range
+            self.preview = preview
+        }
+    }
+
+    public struct LineEdit: Hashable, Codable, Sendable {
+        /// One-based line number.
+        public let line: Int
+        public let offset: Int64
+        public let length: Int
+        /// Sorted by position.
+        public let replacements: [Replacement]
+
+        public init(line: Int, offset: Int64, length: Int, replacements: [Replacement]) {
+            self.line = line
+            self.offset = offset
+            self.length = length
+            self.replacements = replacements
+        }
+    }
+
+    public let file: URL
+    public let sizeBytes: Int64
+    /// Modification time at scan time. The executor refuses a file that changed since.
+    public let modificationTime: FileTime?
+    /// Archived (APFS-compressed) files are compressed again after the rewrite.
+    public let wasCompressed: Bool
+    public let lines: [LineEdit]
+    public let note: String
+
+    public init(file: URL, sizeBytes: Int64, modificationTime: FileTime?, wasCompressed: Bool, lines: [LineEdit], note: String) {
+        self.file = file
+        self.sizeBytes = sizeBytes
+        self.modificationTime = modificationTime
+        self.wasCompressed = wasCompressed
+        self.lines = lines
+        self.note = note
+    }
+
+    public var replacementCount: Int { lines.reduce(0) { $0 + $1.replacements.count } }
+}
+
+/// A finding a redaction leaves as it is, and why.
+public struct SkippedSecret: Hashable, Codable, Sendable {
+    public let file: URL
+    public let line: Int
+    public let ruleID: String
+    public let preview: String
+    public let reason: String
+
+    public init(file: URL, line: Int, ruleID: String, preview: String, reason: String) {
+        self.file = file
+        self.line = line
+        self.ruleID = ruleID
+        self.preview = preview
+        self.reason = reason
     }
 }

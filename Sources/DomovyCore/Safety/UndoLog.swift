@@ -28,6 +28,18 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
         public let sizeBytes: Int64
     }
 
+    /// A file a redaction rewrote. The original, with the secrets, waits in the quarantine
+    /// until undo puts it back or the user purges it.
+    public struct RedactedItem: Codable, Sendable, Hashable {
+        public let file: URL
+        public let original: URL
+        /// Modification time of the file, kept exactly by the rewrite. Undo refuses a file
+        /// whose time moved since: the agent wrote to it.
+        public let modificationTime: FileTime?
+        public let replacements: Int
+        public let sizeBytes: Int64
+    }
+
     public let id: UUID
     public let createdAt: Date
     public let planID: UUID
@@ -49,14 +61,22 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
     public var undoneAt: Date?
     /// Set when execution stopped half way; `undo` still restores what did move.
     public var failure: String?
+    public var redacted: [RedactedItem] = []
+    /// Possible secrets the scan had found in the session when it was deleted.
+    public var secretFindingCount = 0
+    /// When Purge originals deleted this entry's quarantined files; it cannot be undone after.
+    public var originalsPurgedAt: Date?
 
     public var isUndone: Bool { undoneAt != nil }
+    /// Still pending and its files are still there to put back.
+    public var isUndoable: Bool { undoneAt == nil && originalsPurgedAt == nil }
 }
 
 extension UndoEntry {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, planID, batchID, action, agent, sessionID, destination
         case moved, indexRestores, compressed, undoCommands, mustNotBeRunning, leftovers, undoneAt, failure
+        case redacted, secretFindingCount, originalsPurgedAt
     }
 
     /// Entries written by older versions lack the newer fields; they decode with empty defaults.
@@ -80,6 +100,9 @@ extension UndoEntry {
             undoneAt: try c.decodeIfPresent(Date.self, forKey: .undoneAt),
             failure: try c.decodeIfPresent(String.self, forKey: .failure)
         )
+        redacted = try c.decodeIfPresent([RedactedItem].self, forKey: .redacted) ?? []
+        secretFindingCount = try c.decodeIfPresent(Int.self, forKey: .secretFindingCount) ?? 0
+        originalsPurgedAt = try c.decodeIfPresent(Date.self, forKey: .originalsPurgedAt)
     }
 }
 
@@ -103,12 +126,12 @@ public struct UndoLog: Sendable {
     }
 
     public func latestPending() throws -> UndoEntry? {
-        try entries().last { !$0.isUndone }
+        try entries().last { $0.isUndoable }
     }
 
     /// The latest pending entry together with the pending entries of its batch, newest first.
     public func latestPendingBatch() throws -> [UndoEntry] {
-        let pending = try entries().filter { !$0.isUndone }
+        let pending = try entries().filter(\.isUndoable)
         guard let last = pending.last else { return [] }
         guard let batch = last.batchID else { return [last] }
         return pending.filter { $0.batchID == batch }.reversed()

@@ -11,6 +11,10 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
     case nothingToUndo
     case appRunning(reasons: [String])
     case commandFailed(String, status: Int32, message: String)
+    case changedSinceScan(URL)
+    case redactionFailed(URL, reason: String, doneSoFar: Int, total: Int)
+    case originalsPurged
+    case notInQuarantine(URL)
 
     public var errorDescription: String? {
         switch self {
@@ -34,6 +38,14 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
             "Nothing was changed. " + reasons.joined(separator: " ")
         case .commandFailed(let line, let status, let message):
             "`\(line)` failed (exit status \(status))\(message.isEmpty ? "." : ": \(message)") Its files were left as they were."
+        case .changedSinceScan(let url):
+            "\(url.lastPathComponent) changed since the scan, so Domovy left it as it is. Scan again, then redact."
+        case .redactionFailed(let url, let reason, let done, let total):
+            "Could not redact \(url.lastPathComponent): \(reason) \(done) of \(total) files were redacted; run undo to put the originals back."
+        case .originalsPurged:
+            "This cannot be undone: its originals were permanently deleted with Purge originals."
+        case .notInQuarantine(let url):
+            "Refusing to delete \(url.lastPathComponent): it is not inside Domovy's quarantine folder."
         }
     }
 }
@@ -105,13 +117,15 @@ public struct Executor: Sendable {
             mustNotBeRunning: plan.mustNotBeRunning,
             leftovers: [],
             undoneAt: nil,
-            failure: nil
+            failure: nil,
+            secretFindingCount: plan.secretFindingCount
         )
         try undoLog.write(entry)
         for command in plan.commands {
             try run(command, entry: &entry)
         }
         if plan.action == .archive { return try compress(plan, entry: entry) }
+        if plan.action == .redact { return try redact(plan, entry: entry) }
         Log.executor.info("Executing plan \(plan.id, privacy: .public) for session \(plan.sessionID, privacy: .public): \(plan.moves.count) moves, \(plan.indexEdits.count) index edits")
 
         let present = plan.moves.filter { FileSystem.exists($0.source) }
@@ -312,6 +326,7 @@ public struct Executor: Sendable {
     public func undo(_ original: UndoEntry) throws -> UndoEntry {
         var entry = original
         guard !entry.isUndone else { throw ExecutorError.alreadyUndone }
+        guard entry.originalsPurgedAt == nil else { throw ExecutorError.originalsPurged }
         Log.executor.info("Undoing entry \(entry.id, privacy: .public)")
         let blocking = processes.blockingReasons(entry.mustNotBeRunning)
         guard blocking.isEmpty else { throw ExecutorError.appRunning(reasons: blocking) }
@@ -360,6 +375,8 @@ public struct Executor: Sendable {
             }
         }
         entry.compressed = []
+
+        try restoreRedacted(&entry)
 
         for restore in entry.indexRestores {
             do {
