@@ -118,6 +118,13 @@ struct CursorIndex: Sendable {
         return CursorIndex(chats: chats, emptyDrafts: empty, headers: headers, sharedAgentKvRows: max(0, agentKvTotal - agentKvOfChats))
     }
 
+    /// Another chat whose id starts with `<id>:`: its rows would match this chat's prefixes.
+    static func hasLongerIDs(of id: String, in layout: CursorLayout) -> Bool {
+        guard let reader = SQLiteReader(url: layout.database) else { return true }
+        let found = reader.rows("SELECT count(*) FROM cursorDiskKV WHERE key >= ?1 AND key < ?2", keyRange(dataPrefix + id + ":")).first ?? []
+        return (Int((found.first ?? nil) ?? "") ?? 1) > 0
+    }
+
     /// Every row a delete of `id` removes, counted now. `composerData:<id>` first.
     static func rows(of id: String, in layout: CursorLayout) -> [DatabaseEdit.Rows] {
         guard let reader = SQLiteReader(url: layout.database) else { return [] }

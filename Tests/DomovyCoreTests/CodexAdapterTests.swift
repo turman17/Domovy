@@ -83,7 +83,7 @@ struct CodexAdapterTests {
         #expect(command.executable == fixture.stub)
         #expect(command.arguments == ["delete", "--force", IDs.idle])
         #expect(command.environment["CODEX_HOME"] == fixture.codexDirectory.path)
-        #expect(Set(command.copiesBeforeRun.map { FileSystem_relative($0, fixture.codexDirectory) }) == [CodexFixtureHome.idleRollout, CodexFixtureHome.idleSegment])
+        #expect(Set(command.copiesBeforeRun.map { FileSystem_relative($0, fixture.codexDirectory) }) == [CodexFixtureHome.idleRollout, CodexFixtureHome.idleSegment, "generated_images/\(IDs.idle)"])
         #expect(command.verifications.contains(.linesGone(file: fixture.url("session_index.jsonl").standardizedFileURL, key: "id", value: IDs.idle)))
         #expect(command.verifications.contains { if case .rowsGone(_, "threads", "id", IDs.idle) = $0 { true } else { false } })
         #expect(plan.moves.map { FileSystem_relative($0.source, fixture.codexDirectory) } == ["generated_images/\(IDs.idle)"])

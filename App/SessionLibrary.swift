@@ -317,8 +317,12 @@ final class SessionLibrary {
     func undo(_ action: UndoAction) async throws {
         undoManager?.removeAllActions(withTarget: action)
         let executor = self.executor
+        // The executor reads each entry again from disk: `domo` or another undo may have
+        // undone one of them since, which is skipped rather than undone twice.
         let restored = try await Task.detached {
-            try action.entries.reversed().filter { !$0.isUndone }.map { try executor.undo($0) }
+            try action.entries.reversed().compactMap { entry -> UndoEntry? in
+                do { return try executor.undo(entry) } catch ExecutorError.alreadyUndone { return nil }
+            }
         }.value
         let titles = Set(restored.map(\.sessionID)).compactMap { id in sessions.first { $0.id == id }?.displayTitle }
         let what: String
@@ -353,9 +357,23 @@ final class SessionLibrary {
             + (leftovers.isEmpty ? "" : " Checked afterwards: " + leftovers.joined(separator: " "))
     }
 
+    /// Executes plans off the main actor. When one stops half way, what already changed stays
+    /// in the undo log, and ⌘Z or the toast puts it back.
     func run(_ plans: [Plan]) async throws -> [UndoEntry] {
         let executor = self.executor
-        return try await Task.detached { try executor.execute(plans) }.value
+        do {
+            return try await Task.detached { try executor.execute(plans) }.value
+        } catch {
+            let ids = Set(plans.map(\.id))
+            let partial = (try? await Task.detached { try executor.undoLog.entries() }.value)?
+                .filter { ids.contains($0.planID) && $0.hasChangesToUndo } ?? []
+            if !partial.isEmpty {
+                let action = UndoAction(name: "Partial Change", entries: partial)
+                register(action)
+                toast = Toast(message: "It stopped part way. Undo puts back what already changed.", undo: action)
+            }
+            throw error
+        }
     }
 
     func register(_ action: UndoAction) {

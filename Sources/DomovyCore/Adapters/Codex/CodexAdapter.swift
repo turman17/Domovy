@@ -108,7 +108,8 @@ public struct CodexAdapter: AgentAdapter {
                 arguments: ["delete", "--force", id],
                 environment: ["CODEX_HOME": root.path],
                 note: "Runs `codex delete` for this session, then checks the result.",
-                copiesBeforeRun: rollouts,
+                // `codex delete` may also remove the session's generated images.
+                copiesBeforeRun: rollouts + companions,
                 indexLinesBeforeRun: [sessionEdit].compactMap { $0 },
                 verifications: checks,
                 sizeBytes: rolloutBytes + (sessionEdit?.removedBytes ?? 0)
@@ -133,7 +134,8 @@ public struct CodexAdapter: AgentAdapter {
             commands: commands,
             remarks: remarks,
             mustNotBeRunning: [processMatcher],
-            liveCheck: check
+            liveCheck: check,
+            scope: self.scope
         )
     }
 
@@ -148,7 +150,7 @@ public struct CodexAdapter: AgentAdapter {
         guard !session.isArchived, !active.isEmpty else {
             return Plan(agent: kind, sessionID: id, action: .archive, destination: nil, moves: [], indexEdits: [],
                         remarks: ["This session is already in archived_sessions."],
-                        liveCheck: await liveness(id: id, files: rollouts(of: id)))
+                        liveCheck: await liveness(id: id, files: rollouts(of: id)), scope: self.scope)
         }
         for url in active where layout.isProtected(url) { throw AdapterError.protectedPathInPlan(url) }
 
@@ -173,7 +175,7 @@ public struct CodexAdapter: AgentAdapter {
                         commands: [command],
                         remarks: ["Codex can still open it from its archive."],
                         mustNotBeRunning: [processMatcher],
-                        liveCheck: await planCheck(id: id, files: active, touchesIndex: true))
+                        liveCheck: await planCheck(id: id, files: active, touchesIndex: true), scope: self.scope)
         }
 
         var compressions: [FileCompression] = []
@@ -191,7 +193,7 @@ public struct CodexAdapter: AgentAdapter {
         return Plan(agent: kind, sessionID: id, action: .archive, destination: nil, moves: [], indexEdits: [],
                     compressions: compressions,
                     remarks: ["The codex CLI was not found, so Domovy compresses the rollout in place instead of moving it to archived_sessions."],
-                    liveCheck: await planCheck(id: id, files: active, touchesIndex: false))
+                    liveCheck: await planCheck(id: id, files: active, touchesIndex: false), scope: self.scope)
     }
 
     public func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript {

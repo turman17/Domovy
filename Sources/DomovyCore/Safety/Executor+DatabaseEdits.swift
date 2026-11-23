@@ -50,17 +50,4 @@ extension Executor {
         }
         try undoLog.write(entry)
     }
-
-    /// Refuses while any process holds one of `files` open; unsure counts as open.
-    func requireNotOpen(_ files: [URL]) throws {
-        guard !files.isEmpty else { return }
-        guard let holders = processes.holders(of: files) else {
-            throw ExecutorError.filesOpen(reasons: ["Domovy could not check which processes have \(files[0].lastPathComponent) open, so it changes nothing."])
-        }
-        var seen = Set<Int32>()
-        let reasons = holders.filter { seen.insert($0.pid).inserted }.map { holder in
-            "\(holder.processName) (pid \(holder.pid)) has \(URL(fileURLWithPath: holder.path).lastPathComponent) open. Quit it first."
-        }
-        guard reasons.isEmpty else { throw ExecutorError.filesOpen(reasons: reasons) }
-    }
 }

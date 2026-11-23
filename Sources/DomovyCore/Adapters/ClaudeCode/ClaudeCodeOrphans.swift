@@ -82,7 +82,8 @@ extension ClaudeCodeAdapter {
             registryRemovals: removals,
             remarks: remarks,
             mustNotBeRunning: removals.isEmpty ? [] : [ClaudeDesktopRegistry.processMatcher],
-            liveCheck: await desktopChecked(base, touchesRegistry: !removals.isEmpty)
+            liveCheck: await desktopChecked(base, touchesRegistry: !removals.isEmpty),
+            scope: self.scope
         )
     }
 

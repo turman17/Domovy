@@ -86,14 +86,14 @@ public struct AntigravityAdapter: AgentAdapter {
                         "A delete would move \(files.count) \(files.count == 1 ? "item" : "items") (\(bytes)) to \(destination.displayName): \(what).",
                         "Delete it in Antigravity itself if your version offers that.",
                     ],
-                    liveCheck: await liveness(id: id, store: store, catalog: catalog))
+                    liveCheck: await liveness(id: id, store: store, catalog: catalog), scope: self.scope)
     }
 
     public func archivePlan(for session: Session) async throws -> Plan {
         let (store, id) = try locate(session)
         return Plan(agent: kind, sessionID: session.id, action: .archive, destination: nil, moves: [], indexEdits: [],
                     remarks: ["Antigravity is read-only in Domovy for now, so nothing will be compressed. \(Self.readOnlyReason)"],
-                    liveCheck: await liveness(id: id, store: store, catalog: store.catalog()))
+                    liveCheck: await liveness(id: id, store: store, catalog: store.catalog()), scope: self.scope)
     }
 
     /// The conversation's own format is not verified yet, so there is no preview.

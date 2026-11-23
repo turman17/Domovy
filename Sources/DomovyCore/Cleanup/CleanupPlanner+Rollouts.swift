@@ -47,7 +47,8 @@ extension CleanupPlanner {
             remarks: [
                 "Codex reads compressed rollouts as before; a session it writes to again is decompressed on the fly. Modification dates stay as they are.",
             ],
-            liveCheck: LiveCheckResult(isLive: blocked, reasons: blocked ? check.reasons : [], checkedSignals: ["open file handles"], openHandles: check.status)
+            liveCheck: LiveCheckResult(isLive: blocked, reasons: blocked ? check.reasons : [], checkedSignals: ["open file handles"], openHandles: check.status),
+            scope: self.scope
         )
         return CleanupPlan(cleanup: .codexLargeRollouts, plan: plan, excluded: excluded, hasConsequences: false)
     }

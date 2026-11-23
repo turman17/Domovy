@@ -70,22 +70,24 @@ enum APFSCompression {
     // MARK: Compress and decompress
 
     /// Compresses `url` in place. `expected` is the mtime seen at plan time; a file that
-    /// changed since is skipped by throwing `changedSincePlan`.
-    static func compress(_ url: URL, expected: FileTime?) throws -> Outcome {
+    /// changed since is skipped by throwing `changedSincePlan`. `beforeSwap` runs right before
+    /// the rename and may refuse it (the executor checks nothing holds the file open: a writer
+    /// would go on appending to the old, unlinked file).
+    static func compress(_ url: URL, expected: FileTime?, beforeSwap: () throws -> Void = {}) throws -> Outcome {
         guard isRegularFile(url) else { throw CompressionError.notRegularFile(url) }
         if isCompressed(url) { return .skipped("already compressed") }
         if let expected, FileSystem.modificationTime(of: url) != expected { throw CompressionError.changedSincePlan(url) }
-        return try rewrite(url, compressed: true)
+        return try rewrite(url, compressed: true, beforeSwap: beforeSwap)
     }
 
     /// Puts a compressed file back in plain form, keeping mtime and permissions.
-    static func decompress(_ url: URL) throws -> Outcome {
+    static func decompress(_ url: URL, beforeSwap: () throws -> Void = {}) throws -> Outcome {
         guard isRegularFile(url) else { throw CompressionError.notRegularFile(url) }
         guard isCompressed(url) else { return .skipped("not compressed (the agent may have written to it since)") }
-        return try rewrite(url, compressed: false)
+        return try rewrite(url, compressed: false, beforeSwap: beforeSwap)
     }
 
-    private static func rewrite(_ url: URL, compressed: Bool) throws -> Outcome {
+    private static func rewrite(_ url: URL, compressed: Bool, beforeSwap: () throws -> Void) throws -> Outcome {
         let fm = FileManager.default
         let parent = url.deletingLastPathComponent()
         let parentTime = FileSystem.modificationTime(of: parent)
@@ -110,6 +112,7 @@ enum APFSCompression {
         if let permissions { try fm.setAttributes([.posixPermissions: permissions], ofItemAtPath: copy.path) }
         if let mtime { try FileSystem.setModificationTime(mtime, of: copy) }
 
+        try beforeSwap()
         // Last look before the swap: an agent that wrote meanwhile wins and we back off.
         guard FileSystem.modificationTime(of: url) == mtime, FileSystem.size(of: url) == sizeBefore else {
             throw CompressionError.changedSincePlan(url)

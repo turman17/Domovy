@@ -156,15 +156,17 @@ struct RedactionTests {
         let executor = fixture.executor()
         let entry = try executor.execute(plan)
 
+        // The moved files, and the backups of the index files its lines were taken out of.
+        let backups = entry.indexRestores.count + entry.registryRestores.count
         let purgePlan = try executor.purgePlan([.flaggedSession])
-        #expect(purgePlan.items.count == entry.moved.count)
+        #expect(purgePlan.items.count == entry.moved.count + backups)
         #expect(purgePlan.items.allSatisfy { $0.reason == .flaggedSession })
         #expect(try executor.purgePlan([.redactedOriginal]).isEmpty)
 
         // An unflagged quarantine delete is never offered for purging.
         let other = try await adapter.session(matching: IDs.idle)
         _ = try executor.execute(try await adapter.deletePlan(for: other, destination: .quarantine))
-        #expect(try executor.purgePlan().items.count == entry.moved.count)
+        #expect(try executor.purgePlan().items.count == entry.moved.count + backups)
     }
 
     @Test("refuses to redact a live session")

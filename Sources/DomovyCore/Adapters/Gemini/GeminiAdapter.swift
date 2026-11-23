@@ -98,7 +98,7 @@ public struct GeminiAdapter: AgentAdapter {
         }
         let moves = files.map { FileMove(source: $0.url, kind: $0.kind, sizeBytes: $0.sizeBytes, note: $0.note) }
         return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: moves, indexEdits: [],
-                    remarks: remarks, mustNotBeRunning: [Self.processMatcher], liveCheck: live)
+                    remarks: remarks, mustNotBeRunning: [Self.processMatcher], liveCheck: live, scope: self.scope)
     }
 
     /// Compresses the chat and its bulky companions in place with APFS transparent compression.
@@ -122,7 +122,7 @@ public struct GeminiAdapter: AgentAdapter {
         }
         let live = await liveness(compressions.map(\.file))
         return Plan(agent: kind, sessionID: session.id, action: .archive, destination: nil, moves: [], indexEdits: [],
-                    compressions: compressions, liveCheck: live)
+                    compressions: compressions, liveCheck: live, scope: self.scope)
     }
 
     /// A group of empty chats has nothing to show.

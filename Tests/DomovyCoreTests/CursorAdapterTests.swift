@@ -66,7 +66,7 @@ struct CursorAdapterTests {
         let plan = try await adapter.deletePlan(for: try await session(adapter, IDs.named), destination: .quarantine)
         let edit = try #require(plan.databaseEdits.first)
         #expect(edit.database == fixture.database)
-        #expect(edit.files.map(\.lastPathComponent) == ["state.vscdb", "state.vscdb-wal", "state.vscdb-shm"])
+        #expect(edit.files.map(\.lastPathComponent) == ["state.vscdb", "state.vscdb-wal", "state.vscdb-shm", "state.vscdb-journal"])
         #expect(edit.rows.map(\.key) == [
             "composerData:\(IDs.named)", "bubbleId:\(IDs.named):", "checkpointId:\(IDs.named):",
             "messageRequestContext:\(IDs.named):", "codeBlockDiff:\(IDs.named):", "agentKv:\(IDs.named):",

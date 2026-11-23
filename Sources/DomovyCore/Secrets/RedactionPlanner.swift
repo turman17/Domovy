@@ -74,7 +74,8 @@ public enum RedactionPlanner {
             redactions: redactions,
             skippedSecrets: skipped,
             remarks: remarks,
-            liveCheck: live
+            liveCheck: live,
+            scope: adapter.scope
         )
     }
 

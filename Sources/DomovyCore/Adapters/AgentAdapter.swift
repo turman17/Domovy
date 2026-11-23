@@ -20,6 +20,7 @@ public enum AdapterError: Error, LocalizedError, Hashable, Sendable {
     case notImplemented(AgentKind, feature: String)
     case protectedPathInPlan(URL)
     case unreadable(URL, reason: String)
+    case unsafeID(AgentKind, id: String)
 
     public var errorDescription: String? {
         switch self {
@@ -35,6 +36,8 @@ public enum AdapterError: Error, LocalizedError, Hashable, Sendable {
             "Refusing to plan a change to \(url.lastPathComponent): the agent needs it to run."
         case .unreadable(let url, let reason):
             "Could not read \(url.lastPathComponent): \(reason)"
+        case .unsafeID(let agent, let id):
+            "Refusing to change this \(agent.displayName) session: its id (\(id.prefix(40))) has characters Domovy does not put into a path or a command."
         }
     }
 }
@@ -44,6 +47,9 @@ public protocol AgentAdapter: FootprintProvider {
     var kind: AgentKind { get }
     /// The agent's config directory (e.g. `<home>/.claude`).
     var root: URL { get }
+    /// Every folder a plan of this adapter may change; the executor refuses a path outside them.
+    /// `[root]` unless the agent keeps data in more than one place.
+    var scope: [URL] { get }
 
     /// Checks the layout. Call before planning; a `.readOnly` adapter never mutates.
     func status() async -> AdapterStatus
@@ -58,6 +64,8 @@ public protocol AgentAdapter: FootprintProvider {
 }
 
 extension AgentAdapter {
+    public var scope: [URL] { [root] }
+
     /// The first `limit` messages, unmasked.
     public func transcript(of session: Session, limit: Int) async throws -> Transcript {
         try await transcript(of: session, limit: limit, masking: [])

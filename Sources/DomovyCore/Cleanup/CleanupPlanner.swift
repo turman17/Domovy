@@ -71,6 +71,15 @@ public struct CleanupPlanner: Sendable {
         )
     }
 
+    /// Every folder a cleanup may change; the executor refuses a path outside them.
+    var scope: [URL] {
+        var folders = [claudeCodeRoot, codexRoot, desktopSupport]
+        if let models {
+            folders += [models.ollamaHome, models.ollamaModels, models.lmStudioHome, models.huggingFaceHub] + models.lmStudioModels
+        }
+        return folders
+    }
+
     /// Any process of the Claude desktop app, as in the verified registry matcher.
     static let desktopMatcher = ProcessMatcher(
         appName: "Claude Desktop",
@@ -184,7 +193,8 @@ public struct CleanupPlanner: Sendable {
             indexEdits: [],
             remarks: remarks,
             mustNotBeRunning: matchers,
-            liveCheck: liveCheck
+            liveCheck: liveCheck,
+            scope: self.scope
         )
     }
 

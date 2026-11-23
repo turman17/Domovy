@@ -13,7 +13,8 @@ struct CursorLayout: Sendable {
     var globalStorage: URL { support.appendingPathComponent("User/globalStorage", isDirectory: true) }
     var database: URL { globalStorage.appendingPathComponent("state.vscdb") }
     /// The database and its journal files: cloned before an edit, and nothing may hold them open.
-    var databaseFiles: [URL] { ["", "-wal", "-shm"].map { globalStorage.appendingPathComponent("state.vscdb" + $0) } }
+    /// `-journal` is there only after a crash in rollback mode (a hot journal).
+    var databaseFiles: [URL] { ["", "-wal", "-shm", "-journal"].map { globalStorage.appendingPathComponent("state.vscdb" + $0) } }
     /// An older copy Cursor no longer updates (Cursor staff); it still holds old chats.
     var backup: URL { globalStorage.appendingPathComponent("state.vscdb.backup") }
     var workspaceStorage: URL { support.appendingPathComponent("User/workspaceStorage", isDirectory: true) }

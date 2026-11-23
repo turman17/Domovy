@@ -4,8 +4,10 @@ import Foundation
 /// Open-file-handle check via libproc: `proc_listpids` + `PROC_PIDLISTFDS` +
 /// `PROC_PIDFDVNODEPATHINFO`, plus memory-mapped files through the region path info
 /// (`mmap` keeps a file in use after its descriptor closed: model weights, databases). Needs
-/// no root; processes of other users cannot be inspected and are skipped. Any failure to list
-/// processes, or not being able to inspect a single one, reports the check as unavailable.
+/// no root; processes of other users cannot be inspected and are skipped, and so are processes
+/// that exited meanwhile. Any failure to list processes, or not being able to inspect a single
+/// running process of the current user (the only ones that can write to the user's agent
+/// folders), reports the check as unavailable.
 ///
 /// Enumerating every descriptor of every process costs tens of milliseconds, and a scan
 /// asks once per session, so each snapshot is cached for a short moment. Mapped regions cost
@@ -75,7 +77,10 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         var holders: [OpenHandleHolder] = []
         var inspected = 0
         for pid in pids where pid > 0 {
-            guard let fds = listFDs(of: pid) else { continue } // other user's process, or gone
+            guard let fds = listFDs(of: pid) else {
+                guard !isOwnRunningProcess(pid) else { return uninspectable(pid) }
+                continue // another user's process, or gone
+            }
             inspected += 1
             var name: String?
             for fd in fds where fd.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) {
@@ -99,7 +104,10 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
         var holders: [OpenHandleHolder] = []
         var inspected = 0
         for pid in pids where pid > 0 {
-            guard let paths = mappedPaths(of: pid, flavor: flavor) else { continue } // other user's process, or gone
+            guard let paths = mappedPaths(of: pid, flavor: flavor) else {
+                guard !isOwnRunningProcess(pid) else { return uninspectable(pid) }
+                continue // another user's process, or gone
+            }
             inspected += 1
             guard !paths.isEmpty else { continue }
             let name = processName(of: pid) ?? "pid \(pid)"
@@ -110,6 +118,20 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
             return nil
         }
         return holders
+    }
+
+    /// A process of the current user that is still running (not exiting, not a zombie).
+    static func isOwnRunningProcess(_ pid: pid_t) -> Bool {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return false }
+        return info.kp_eproc.e_ucred.cr_uid == getuid() && info.kp_proc.p_stat != CChar(SZOMB) && info.kp_proc.p_flag & P_WEXIT == 0
+    }
+
+    private static func uninspectable(_ pid: pid_t) -> [OpenHandleHolder]? {
+        Log.liveness.error("Could not inspect pid \(pid, privacy: .public), a process of this user; the open-file check is unavailable")
+        return nil
     }
 
     /// `PROC_PIDREGIONPATHINFO2` (22, in xnu but not in the public header) returns only regions

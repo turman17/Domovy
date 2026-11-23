@@ -137,6 +137,9 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     /// Apps that must not run while this plan executes; the executor checks again right before.
     public let mustNotBeRunning: [ProcessMatcher]
     public let liveCheck: LiveCheckResult
+    /// The folders this plan may change: the adapter's root (or roots). The executor refuses any
+    /// path outside them, so an id read from the agent's data can never point a move elsewhere.
+    public let scope: [URL]
 
     public init(
         id: UUID = UUID(),
@@ -156,7 +159,8 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         remarks: [String] = [],
         acknowledgement: String? = nil,
         mustNotBeRunning: [ProcessMatcher] = [],
-        liveCheck: LiveCheckResult
+        liveCheck: LiveCheckResult,
+        scope: [URL] = []
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -176,6 +180,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         self.acknowledgement = acknowledgement
         self.mustNotBeRunning = mustNotBeRunning
         self.liveCheck = liveCheck
+        self.scope = scope.map(\.standardizedFileURL)
     }
 
     public var totalBytes: Int64 {

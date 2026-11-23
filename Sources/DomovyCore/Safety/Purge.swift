@@ -69,6 +69,13 @@ extension Executor {
                     items.append(PurgeItem(entryID: entry.id, agent: entry.agent, sessionID: entry.sessionID, file: item.current,
                                            originalPath: item.original, sizeBytes: FileSystem.size(of: item.current), reason: .flaggedSession))
                 }
+                // Byte-exact backups of index files hold the session's lines too (its prompts in
+                // history.jsonl); purging them also drops the lines kept in the entry itself.
+                let backups = entry.indexRestores.map { ($0.backup, $0.file) } + entry.registryRestores.map { ($0.backup, $0.file) }
+                for (backup, original) in backups where isBackup(backup, of: entry) && FileSystem.itemExists(backup) {
+                    items.append(PurgeItem(entryID: entry.id, agent: entry.agent, sessionID: entry.sessionID, file: backup,
+                                           originalPath: original, sizeBytes: FileSystem.size(of: backup), reason: .flaggedSession))
+                }
             }
             if reasons.contains(.toolCopy) {
                 for item in entry.moved where item.kept != nil && isInQuarantine(item.current) && FileSystem.itemExists(item.current)
@@ -85,17 +92,29 @@ extension Executor {
     /// as purged. Refuses anything outside the quarantine folder.
     @discardableResult
     public func purge(_ plan: PurgePlan) throws -> [UndoEntry] {
-        for item in plan.items where !isInQuarantine(item.file) { throw ExecutorError.notInQuarantine(item.file) }
+        try undoLog.withLock { try purgeNow(plan) }
+    }
+
+    private func purgeNow(_ plan: PurgePlan) throws -> [UndoEntry] {
         var entries = try undoLog.entries().filter { entry in plan.items.contains { $0.entryID == entry.id } }
+        for item in plan.items {
+            let inBackups = entries.first { $0.id == item.entryID }.map { isBackup(item.file, of: $0) } ?? false
+            guard isInQuarantine(item.file) || inBackups else { throw ExecutorError.notInQuarantine(item.file) }
+        }
         var removed = 0
         for item in plan.items where FileSystem.itemExists(item.file) {
             try fileManager.removeItem(at: item.file)
             removed += 1
         }
         let stamp = now()
+        let purged = Set(plan.items.map(\.file))
         for index in entries.indices {
             entries[index].originalsPurgedAt = stamp
+            // The removed lines, verbatim, go with their backup: nothing can put them back now.
+            if entries[index].indexRestores.contains(where: { purged.contains($0.backup) }) { entries[index].indexRestores = [] }
             try undoLog.write(entries[index])
+            let backups = undoLog.backupDirectory(for: entries[index])
+            if FileSystem.exists(backups), FileSystem.children(of: backups).isEmpty { try? fileManager.removeItem(at: backups) }
             let folder = quarantineDirectory.appendingPathComponent(entries[index].id.uuidString, isDirectory: true)
             if FileSystem.exists(folder), FileSystem.children(of: folder).isEmpty { try? fileManager.removeItem(at: folder) }
         }
@@ -112,6 +131,12 @@ extension Executor {
         guard !plan.isEmpty else { return plan }
         try purge(plan)
         return plan
+    }
+
+    /// Inside this entry's own backup folder (`Undo/<entry id>/`).
+    private func isBackup(_ url: URL, of entry: UndoEntry) -> Bool {
+        guard let relative = FileSystem.relativePath(of: url, under: undoLog.backupDirectory(for: entry)) else { return false }
+        return !relative.isEmpty && !relative.split(separator: "/").contains("..")
     }
 
     private func isInQuarantine(_ url: URL) -> Bool {

@@ -84,7 +84,7 @@ public struct CopilotAdapter: AgentAdapter {
         remarks.append(Self.reindexWarning)
         let move = FileMove(source: folder, kind: .folder, sizeBytes: FileSystem.size(of: folder), note: "Session folder: events, plans, checkpoints")
         return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: [move], indexEdits: [],
-                    remarks: remarks, mustNotBeRunning: [Self.processMatcher], liveCheck: await planCheck(folder))
+                    remarks: remarks, mustNotBeRunning: [Self.processMatcher], liveCheck: await planCheck(folder), scope: self.scope)
     }
 
     /// Compresses the session's files in place; Copilot CLI reads them unchanged.
@@ -105,7 +105,7 @@ public struct CopilotAdapter: AgentAdapter {
             ))
         }
         return Plan(agent: kind, sessionID: session.id, action: .archive, destination: nil, moves: [], indexEdits: [],
-                    compressions: compressions, liveCheck: await liveness(folder))
+                    compressions: compressions, liveCheck: await liveness(folder), scope: self.scope)
     }
 
     public func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript {

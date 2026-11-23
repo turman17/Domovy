@@ -48,6 +48,11 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         )
     }
 
+    /// `~/.claude`, and Claude Desktop's session list when a delete takes a session off it.
+    public var scope: [URL] {
+        [root] + (desktopRegistry.map { [$0.root] } ?? [])
+    }
+
     /// Claude Desktop's registry as it is now, or an empty one.
     func desktopSnapshot() -> ClaudeDesktopRegistry.Snapshot {
         desktopRegistry?.snapshot() ?? .empty
@@ -131,7 +136,8 @@ public struct ClaudeCodeAdapter: AgentAdapter {
             registryRemovals: removals,
             remarks: remarks,
             mustNotBeRunning: removals.isEmpty ? [] : [ClaudeDesktopRegistry.processMatcher],
-            liveCheck: live
+            liveCheck: live,
+            scope: self.scope
         )
     }
 
@@ -167,7 +173,8 @@ public struct ClaudeCodeAdapter: AgentAdapter {
             moves: [],
             indexEdits: [],
             compressions: compressions,
-            liveCheck: live
+            liveCheck: live,
+            scope: self.scope
         )
     }
 

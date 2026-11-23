@@ -121,17 +121,24 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
     public var notes: [String] = []
     /// Files an agent command rewrote in place, with the clones taken before it ran.
     public var snapshots: [SnapshotItem] = []
+    /// The folders the plan was allowed to change; undo puts nothing back outside them.
+    public var scope: [URL] = []
 
     public var isUndone: Bool { undoneAt != nil }
     /// Still pending and its files are still there to put back.
     public var isUndoable: Bool { undoneAt == nil && originalsPurgedAt == nil && !irreversible }
+    /// Undoable and something did change, e.g. what a plan that stopped half way already did.
+    public var hasChangesToUndo: Bool {
+        isUndoable && !(moved.isEmpty && indexRestores.isEmpty && compressed.isEmpty && undoCommands.isEmpty
+            && redacted.isEmpty && registryRestores.isEmpty && snapshots.isEmpty)
+    }
 }
 
 extension UndoEntry {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, planID, batchID, action, agent, sessionID, destination
         case moved, indexRestores, compressed, undoCommands, mustNotBeRunning, leftovers, undoneAt, failure
-        case redacted, secretFindingCount, originalsPurgedAt, registryRestores, irreversible, notes, snapshots
+        case redacted, secretFindingCount, originalsPurgedAt, registryRestores, irreversible, notes, snapshots, scope
     }
 
     /// Entries written by older versions lack the newer fields; they decode with empty defaults.
@@ -162,6 +169,7 @@ extension UndoEntry {
         irreversible = try c.decodeIfPresent(Bool.self, forKey: .irreversible) ?? false
         notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
         snapshots = try c.decodeIfPresent([SnapshotItem].self, forKey: .snapshots) ?? []
+        scope = try c.decodeIfPresent([URL].self, forKey: .scope) ?? []
     }
 }
 
@@ -182,6 +190,27 @@ public struct UndoLog: Sendable {
             .filter { $0.pathExtension == "json" }
             .map { try decoder.decode(UndoEntry.self, from: Data(contentsOf: $0)) }
             .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    /// The entry as it is on disk now, or `nil` when there is none with this id.
+    public func entry(id: UUID) throws -> UndoEntry? {
+        let suffix = "-\(id.uuidString).json"
+        guard let file = FileSystem.children(of: directory).first(where: { $0.lastPathComponent.hasSuffix(suffix) }) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(UndoEntry.self, from: Data(contentsOf: file))
+    }
+
+    /// Runs `body` while holding an exclusive lock on the log, across threads and processes (the
+    /// app and `domo`), so two undos or an undo and a purge never act on the same entry at once.
+    func withLock<T>(_ body: () throws -> T) throws -> T {
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let descriptor = open(directory.appendingPathComponent(".lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { flock(descriptor, LOCK_UN) }
+        return try body()
     }
 
     public func latestPending() throws -> UndoEntry? {

@@ -23,6 +23,9 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
     case filesOpen(reasons: [String])
     case databaseEditFailed(URL, reason: String)
     case integrityCheckFailed(URL, problems: [String], restored: Bool)
+    case outsideScope(URL)
+    case commandFailedPartly(String, status: Int32, message: String)
+    case indexKeptChanging(URL)
 
     public var errorDescription: String? {
         switch self {
@@ -72,6 +75,12 @@ public enum ExecutorError: Error, LocalizedError, Sendable {
             restored
                 ? "\(url.lastPathComponent) failed SQLite's integrity check after the edit (\(problems.first ?? "no answer")), so Domovy put its copy of the database back. Nothing was changed."
                 : "\(url.lastPathComponent) failed SQLite's integrity check after the edit (\(problems.first ?? "no answer")), and Domovy could not put its copy back. The copy is in Domovy's quarantine; quit the app and use Undo, or replace the file with it."
+        case .outsideScope(let url):
+            "Refusing to change \(url.lastPathComponent): it is outside the folders this action may change, so Domovy changed nothing."
+        case .commandFailedPartly(let line, let status, let message):
+            "`\(line)` failed (exit status \(status))\(message.isEmpty ? "." : ": \(message)") It had already changed some files; Domovy kept copies, so undo puts them back."
+        case .indexKeptChanging(let url):
+            "\(url.lastPathComponent) kept changing while Domovy edited it (an agent is writing to it), so Domovy left it as it is. Try again in a moment."
         }
     }
 }
@@ -86,6 +95,9 @@ public struct Executor: Sendable {
     let copier: QuarantineCopier
     let integrity: any DatabaseIntegrityChecker
     let now: @Sendable () -> Date
+    /// Called between reading a shared index file and swapping in its new version; tests
+    /// append a line here, the way a running agent would.
+    var indexRewriteHook: IndexFileRewrite.Hook?
     var fileManager: FileManager { .default }
 
     public var quarantineDirectory: URL { storeRoot.appendingPathComponent("Quarantine", isDirectory: true) }
@@ -132,9 +144,13 @@ public struct Executor: Sendable {
         guard !plan.liveCheck.isLive else { throw ExecutorError.sessionIsLive(reasons: plan.liveCheck.reasons) }
         guard !plan.isEmpty else { throw ExecutorError.nothingToDo }
         if plan.needsAcknowledgement, let text = plan.acknowledgement { throw ExecutorError.needsAcknowledgement(text) }
+        try requireInScope(plan)
         // Checked again here: the app may have started while the user read the plan.
         let blocking = processes.blockingReasons(plan.mustNotBeRunning)
         guard blocking.isEmpty else { throw ExecutorError.appRunning(reasons: blocking) }
+        // An agent may have opened the session since the plan. Files rewritten in place are
+        // checked again one by one, right before each swap.
+        try requireNotOpen(plan.moves.map(\.source) + plan.registryRemovals.map(\.file))
 
         var entry = UndoEntry(
             id: UUID(),
@@ -155,6 +171,7 @@ public struct Executor: Sendable {
             failure: nil,
             secretFindingCount: plan.secretFindingCount
         )
+        entry.scope = plan.scope
         try undoLog.write(entry)
         for command in plan.commands {
             try run(command, entry: &entry)
@@ -171,6 +188,8 @@ public struct Executor: Sendable {
             do {
                 let current = try relocate(move.source, to: plan.destination ?? .trash, entry: entry, ordinal: index)
                 entry.moved.append(.init(original: move.source, current: current))
+                // Written after every step, so a crash or a full disk never hides a moved file from undo.
+                try undoLog.write(entry)
             } catch {
                 entry.failure = error.localizedDescription
                 try undoLog.write(entry)
@@ -181,7 +200,10 @@ public struct Executor: Sendable {
 
         for edit in plan.indexEdits where FileSystem.exists(edit.file) {
             do {
-                if let restore = try removeLines(edit, entry: entry) { entry.indexRestores.append(restore) }
+                if let restore = try removeLines(edit, entry: entry) {
+                    entry.indexRestores.append(restore)
+                    try undoLog.write(entry)
+                }
             } catch {
                 entry.failure = error.localizedDescription
                 try undoLog.write(entry)
@@ -219,14 +241,22 @@ public struct Executor: Sendable {
         let present = plan.compressions.filter { FileSystem.exists($0.file) }
         for item in present {
             do {
-                switch try APFSCompression.compress(item.file, expected: item.modificationTime) {
+                let outcome = try APFSCompression.compress(item.file, expected: item.modificationTime) {
+                    try requireNotOpen([item.file])
+                }
+                switch outcome {
                 case .rewritten:
                     entry.compressed.append(.init(file: item.file, sizeBytes: item.sizeBytes))
+                    try undoLog.write(entry)
                 case .skipped(let reason):
                     Log.executor.info("Left \(item.file.path, privacy: .private) as is: \(reason, privacy: .public)")
                 }
             } catch CompressionError.changedSincePlan(let url) {
                 Log.executor.info("Left \(url.path, privacy: .private) as is: it changed since the plan")
+            } catch let error as ExecutorError {
+                entry.failure = error.localizedDescription
+                try undoLog.write(entry)
+                throw error
             } catch {
                 entry.failure = error.localizedDescription
                 try undoLog.write(entry)
@@ -239,7 +269,8 @@ public struct Executor: Sendable {
     }
 
     /// Runs one agent command: keeps copies of what it will remove, runs it, then checks what
-    /// it left behind. A failed command leaves the agent's files as they were.
+    /// it left behind. Whatever the command removed or rewrote, even when it failed or timed out
+    /// half way, stays recorded so undo can put it back.
     private func run(_ command: PlannedCommand, entry: inout UndoEntry) throws {
         let sessionID = entry.sessionID
         Log.executor.info("Running \(command.executable.lastPathComponent, privacy: .public) \(command.arguments.first ?? "", privacy: .public) for session \(sessionID, privacy: .public)")
@@ -253,8 +284,18 @@ public struct Executor: Sendable {
             throw error
         }
         var captured: [UndoEntry.IndexRestore] = []
-        for edit in command.indexLinesBeforeRun where FileSystem.exists(edit.file) {
-            if let restore = try snapshotLines(edit, entry: entry) { captured.append(restore) }
+        do {
+            for edit in command.indexLinesBeforeRun where FileSystem.exists(edit.file) {
+                if let restore = try snapshotLines(edit, entry: entry) { captured.append(restore) }
+            }
+        } catch {
+            // The command does not run: nothing it would remove may stay behind unrecorded.
+            for copy in copies { try? fileManager.removeItem(at: copy.current) }
+            for restore in captured { try? fileManager.removeItem(at: restore.backup) }
+            settleSnapshots(&entry)
+            entry.failure = "\(command.commandLine) did not run: \(error.localizedDescription)"
+            try? undoLog.write(entry)
+            throw error
         }
 
         let result: CommandResult
@@ -265,20 +306,36 @@ public struct Executor: Sendable {
         }
         // Whatever the command changed in place, even when it failed, undo can put back.
         settleSnapshots(&entry)
+        let kept = keepWhatWasRemoved(copies, lines: captured, entry: &entry)
         guard result.status == 0 else {
-            for copy in copies { try? fileManager.removeItem(at: copy.current) }
             entry.failure = "\(command.commandLine) exited with status \(result.status)"
             try undoLog.write(entry)
             Log.executor.error("\(command.commandLine, privacy: .public) failed with \(result.status, privacy: .public): \(result.errorOutput, privacy: .private)")
+            if kept || !entry.snapshots.isEmpty {
+                throw ExecutorError.commandFailedPartly(command.commandLine, status: result.status, message: result.errorOutput)
+            }
             throw ExecutorError.commandFailed(command.commandLine, status: result.status, message: result.errorOutput)
         }
 
-        // Keep the copies of what the command really removed, even in part; drop the rest.
+        entry.undoCommands.append(contentsOf: command.undo)
+        let leftovers = command.verifications.compactMap { $0.leftover() }
+        entry.leftovers.append(contentsOf: leftovers)
+        if !leftovers.isEmpty {
+            Log.executor.info("\(command.commandLine, privacy: .public) left \(leftovers.count, privacy: .public) things behind")
+        }
+        try undoLog.write(entry)
+    }
+
+    /// Records the copies of what the command really removed, even in part, and the index lines
+    /// it removed; drops the rest. True when anything was recorded.
+    private func keepWhatWasRemoved(_ copies: [UndoEntry.MovedItem], lines captured: [UndoEntry.IndexRestore], entry: inout UndoEntry) -> Bool {
+        var kept = false
         for copy in copies {
             if FileSystem.itemExists(copy.original), !Self.lostAnything(copy) {
                 try? fileManager.removeItem(at: copy.current)
             } else {
                 entry.moved.append(copy)
+                kept = true
                 if copy.kept?.method == .copy {
                     entry.notes.append("APFS could not clone \(copy.original.lastPathComponent), so Domovy kept a full copy (\(CleanupPlan.bytes(DiskUsage.measure(copy.current).allocated))) in its quarantine.")
                 }
@@ -287,15 +344,14 @@ public struct Executor: Sendable {
         for restore in captured {
             let data = (try? Data(contentsOf: restore.file)) ?? Data()
             let remaining = restore.removedLines.filter { line in JSONLines.split(data).lines.contains(line.bytes) }
-            if remaining.count < restore.removedLines.count { entry.indexRestores.append(restore) }
+            if remaining.count < restore.removedLines.count {
+                entry.indexRestores.append(restore)
+                kept = true
+            } else {
+                try? fileManager.removeItem(at: restore.backup)
+            }
         }
-        entry.undoCommands.append(contentsOf: command.undo)
-        let leftovers = command.verifications.compactMap { $0.leftover() }
-        entry.leftovers.append(contentsOf: leftovers)
-        if !leftovers.isEmpty {
-            Log.executor.info("\(command.commandLine, privacy: .public) left \(leftovers.count, privacy: .public) things behind")
-        }
-        try undoLog.write(entry)
+        return kept
     }
 
     /// Records the lines an agent command is about to remove, with a byte-exact backup.
@@ -308,66 +364,6 @@ public struct Executor: Sendable {
         let backup = try writeBackup(data, of: edit.file, entry: entry, modificationTime: mtime)
         let removed = indices.map { UndoEntry.RemovedLine(index: $0, bytes: split.lines[$0]) }
         return UndoEntry.IndexRestore(file: edit.file, backup: backup, removedLines: removed, modificationTime: mtime)
-    }
-
-    func writeBackup(_ data: Data, of file: URL, entry: UndoEntry, modificationTime: FileTime?) throws -> URL {
-        let backupDir = undoLog.backupDirectory(for: entry)
-        try fileManager.createDirectory(at: backupDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        var backup = backupDir.appendingPathComponent(file.lastPathComponent)
-        var n = 1
-        while FileSystem.exists(backup) {
-            backup = backupDir.appendingPathComponent("\(n)-\(file.lastPathComponent)")
-            n += 1
-        }
-        try data.write(to: backup, options: [.atomic])
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
-        if let modificationTime { try FileSystem.setModificationTime(modificationTime, of: backup) }
-        return backup
-    }
-
-    func relocate(_ source: URL, to destination: Destination, entry: UndoEntry, ordinal: Int) throws -> URL {
-        switch destination {
-        case .trash:
-            var result: NSURL?
-            try fileManager.trashItem(at: source, resultingItemURL: &result)
-            guard let url = result as URL? else {
-                throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "The Trash did not report where the item went."])
-            }
-            return url
-        case .quarantine:
-            let folder = quarantineDirectory.appendingPathComponent(entry.id.uuidString, isDirectory: true)
-            try fileManager.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let target = folder.appendingPathComponent("\(ordinal)-\(source.lastPathComponent)")
-            // moveItem renames within a volume, which keeps modification times intact.
-            try fileManager.moveItem(at: source, to: target)
-            return target
-        }
-    }
-
-    /// Backs the index file up, drops the matching lines, and keeps mtime and permissions.
-    private func removeLines(_ edit: IndexEdit, entry: UndoEntry) throws -> UndoEntry.IndexRestore? {
-        let data = try Data(contentsOf: edit.file)
-        var split = JSONLines.split(data)
-        // Re-match instead of trusting plan-time line numbers: the agent may have appended since.
-        let indices = JSONLines.indices(in: split.lines, where: edit.matchKey, equals: edit.matchValue)
-        guard !indices.isEmpty else { return nil }
-
-        let mtime = FileSystem.modificationTime(of: edit.file)
-        let permissions = FileSystem.posixPermissions(of: edit.file)
-
-        let backup = try writeBackup(data, of: edit.file, entry: entry, modificationTime: mtime)
-
-        let removed = indices.map { UndoEntry.RemovedLine(index: $0, bytes: split.lines[$0]) }
-        for index in indices.reversed() { split.lines.remove(at: index) }
-        try writePreservingMetadata(split.joined(), to: edit.file, modificationTime: mtime, permissions: permissions)
-
-        return UndoEntry.IndexRestore(file: edit.file, backup: backup, removedLines: removed, modificationTime: mtime)
-    }
-
-    func writePreservingMetadata(_ data: Data, to url: URL, modificationTime: FileTime?, permissions: Int?) throws {
-        try data.write(to: url, options: [.atomic])
-        if let permissions { try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path) }
-        if let modificationTime { try FileSystem.setModificationTime(modificationTime, of: url) }
     }
 
     // MARK: Undo
@@ -384,10 +380,20 @@ public struct Executor: Sendable {
         return try batch.map { try undo($0) }
     }
 
+    /// Undoes `original` as it is on disk now: another window or `domo` may have undone or
+    /// purged it since this copy was read. One undo at a time, across processes.
     public func undo(_ original: UndoEntry) throws -> UndoEntry {
-        var entry = original
+        try undoLog.withLock {
+            guard let current = try undoLog.entry(id: original.id) else { throw ExecutorError.nothingToUndo }
+            return try undoNow(current)
+        }
+    }
+
+    private func undoNow(_ found: UndoEntry) throws -> UndoEntry {
+        var entry = found
         guard !entry.isUndone else { throw ExecutorError.alreadyUndone }
         guard entry.originalsPurgedAt == nil else { throw ExecutorError.originalsPurged }
+        try requireInScope(entry)
         Log.executor.info("Undoing entry \(entry.id, privacy: .public)")
         let blocking = processes.blockingReasons(entry.mustNotBeRunning)
         guard blocking.isEmpty else { throw ExecutorError.appRunning(reasons: blocking) }
@@ -438,7 +444,7 @@ public struct Executor: Sendable {
         for item in entry.compressed {
             do {
                 if FileSystem.exists(item.file) {
-                    if case .skipped(let reason) = try APFSCompression.decompress(item.file) {
+                    if case .skipped(let reason) = try APFSCompression.decompress(item.file, beforeSwap: { try requireNotOpen([item.file]) }) {
                         Log.executor.info("Left \(item.file.path, privacy: .private) as is: \(reason, privacy: .public)")
                     }
                 }
@@ -480,21 +486,5 @@ public struct Executor: Sendable {
         }
         try fileManager.createDirectory(at: item.original.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fileManager.moveItem(at: item.current, to: item.original)
-    }
-
-    /// Puts removed lines back at their old positions. If the file vanished, the backup is restored whole.
-    private func reinsert(_ restore: UndoEntry.IndexRestore) throws {
-        guard FileSystem.exists(restore.file) else {
-            try fileManager.copyItem(at: restore.backup, to: restore.file)
-            if let mtime = restore.modificationTime { try FileSystem.setModificationTime(mtime, of: restore.file) }
-            return
-        }
-        let permissions = FileSystem.posixPermissions(of: restore.file)
-        var split = JSONLines.split(try Data(contentsOf: restore.file))
-        for line in restore.removedLines.sorted(by: { $0.index < $1.index }) {
-            split.lines.insert(line.bytes, at: min(line.index, split.lines.count))
-        }
-        if !split.lines.isEmpty { split.trailingNewline = true }
-        try writePreservingMetadata(split.joined(), to: restore.file, modificationTime: restore.modificationTime, permissions: permissions)
     }
 }

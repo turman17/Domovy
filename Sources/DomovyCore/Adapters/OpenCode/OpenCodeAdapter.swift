@@ -82,11 +82,13 @@ public struct OpenCodeAdapter: AgentAdapter {
         let (row, index) = try locate(session)
         try requireWritable()
         let family = index.descendants(of: row.id) + [row]
+        // Ids come from OpenCode's database and end up in a path and on `opencode`'s command line.
+        if let unsafe = family.first(where: { !SafeID.isSafe($0.id) }) { throw AdapterError.unsafeID(kind, id: unsafe.id) }
         let live = await planCheck()
         guard let tool = cli.resolve() else {
             return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: [], indexEdits: [],
                         remarks: ["OpenCode's own command (`opencode session delete`) was not found, so nothing will change. Domovy never edits OpenCode's database itself."],
-                        liveCheck: live)
+                        liveCheck: live, scope: self.scope)
         }
         let reader = SQLiteReader(url: layout.database)
         let commands = family.map { member in
@@ -113,7 +115,7 @@ public struct OpenCodeAdapter: AgentAdapter {
         remarks.append("The space stays inside opencode.db for OpenCode to reuse; the file itself does not shrink.")
         return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: moves, indexEdits: [],
                     commands: commands, remarks: remarks, acknowledgement: Self.acknowledgement,
-                    mustNotBeRunning: [processMatcher], liveCheck: live)
+                    mustNotBeRunning: [processMatcher], liveCheck: live, scope: self.scope)
     }
 
     /// Nothing to compress: a session is rows inside the shared database.
@@ -121,7 +123,7 @@ public struct OpenCodeAdapter: AgentAdapter {
         _ = try locate(session)
         return Plan(agent: kind, sessionID: session.id, action: .archive, destination: nil, moves: [], indexEdits: [],
                     remarks: ["OpenCode keeps sessions inside opencode.db, so there is no file of this session to compress. Domovy leaves the database as it is."],
-                    liveCheck: await storeLiveness())
+                    liveCheck: await storeLiveness(), scope: self.scope)
     }
 
     public func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript {

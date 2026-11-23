@@ -34,6 +34,8 @@ extension Executor {
                 entry.failure = error.localizedDescription
                 try undoLog.write(entry)
                 if case ExecutorError.changedSinceScan = error { throw error }
+                if case ExecutorError.filesOpen = error { throw error }
+                if case ExecutorError.indexKeptChanging = error { throw error }
                 throw ExecutorError.redactionFailed(item.file, reason: error.localizedDescription, doneSoFar: entry.redacted.count, total: present.count)
             }
         }
@@ -70,7 +72,14 @@ extension Executor {
         entry.redacted.append(.init(file: file, original: kept, modificationTime: mtime, replacements: item.replacementCount, sizeBytes: size))
         try undoLog.write(entry)
 
-        // Last look before the swap: an agent that wrote meanwhile wins and we back off.
+        // Last look before the swap: an agent that opened or wrote it meanwhile wins and we back off.
+        do {
+            try requireNotOpen([file])
+        } catch {
+            entry.redacted.removeLast()
+            try? fileManager.removeItem(at: kept)
+            throw error
+        }
         guard FileSystem.modificationTime(of: file) == mtime, FileSystem.size(of: file) == size else {
             entry.redacted.removeLast()
             try? fileManager.removeItem(at: kept)

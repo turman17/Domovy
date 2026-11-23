@@ -41,6 +41,9 @@ public struct CursorAdapter: AgentAdapter {
                   dotDirectory: home.appendingPathComponent(".cursor", isDirectory: true))
     }
 
+    /// `Application Support/Cursor` and `~/.cursor` (CLI chats, plain-text copies).
+    public var scope: [URL] { [layout.support, layout.dot] }
+
     /// The Cursor app, which must be quit before its database changes.
     public var processMatcher: ProcessMatcher { CursorLayout.appMatcher }
 
@@ -108,7 +111,7 @@ public struct CursorAdapter: AgentAdapter {
         case .editor:
             return Plan(agent: kind, sessionID: session.id, action: .archive, destination: nil, moves: [], indexEdits: [],
                         remarks: ["Cursor keeps this chat as rows inside state.vscdb, so there is no file of it to compress. Domovy leaves the database as it is."],
-                        liveCheck: await databaseLiveness())
+                        liveCheck: await databaseLiveness(), scope: self.scope)
         case .cli(let folder):
             var compressions: [FileCompression] = []
             for file in APFSCompression.regularFiles(at: folder) {
@@ -121,7 +124,7 @@ public struct CursorAdapter: AgentAdapter {
                 ))
             }
             return Plan(agent: kind, sessionID: session.id, action: .archive, destination: nil, moves: [], indexEdits: [],
-                        compressions: compressions, liveCheck: await cliLiveness(folder))
+                        compressions: compressions, liveCheck: await cliLiveness(folder), scope: self.scope)
         }
     }
 
@@ -145,13 +148,18 @@ public struct CursorAdapter: AgentAdapter {
 
     private func editorDeletePlan(_ chat: CursorIndex.Chat, session: Session, destination: Destination) async throws -> Plan {
         if case .unknown(let reason) = layout.databaseState() { throw AdapterError.readOnly(kind, reason: reason) }
+        // Rows go by the prefix `<kind>:<id>:`, which would also match a chat `<id>:<more>`, and
+        // the id names a file in ~/.cursor/projects. Only plain ids are deleted.
+        guard SafeID.isSafe(chat.id), !CursorIndex.hasLongerIDs(of: chat.id, in: layout) else {
+            throw AdapterError.unsafeID(kind, id: chat.id)
+        }
         let live = await planCheck()
         let listings = CursorIndex.workspaceListings(of: chat.id, in: layout)
         guard listings.isEmpty else {
             let n = listings.count
             return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: [], indexEdits: [],
                         remarks: ["\(n) workspace \(n == 1 ? "database lists" : "databases list") this chat too (an older Cursor layout). Domovy does not edit those, and the chat would come back, so nothing will change. Delete it in Cursor instead."],
-                        liveCheck: live)
+                        liveCheck: live, scope: self.scope)
         }
         let index = CursorIndex.load(layout)
         var removals: [DatabaseEdit.ListEntryRemoval] = []
@@ -178,7 +186,7 @@ public struct CursorAdapter: AgentAdapter {
         }
         return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: moves, indexEdits: [],
                     databaseEdits: [edit], remarks: remarks, acknowledgement: Self.acknowledgement,
-                    mustNotBeRunning: [CursorLayout.appMatcher], liveCheck: live)
+                    mustNotBeRunning: [CursorLayout.appMatcher], liveCheck: live, scope: self.scope)
     }
 
     private func cliDeletePlan(_ folder: URL, session: Session, destination: Destination) async -> Plan {
@@ -188,7 +196,7 @@ public struct CursorAdapter: AgentAdapter {
         let live = LiveCheckResult(isLive: base.isLive || !blocking.isEmpty, reasons: base.reasons + blocking,
                                    checkedSignals: base.checkedSignals + ["Cursor CLI processes"], openHandles: base.openHandles)
         return Plan(agent: kind, sessionID: session.id, action: .delete, destination: destination, moves: [move], indexEdits: [],
-                    mustNotBeRunning: [layout.cliMatcher()], liveCheck: live)
+                    mustNotBeRunning: [layout.cliMatcher()], liveCheck: live, scope: self.scope)
     }
 
     /// `~/.cursor/projects/<project>/agent-transcripts/<chat id>.txt`: plain-text copies Cursor

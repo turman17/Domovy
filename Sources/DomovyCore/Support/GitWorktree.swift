@@ -34,12 +34,19 @@ public struct GitWorktreeInspector: Sendable {
         guard FileManager.default.isExecutableFile(atPath: git.path) else {
             return .keep("git was not found, so Domovy cannot tell whether it holds uncommitted work.")
         }
-        guard let status = run(["status", "--porcelain=v1", "--untracked-files=all"], in: worktree), status.ok else {
+        guard let status = run(["status", "--porcelain=v1", "--untracked-files=all", "--ignored"], in: worktree), status.ok else {
             return .keep("git could not read it (is its main repository gone?). Kept in case it holds the only copy of some work.")
         }
-        let changes = status.output.split(separator: "\n").count
+        let lines = status.output.split(separator: "\n")
+        let ignored = lines.filter { $0.hasPrefix("!! ") }.count
+        let changes = lines.count - ignored
         if changes > 0 {
             return .keep("Has uncommitted changes (\(changes) \(changes == 1 ? "file" : "files")).")
+        }
+        // Ignored files (`.env`, a local database, build output) are in no commit: removing the
+        // folder would lose them.
+        if ignored > 0 {
+            return .keep("Holds \(ignored) \(ignored == 1 ? "item" : "items") git ignores (such as .env or build output), which no commit keeps.")
         }
         guard let head = run(["rev-parse", "--verify", "--quiet", "HEAD"], in: worktree), head.ok else {
             return .keep("Has no commits yet.")

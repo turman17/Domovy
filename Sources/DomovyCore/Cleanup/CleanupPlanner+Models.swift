@@ -82,7 +82,8 @@ extension CleanupPlanner {
             let plan = Plan(
                 agent: .huggingFace, sessionID: CleanupID.huggingFaceDetached.rawValue, action: .delete, destination: nil,
                 moves: [], indexEdits: [], commands: [command], remarks: [remark, Self.keptCopyRemark],
-                liveCheck: LiveCheckResult(isLive: !check.reasons.isEmpty, reasons: check.reasons, checkedSignals: ["open file handles"], openHandles: check.status)
+                liveCheck: LiveCheckResult(isLive: !check.reasons.isEmpty, reasons: check.reasons, checkedSignals: ["open file handles"], openHandles: check.status),
+                scope: self.scope
             )
             return CleanupPlan(cleanup: .huggingFaceDetached, plan: plan, excluded: excluded, hasConsequences: false)
         }
@@ -202,7 +203,8 @@ extension CleanupPlanner {
             let plan = Plan(
                 agent: .ollama, sessionID: label, action: .delete, destination: nil, moves: [], indexEdits: [],
                 commands: commands, remarks: remarks,
-                liveCheck: LiveCheckResult(isLive: !reasons.isEmpty, reasons: reasons, checkedSignals: ["ollama ps", "open file handles"], openHandles: check.status)
+                liveCheck: LiveCheckResult(isLive: !reasons.isEmpty, reasons: reasons, checkedSignals: ["ollama ps", "open file handles"], openHandles: check.status),
+                scope: self.scope
             )
             return (plan, excluded)
         }
@@ -291,7 +293,8 @@ extension CleanupPlanner {
             let plan = Plan(
                 agent: .huggingFace, sessionID: label, action: .delete, destination: nil, moves: [], indexEdits: [], commands: commands,
                 remarks: [Self.keptCopyRemark, "Or let it download again the next time code asks for it."],
-                liveCheck: LiveCheckResult(isLive: !check.reasons.isEmpty, reasons: check.reasons, checkedSignals: ["open file handles"], openHandles: check.status)
+                liveCheck: LiveCheckResult(isLive: !check.reasons.isEmpty, reasons: check.reasons, checkedSignals: ["open file handles"], openHandles: check.status),
+                scope: self.scope
             )
             return (plan, excluded)
         }
