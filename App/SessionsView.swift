@@ -35,14 +35,18 @@ struct SessionsView: View {
     @State private var showsFlaggedOnly = false
     @State private var errorMessage: String?
 
-    /// Filtered, sorted rows with their text formatted once. Rebuilt only when an input
-    /// changes, so scrolling draws cells without filtering, sorting or formatting.
+    /// Every session as a row, text formatted once per reload or scan, so scrolling draws
+    /// cells without formatting and sorting only reorders.
+    @State private var allRows: [SessionRow] = []
+    /// `allRows` filtered and sorted for the table.
     @State private var rows: [SessionRow] = []
 
-    private var rowInputs: RowInputs {
-        RowInputs(
-            sessions: library.sessions,
-            findingCounts: library.secretFindings.mapValues(\.count),
+    private var rowData: RowData {
+        RowData(sessions: library.sessions, findingCounts: library.secretFindings.mapValues(\.count))
+    }
+
+    private var rowView: RowView {
+        RowView(
             agentFilter: agentFilter,
             statusFilter: statusFilter,
             showsFlaggedOnly: showsFlaggedOnly,
@@ -104,7 +108,11 @@ struct SessionsView: View {
         .overlay(alignment: .bottom) { toastOverlay }
         .navigationTitle(showsFlaggedOnly ? "Flagged by the secret scan" : statusFilter == .expiring ? "Expiring soon" : (agentFilter?.displayName ?? "Sessions"))
         .navigationSubtitle("\(rows.count) \(rows.count == 1 ? "session" : "sessions") · \(rows.reduce(0) { $0 + $1.sizeBytes }.formatted(.byteCount(style: .file)))")
-        .onChange(of: rowInputs, initial: true) { _, inputs in rows = SessionRow.rows(for: inputs) }
+        .onChange(of: rowData, initial: true) { _, data in
+            allRows = data.sessions.map { SessionRow($0, secretCount: data.findingCounts[$0.id] ?? 0) }
+            rows = rowView.apply(to: allRows)
+        }
+        .onChange(of: rowView) { _, view in rows = view.apply(to: allRows) }
         .onChange(of: library.sessions.isEmpty) { _, isEmpty in
             if !isEmpty, AppEnvironment.opensInfoAtLaunch, infoSession == nil { infoSession = selectedSession }
         }
@@ -432,19 +440,37 @@ struct SessionsView: View {
     }
 }
 
-/// Everything the sessions table shows. Equal inputs give equal rows.
-struct RowInputs: Equatable {
+/// What the rows are made of: rebuilt (and formatted) only when this changes.
+struct RowData: Equatable {
     let sessions: [Session]
     let findingCounts: [Session.ID: Int]
+}
+
+/// How the rows are shown: changing it filters and sorts the formatted rows again.
+struct RowView: Equatable {
     let agentFilter: AgentKind?
     let statusFilter: StatusFilter
     let showsFlaggedOnly: Bool
     let search: String
     let sortOrder: [KeyPathComparator<SessionRow>]
+
+    func apply(to rows: [SessionRow]) -> [SessionRow] {
+        rows
+            .filter { row in
+                let session = row.session
+                return (agentFilter == nil || session.agent == agentFilter)
+                    && statusFilter.matches(session)
+                    && (!showsFlaggedOnly || row.secretCount > 0)
+                    && (search.isEmpty
+                        || row.title.localizedCaseInsensitiveContains(search)
+                        || row.project.localizedCaseInsensitiveContains(search))
+            }
+            .sorted(using: sortOrder)
+    }
 }
 
 /// One sessions-table row with its text formatted up front: cells only read strings.
-struct SessionRow: Identifiable {
+struct SessionRow: Identifiable, Equatable {
     let session: Session
     let title: String
     let agentLabel: String
@@ -476,19 +502,5 @@ struct SessionRow: Identifiable {
         exactBytes = "\(session.sizeBytes.formatted()) bytes"
         statusSortKey = session.status.rawValue
         self.secretCount = secretCount
-    }
-
-    static func rows(for inputs: RowInputs) -> [SessionRow] {
-        inputs.sessions
-            .filter { inputs.agentFilter == nil || $0.agent == inputs.agentFilter }
-            .filter { inputs.statusFilter.matches($0) }
-            .filter { !inputs.showsFlaggedOnly || (inputs.findingCounts[$0.id] ?? 0) > 0 }
-            .filter {
-                inputs.search.isEmpty
-                    || $0.displayTitle.localizedCaseInsensitiveContains(inputs.search)
-                    || ($0.projectName ?? "").localizedCaseInsensitiveContains(inputs.search)
-            }
-            .map { SessionRow($0, secretCount: inputs.findingCounts[$0.id] ?? 0) }
-            .sorted(using: inputs.sortOrder)
     }
 }
