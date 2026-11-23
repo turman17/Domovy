@@ -28,6 +28,8 @@ public struct Footprint: Hashable, Codable, Sendable {
         case instructions(String)
         /// Domovy's orphan cleanup plan (Disk screen, `domo orphans`).
         case cleanUpOrphans
+        /// A guided cleanup plan (Disk screen, `domo clean <id>`).
+        case cleanup(CleanupID)
     }
 
     public struct Category: Identifiable, Hashable, Codable, Sendable {
@@ -46,6 +48,12 @@ public struct Footprint: Hashable, Codable, Sendable {
         public let guidance: Guidance?
 
         public var id: String { name }
+
+        /// The guided cleanup for this row, if it has one. Keep rows never have one.
+        public var cleanupID: CleanupID? {
+            if case .cleanup(let id) = guidance, disposition != .keep { return id }
+            return nil
+        }
 
         public init(
             name: String,

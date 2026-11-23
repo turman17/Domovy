@@ -16,6 +16,11 @@ struct CodexLayout: Sendable {
     var stateDatabase: URL { root.appendingPathComponent(Self.stateDatabaseName) }
     var threadHistoryDatabase: URL { root.appendingPathComponent("thread_history_1.sqlite") }
 
+    /// The diagnostic logs database and its `-wal` / `-shm` companions, which go together.
+    func logsDatabaseFiles() -> [URL] {
+        FileSystem.children(of: root).filter { $0.lastPathComponent.hasPrefix("logs_2.sqlite") }
+    }
+
     /// The state database version this adapter understands.
     static let stateDatabaseName = "state_5.sqlite"
 

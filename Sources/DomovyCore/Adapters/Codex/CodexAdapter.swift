@@ -17,13 +17,11 @@ public struct CodexAdapter: AgentAdapter {
     /// has a file open in this adapter's CODEX_HOME. The ChatGPT app keeps an app-server running
     /// all the time; it only blocks a change when it is using this very folder.
     public var processMatcher: ProcessMatcher {
-        ProcessMatcher(
-            appName: "Codex",
-            names: ["codex"],
-            prefixes: ["codex-"],
-            scope: root,
-            quitAdvice: "Quit the ChatGPT app or Codex to change this session."
-        )
+        Self.processMatcher(codexHome: root)
+    }
+
+    public static func processMatcher(codexHome: URL, quitAdvice: String = "Quit the ChatGPT app or Codex to change this session.") -> ProcessMatcher {
+        ProcessMatcher(appName: "Codex", names: ["codex"], prefixes: ["codex-"], scope: codexHome, quitAdvice: quitAdvice)
     }
 
     /// - Parameters:

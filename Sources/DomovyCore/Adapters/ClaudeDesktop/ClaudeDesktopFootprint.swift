@@ -16,16 +16,19 @@ public struct ClaudeDesktopFootprint: FootprintProvider {
         self.init(supportDirectory: home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true))
     }
 
+    static let vmBundles = "vm_bundles"
+    static let electronCaches = ["Cache", "Code Cache", "GraphiteDawnCache"]
+    /// The VM row's note; the cleanup sheet repeats it word for word.
+    public static let vmNote = "Removing it frees space; Cowork state is lost and the VM may download again."
+
     public func footprint() async throws -> Footprint {
         guard FileSystem.isDirectory(root) else { throw AdapterError.notInstalled(kind) }
         var builder = FootprintBuilder(agent: kind, root: root)
         func url(_ name: String) -> URL { root.appendingPathComponent(name, isDirectory: true) }
 
-        builder.add("VM bundle", url("vm_bundles"), .consequences,
-                    "Removing it frees space; Cowork state is lost and the VM may download again.",
-                    guidance: .instructions("Quit Claude Desktop before removing it."))
-        builder.add("Electron caches", ["Cache", "Code Cache", "GraphiteDawnCache"].map(url), reveal: root, .safe,
-                    "Cache, Code Cache, GraphiteDawnCache. Rebuilt on next launch.")
+        builder.add("VM bundle", url(Self.vmBundles), .consequences, Self.vmNote, guidance: .cleanup(.claudeDesktopVM))
+        builder.add("Electron caches", Self.electronCaches.map(url), reveal: root, .safe,
+                    "Cache, Code Cache, GraphiteDawnCache. Rebuilt on next launch.", guidance: .cleanup(.claudeDesktopCaches))
         builder.add("Cowork sessions", url("local-agent-mode-sessions"), .consequences,
                     "Cowork history and scheduled tasks. They are gone for good once removed.")
         builder.add("Session registry", url("claude-code-sessions"), .keep,

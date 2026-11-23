@@ -98,7 +98,7 @@ struct FootprintTests {
         let largeRow = try #require(byName["Large rollouts"])
         #expect(largeRow.items.map { FileSystem_relative($0, root) } == [large])
         #expect(largeRow.logicalBytes >= 101_000_000)
-        #expect(largeRow.guidance == .manageInSessions)
+        #expect(largeRow.guidance == .cleanup(.codexLargeRollouts))
         let rollouts = try #require(byName["Session rollouts"])
         #expect(!rollouts.items.contains { FileSystem_relative($0, root) == large })
         #expect(rollouts.disposition == .consequences)

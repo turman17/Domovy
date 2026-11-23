@@ -11,6 +11,10 @@ struct ClaudeCodeLayout: Sendable {
     var devMods: URL { root.appendingPathComponent("dev-mods", isDirectory: true) }
     var sessionEnv: URL { root.appendingPathComponent("session-env", isDirectory: true) }
     var security: URL { root.appendingPathComponent("security", isDirectory: true) }
+    var agentSDKEnvironment: URL { security.appendingPathComponent("agent-sdk-venv", isDirectory: true) }
+    /// Worktrees of agent sessions, when Claude Code keeps any here. The documented place is
+    /// `<repo>/.claude/worktrees/`, inside each project, which Domovy does not scan.
+    var worktrees: URL { root.appendingPathComponent("worktrees", isDirectory: true) }
     var sessions: URL { root.appendingPathComponent("sessions", isDirectory: true) }
     var daemonRoster: URL { root.appendingPathComponent("daemon", isDirectory: true).appendingPathComponent("roster.json") }
     var history: URL { root.appendingPathComponent("history.jsonl") }

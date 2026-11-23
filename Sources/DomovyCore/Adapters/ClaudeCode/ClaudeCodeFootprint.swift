@@ -31,8 +31,11 @@ extension ClaudeCodeAdapter {
                     guidance: .manageInSessions)
         builder.claim(slugs + [layout.projects])
 
-        let venv = layout.security.appendingPathComponent("agent-sdk-venv", isDirectory: true)
-        builder.add("Agent SDK environment", venv, .safe, "security/agent-sdk-venv. Claude Code reinstalls it when needed.")
+        let venv = layout.agentSDKEnvironment
+        builder.add("Agent SDK environment", venv, .safe, "security/agent-sdk-venv. Claude Code reinstalls it when needed.",
+                    guidance: .cleanup(.claudeCodeAgentSDK))
+        builder.add("Worktrees", layout.worktrees, .consequences, "Git worktrees of agent sessions. They may hold uncommitted work.",
+                    guidance: .cleanup(.claudeCodeWorktrees))
 
         func rest(of folder: URL) -> [URL] { builder.unclaimedChildren(of: folder) }
         builder.add("Checkpoints", rest(of: layout.fileHistory), reveal: layout.fileHistory, .consequences,

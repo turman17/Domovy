@@ -16,8 +16,8 @@ extension CodexAdapter {
         let files = layout.rolloutFiles()
         let large = (files.active + files.archived).filter { DiskUsage.measure($0).logical > Self.largeRolloutBytes }
         builder.add("Large rollouts", large, reveal: layout.sessions, .consequences,
-                    "\(large.count) \(large.count == 1 ? "rollout" : "rollouts") over 100 MB. Archive or delete them in Sessions.",
-                    guidance: .manageInSessions)
+                    "\(large.count) \(large.count == 1 ? "rollout" : "rollouts") over 100 MB. Compress them in place, or archive or delete them in Sessions.",
+                    guidance: .cleanup(.codexLargeRollouts))
 
         let threads = Set(files.active.compactMap { CodexLayout.rolloutName($0.lastPathComponent)?.threadID })
         builder.add("Session rollouts", sessionFiles(excluding: builder), reveal: layout.sessions, .consequences,
@@ -28,15 +28,13 @@ extension CodexAdapter {
         builder.claim([layout.sessions, layout.archivedSessions])
 
         let children = FileSystem.children(of: root)
-        func database(_ prefix: String) -> [URL] {
-            children.filter { $0.lastPathComponent.hasPrefix(prefix) }
-        }
-        builder.add("Logs database", database("logs_2.sqlite"), reveal: root, .safe,
-                    "Diagnostic logs. Codex starts a fresh one; remove it only while Codex is quit.")
+        builder.add("Logs database", layout.logsDatabaseFiles(), reveal: root, .safe,
+                    "Diagnostic logs. Codex starts a fresh one; remove it only while Codex is quit.", guidance: .cleanup(.codexLogs))
         let databases = children.filter { $0.lastPathComponent.contains(".sqlite") } + [root.appendingPathComponent("sqlite")]
         builder.add("Thread databases", databases, reveal: root, .keep,
                     "Codex's thread list and history. Domovy only reads them.")
-        builder.add("Worktrees", layout.worktrees, .consequences, "Git worktrees Codex created. They may hold uncommitted work.")
+        builder.add("Worktrees", layout.worktrees, .consequences, "Git worktrees Codex created. They may hold uncommitted work.",
+                    guidance: .cleanup(.codexWorktrees))
         builder.add("Generated images", layout.generatedImages, .consequences, "Images created in sessions. They go with their session.")
         builder.add("Attachments", layout.attachments, .consequences, "Pasted text and files attached to prompts.")
         builder.add("Prompt history", layout.history, .consequences, "Typed prompts for the prompt history picker.")
