@@ -7,7 +7,7 @@ struct Domo: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "domo",
         abstract: "Domovy: tidy up after AI coding agents.",
-        subcommands: [Ls.self, Du.self, Rm.self, Archive.self, Secrets.self, Redact.self, Purge.self, Undo.self]
+        subcommands: [Ls.self, Du.self, Rm.self, Archive.self, Orphans.self, Secrets.self, Redact.self, Purge.self, Undo.self]
     )
 
     static func printLeftovers(_ entries: [UndoEntry]) {

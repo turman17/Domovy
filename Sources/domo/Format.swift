@@ -85,6 +85,10 @@ enum Format {
             lines.append("  \(bytes(edit.removedBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) index  \(edit.file.path)")
             lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) \(edit.note)")
         }
+        for removal in plan.registryRemovals {
+            lines.append("  \(bytes(removal.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) entry  \(removal.file.path)")
+            lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) \(removal.note)")
+        }
         lines.append("")
         lines.append("Live check: \(plan.liveCheck.isLive ? "LIVE" : "not live") (checked \(plan.liveCheck.checkedSignals.joined(separator: ", ")); open handles: \(plan.liveCheck.openHandles.rawValue))")
         if plan.action == .archive {
@@ -96,6 +100,28 @@ enum Format {
         for remark in plan.remarks where remark != plan.summary {
             lines.append("Note: \(remark)")
         }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Orphans and duplicates, one per line, with what stays for each duplicate.
+    static func orphans(_ report: OrphanReport, home: URL) -> String {
+        var lines: [String] = []
+        let kinds: [OrphanItem.Kind: String] = [
+            .companion: "companion", .desktopEntry: "desktop", .duplicateCopy: "copy",
+            .duplicateSession: "session", .duplicateDesktopEntry: "desktop",
+        ]
+        let orphanRows = report.orphans.map { [kinds[$0.kind] ?? "", String($0.sessionID.prefix(8)), bytes($0.sizeBytes), displayPath($0.url, home: home)] }
+        lines.append("Orphans: \(report.orphanSummary)")
+        if !orphanRows.isEmpty { lines.append(table(orphanRows, header: ["KIND", "SESSION", "SIZE", "PATH"], rightAligned: [2])) }
+        lines.append("")
+        lines.append("Duplicates: \(report.duplicateSummary)")
+        for group in report.duplicates {
+            lines.append("  \(group.sessionID.prefix(8)): keeps \(group.kept.map { displayPath($0, home: home) }.joined(separator: ", "))")
+            for item in group.extra {
+                lines.append("    \((kinds[item.kind] ?? "").padding(toLength: 8, withPad: " ", startingAt: 0)) \(bytes(item.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) \(displayPath(item.url, home: home))")
+            }
+        }
+        if case .readOnly(let reason) = report.desktopStatus { lines.append("\nNote: \(reason)") }
         return lines.joined(separator: "\n")
     }
 

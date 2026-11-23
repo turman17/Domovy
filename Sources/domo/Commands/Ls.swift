@@ -30,7 +30,7 @@ struct Ls: AsyncParsableCommand {
         let rows = sessions.map { s in
             [
                 full ? s.id : String(s.id.prefix(8)),
-                s.agent.displayName,
+                s.agentLabel,
                 s.projectName ?? "-",
                 Format.relative(s.lastActive),
                 Format.bytes(s.sizeBytes),

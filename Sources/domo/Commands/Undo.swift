@@ -34,7 +34,11 @@ struct Undo: AsyncParsableCommand {
             }
             for entry in try executor.undoLatestBatch() {
                 let verb = entry.action == .archive ? "Decompressed" : entry.action == .redact ? "Put back the originals of" : "Restored"
-                print("\(verb) session \(entry.sessionID) (\(entry.agent.displayName)).")
+                if let scope = OrphanScope(rawValue: entry.sessionID) {
+                    print("Put back the \(scope.rawValue) (\(entry.moved.count) items, \(entry.registryRestores.count) Desktop entries).")
+                } else {
+                    print("\(verb) session \(entry.sessionID) (\(entry.agent.displayName)).")
+                }
             }
         } catch {
             throw Domo.fail(error)
@@ -45,7 +49,7 @@ struct Undo: AsyncParsableCommand {
         switch entry.action {
         case .archive: "\(entry.compressed.count) files compressed"
         case .redact: "\(entry.redacted.reduce(0) { $0 + $1.replacements }) values redacted"
-        case .delete: "\(entry.moved.count) items, \(entry.indexRestores.count) index edits"
+        case .delete: "\(entry.moved.count) items, \(entry.indexRestores.count + entry.registryRestores.count) index edits"
         }
     }
 }
