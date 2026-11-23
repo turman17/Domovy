@@ -8,12 +8,10 @@ struct Du: AsyncParsableCommand {
     @OptionGroup var options: RootOptions
 
     func run() async throws {
-        var footprints: [Footprint] = []
-        do {
-            for adapter in await options.installedAdapters() { footprints.append(try await adapter.footprint()) }
-        } catch {
-            throw Domo.fail(error)
-        }
+        let providers: [any FootprintProvider] = options.adapters + FootprintScanner.measuredOnly(home: options.home)
+        let result = await FootprintScanner.scan(providers)
+        for failure in result.failures { FileHandle.standardError.write(Data("domo: \(failure)\n".utf8)) }
+        let footprints = result.footprints
         guard !footprints.isEmpty else {
             print("No agent folders found. All tidy.")
             return
