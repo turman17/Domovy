@@ -48,8 +48,8 @@ struct ContentView: View {
                 SessionsView(agentFilter: agentFilter, search: search)
             } else if selection == .section(.disk) {
                 DiskView(onOpenSessions: { selection = .agent($0) })
-            } else if case .section(let item) = selection {
-                ContentUnavailableView(item.rawValue, systemImage: item.symbol, description: Text("Not built yet."))
+            } else if selection == .section(.processes) {
+                ProcessesView(search: search)
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search")

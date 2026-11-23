@@ -4,11 +4,13 @@ import SwiftUI
 @main
 struct DomovyApp: App {
     @State private var library = SessionLibrary(home: AppEnvironment.home, storeRoot: AppEnvironment.storeRoot, isCustomHome: AppEnvironment.isDevHome)
+    @State private var processes = ProcessMonitor(home: AppEnvironment.home, storeRoot: AppEnvironment.storeRoot)
 
     var body: some Scene {
         Window("Domovy", id: "main") {
             ContentView()
                 .environment(library)
+                .environment(processes)
                 .frame(minWidth: 820, minHeight: 560)
                 .task {
                     await library.reload()
@@ -30,6 +32,7 @@ struct DomovyApp: App {
         MenuBarExtra {
             MenuBarView()
                 .environment(library)
+                .environment(processes)
         } label: {
             Label {
                 Text(library.totalFootprintBytes.formatted(.byteCount(style: .file)))

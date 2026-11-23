@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(SessionLibrary.self) private var library
+    @Environment(ProcessMonitor.self) private var processes
     @Binding var selection: SidebarSelection?
 
     var body: some View {
@@ -15,6 +16,7 @@ struct SidebarView: View {
                     .badge(Text(library.totalFootprintBytes.formatted(.byteCount(style: .file))))
                     .tag(SidebarSelection.section(.disk))
                 Label("Processes", systemImage: SidebarItem.processes.symbol)
+                    .badge(processes.orphanCount > 0 ? Text("\(processes.orphanCount) orphaned") : nil)
                     .tag(SidebarSelection.section(.processes))
             }
             Section("Agents") {

@@ -17,6 +17,7 @@ struct CleanupPlanSheet: View {
     @State private var destination: Destination
     @State private var isExecuting = false
     @State private var failure: String?
+    @State private var purgeNow = false
 
     init(request: CleanupRequest) {
         _cleanup = State(initialValue: request.cleanup)
@@ -50,6 +51,7 @@ struct CleanupPlanSheet: View {
             LiveCheckRow(result: plan.liveCheck)
             RemarksView(remarks: plan.remarks)
             changes
+            if plan.keepsToolCopies { FreeSpaceNowToggle(isOn: $purgeNow) }
             if let failure {
                 Label(failure, systemImage: "exclamationmark.circle")
                     .foregroundStyle(.secondary)
@@ -125,12 +127,14 @@ struct CleanupPlanSheet: View {
 
     @ViewBuilder
     private var primaryButton: some View {
-        let title = compresses ? "Compress" : plan.isPermanent ? "Delete" : (destination == .trash ? "Move to Trash" : "Move to Quarantine")
+        let title = compresses ? "Compress" : purgeNow && plan.keepsToolCopies ? "Delete Now" : plan.isPermanent ? "Delete" : (destination == .trash ? "Move to Trash" : "Move to Quarantine")
         let button = Button(title, action: execute)
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
             .disabled(!cleanup.canExecute || isExecuting)
-        if (cleanup.hasConsequences || plan.isPermanent) && !compresses {
+        // With a kept copy a tool command stays undoable; red only once it is for good.
+        let permanent = plan.keepsToolCopies ? purgeNow : plan.isPermanent
+        if (cleanup.hasConsequences || permanent) && !compresses {
             button.tint(.red)
         } else {
             button
@@ -146,7 +150,7 @@ struct CleanupPlanSheet: View {
         isExecuting = true
         Task {
             do {
-                try await library.runCleanup(cleanup)
+                try await library.runCleanup(cleanup, purgeNow: purgeNow && plan.keepsToolCopies)
                 dismiss()
             } catch {
                 failure = error.localizedDescription

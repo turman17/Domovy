@@ -12,6 +12,7 @@ struct DeletePlanSheet: View {
     @State private var destination: Destination
     @State private var isExecuting = false
     @State private var failure: String?
+    @State private var purgeNow = false
 
     init(request: DeleteRequest) {
         self.request = request
@@ -20,7 +21,10 @@ struct DeletePlanSheet: View {
     }
 
     private var root: URL { library.root(for: plan.agent) }
-    private var confirmTitle: String { destination == .trash ? "Move to Trash" : "Move to Quarantine" }
+    private var confirmTitle: String {
+        if purgeNow && plan.keepsToolCopies { return "Delete Now" }
+        return destination == .trash ? "Move to Trash" : "Move to Quarantine"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -32,6 +36,7 @@ struct DeletePlanSheet: View {
             RemarksView(remarks: plan.remarks)
             secretsHint
             changes
+            if plan.keepsToolCopies { FreeSpaceNowToggle(isOn: $purgeNow) }
             if let failure {
                 Label(failure, systemImage: "exclamationmark.circle")
                     .foregroundStyle(.secondary)
@@ -109,7 +114,8 @@ struct DeletePlanSheet: View {
             Button(confirmTitle, action: execute)
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .tint(.red)
+                // With a kept copy the delete stays undoable; red only once it is for good.
+                .tint(!plan.keepsToolCopies || purgeNow ? .red : nil)
                 .disabled(plan.liveCheck.isLive || plan.isEmpty || isExecuting)
         }
     }
@@ -118,7 +124,7 @@ struct DeletePlanSheet: View {
         isExecuting = true
         Task {
             do {
-                try await library.execute(plan, for: request.session)
+                try await library.execute(plan, for: request.session, purgeNow: purgeNow && plan.keepsToolCopies)
                 dismiss()
             } catch {
                 failure = error.localizedDescription
@@ -192,6 +198,23 @@ struct CommandsSection: View {
                 }
             }
         }
+    }
+}
+
+/// Opt-in, off by default: delete Domovy's kept copy right after the tool's command succeeded,
+/// so the space comes back now. Undo is no longer possible then.
+struct FreeSpaceNowToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("Free the space now (can't undo)", isOn: $isOn)
+            Text("Domovy keeps a copy so you can undo. With this on, it deletes that copy right after the command succeeds.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 20)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

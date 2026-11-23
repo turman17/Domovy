@@ -110,7 +110,8 @@ final class SessionLibrary {
             desktopSupport: home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true),
             models: models,
             ollamaCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "ollama", override: "DOMOVY_OLLAMA_CLI"),
-            huggingFaceCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "hf", override: "DOMOVY_HF_CLI")
+            huggingFaceCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "hf", override: "DOMOVY_HF_CLI"),
+            launchdEnvironment: LaunchdEnvironment.reader(isCustomHome: isCustomHome)
         )
     }
 
@@ -223,22 +224,37 @@ final class SessionLibrary {
     }
 
     /// Executes a delete plan off the main actor, then rescans and offers undo.
-    func execute(_ plan: Plan, for session: Session) async throws {
+    func execute(_ plan: Plan, for session: Session, purgeNow: Bool = false) async throws {
         var plan = plan
         // The undo entry remembers the scan's verdict, so Purge originals can offer its files.
         plan.secretFindingCount = secretFindings[session.id]?.count ?? 0
         let entries = try await run([plan])
         secretFindings[session.id] = nil
         let size = plan.totalBytes.formatted(.byteCount(style: .file))
+        let freed = purgeNow ? await purgeKeptCopies(entries) : nil
         let action = UndoAction(name: "Move to Trash", entries: entries)
-        register(action)
+        if freed == nil { register(action) }
         let title = "\u{201C}\(session.displayTitle)\u{201D} (\(size))"
         let destination = (plan.destination ?? .trash).displayName
         let message = plan.commands.isEmpty
             ? "Moved \(title) to \(destination)."
             : "Deleted \(title) with \(plan.commands.map { "`\($0.executable.lastPathComponent) \($0.arguments.first ?? "")`" }.joined(separator: ", "))."
-        toast = Toast(message: message + Self.leftoverText(entries), undo: action)
+        toast = Toast(message: message + (freed.map { " " + $0 } ?? "") + Self.leftoverText(entries), undo: freed == nil ? action : nil)
         await reload()
+    }
+
+    /// "Free the space now": purges the copies Domovy kept for `entries` right after the tool
+    /// command ran. Returns what to tell the user; a failure leaves the copies and says so.
+    func purgeKeptCopies(_ entries: [UndoEntry]) async -> String {
+        let executor = self.executor
+        do {
+            let plan = try await Task.detached { try executor.purgeKeptCopies(of: entries) }.value
+            guard !plan.isEmpty else { return "Domovy kept no copy, so there was nothing more to free." }
+            return "Freed \(plan.totalBytes.formatted(.byteCount(style: .file))) now; this can't be undone."
+        } catch {
+            logger.error("Purging kept copies failed: \(error.localizedDescription, privacy: .private)")
+            return "Domovy could not delete its copy (\(error.localizedDescription)); purge it later from the Disk screen."
+        }
     }
 
     /// Executes archive plans as one batch, then rescans and offers undo.

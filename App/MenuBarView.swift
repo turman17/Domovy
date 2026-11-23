@@ -4,6 +4,7 @@ import SwiftUI
 /// Menu bar popover: total footprint, breakdown by agent, what needs attention, Open Domovy.
 struct MenuBarView: View {
     @Environment(SessionLibrary.self) private var library
+    @Environment(ProcessMonitor.self) private var processes
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -18,7 +19,7 @@ struct MenuBarView: View {
             }
             breakdown
             Divider()
-            if library.needsAttention || !library.liveSessions.isEmpty {
+            if library.needsAttention || !library.liveSessions.isEmpty || processes.needsAttention {
                 attention
             } else {
                 allTidy
@@ -40,6 +41,7 @@ struct MenuBarView: View {
         }
         .padding(16)
         .frame(width: 360)
+        .task { await processes.refreshIfStale() }
     }
 
     private var header: some View {
@@ -100,6 +102,21 @@ struct MenuBarView: View {
                     title: "\(live.count) \(live.count == 1 ? "session is" : "sessions are") live",
                     detail: live.prefix(3).map { "\($0.agent.displayName) · \($0.projectName ?? "no project")" }.joined(separator: ", ")
                 ) { open(filter: .live) }
+            }
+            if processes.orphanCount > 0 {
+                let n = processes.orphanCount
+                AttentionRow(
+                    symbol: "exclamationmark.circle",
+                    title: "\(n) orphaned agent \(n == 1 ? "process" : "processes") (\(processes.orphanBytes.formatted(.byteCount(style: .memory))))",
+                    detail: "Their agent is gone. Review them on the Processes screen."
+                ) { open(section: .processes) }
+            }
+            if let server = processes.growingServers.first {
+                AttentionRow(
+                    symbol: "arrow.up.right",
+                    title: "MCP server growing: \((server.footprintBytes ?? 0).formatted(.byteCount(style: .memory)))",
+                    detail: "\(server.name). Freezing it stops the growth without losing anything."
+                ) { open(section: .processes) }
             }
             if let bytes = library.largeVMBundleBytes {
                 AttentionRow(

@@ -8,7 +8,7 @@ extension SessionLibrary {
         return try await Task.detached { try await planner.plan(id, destination: destination) }.value
     }
 
-    func runCleanup(_ cleanup: CleanupPlan) async throws {
+    func runCleanup(_ cleanup: CleanupPlan, purgeNow: Bool = false) async throws {
         let planner = cleanupPlanner
         let executor = self.executor
         let entry = try await Task.detached { try await planner.execute(cleanup, with: executor) }.value
@@ -24,13 +24,14 @@ extension SessionLibrary {
                 : "Compressed \(items.count) \(items.count == 1 ? "rollout" : "rollouts") (\(before) \u{2192} ~\(after))."
         } else if !plan.commands.isEmpty {
             let lines = plan.commands.map { "`\($0.commandLine)`" }.joined(separator: ", ")
-            let kept = plan.isPermanent && !entry.moved.isEmpty ? " Domovy keeps a copy in its quarantine until you purge it." : ""
+            let freed = purgeNow ? await purgeKeptCopies([entry]) : nil
+            let kept = freed.map { " " + $0 } ?? (plan.isPermanent && !entry.moved.isEmpty ? " Domovy keeps a copy in its quarantine until you purge it." : "")
             message = "Ran \(lines) (\(plan.totalBytes.formatted(.byteCount(style: .file))))." + kept + Self.leftoverText([entry])
         } else {
             let n = entry.moved.count
             message = "Moved \(n) \(n == 1 ? "item" : "items") (\(plan.totalBytes.formatted(.byteCount(style: .file)))) to \((plan.destination ?? .trash).displayName)."
         }
-        let undoable = entry.isUndoable && (!entry.moved.isEmpty || !entry.compressed.isEmpty)
+        let undoable = entry.isUndoable && (!entry.moved.isEmpty || !entry.compressed.isEmpty) && !(purgeNow && plan.keepsToolCopies)
         let action = UndoAction(name: cleanup.cleanup.compresses ? "Compress" : plan.isPermanent ? "Delete" : "Move to Trash", entries: [entry])
         if undoable { register(action) }
         toast = Toast(message: message, undo: undoable ? action : nil)

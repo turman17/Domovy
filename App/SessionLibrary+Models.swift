@@ -26,15 +26,18 @@ extension SessionLibrary {
         return try await Task.detached { try await planner.modelRemovalPlan(models, destination: destination) }.value
     }
 
-    func runModelRemoval(_ removal: ModelRemovalPlan) async throws {
+    func runModelRemoval(_ removal: ModelRemovalPlan, purgeNow: Bool = false) async throws {
         let planner = cleanupPlanner
         let executor = self.executor
         let entries = try await Task.detached { try await planner.execute(removal, with: executor) }.value
         let names = removal.models.count == 1 ? removal.models[0].name : "\(removal.models.count) models"
         let size = removal.totalBytes.formatted(.byteCount(style: .file))
-        let undoable = entries.filter(\.isUndoable)
+        let freed = purgeNow ? await purgeKeptCopies(entries) : nil
+        let undoable = freed == nil ? entries.filter(\.isUndoable) : []
         let message: String
-        if undoable.isEmpty {
+        if let freed {
+            message = "Removed \(names) (\(size)). \(freed)"
+        } else if undoable.isEmpty {
             message = "Removed \(names) (\(size)). It's gone for good; download it again to use it."
         } else if removal.isPermanent {
             message = "Removed \(names) (\(size)). Domovy keeps a copy in its quarantine until you purge it."

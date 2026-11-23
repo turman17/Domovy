@@ -56,6 +56,18 @@ enum AppEnvironment {
         return nil
     }
 
+    /// Debug only: `DOMOVY_OPEN_PROCESS_ACTION=quit:<pid>` (or `freeze:<pid>`) opens that
+    /// confirmation sheet on the Processes screen. It never runs the action.
+    static var startProcessAction: (action: String, pid: Int32)? {
+        #if DEBUG
+        if let raw = ProcessInfo.processInfo.environment["DOMOVY_OPEN_PROCESS_ACTION"] {
+            let parts = raw.split(separator: ":")
+            if parts.count == 2, let pid = Int32(parts[1]) { return (String(parts[0]), pid) }
+        }
+        #endif
+        return nil
+    }
+
     /// Debug only: `DOMOVY_SCAN_SECRETS=1` runs the secret scan over every session after launch.
     static var scansSecretsAtLaunch: Bool {
         #if DEBUG

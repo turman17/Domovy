@@ -16,6 +16,7 @@ struct ModelRemovalSheet: View {
     @State private var destination: Destination
     @State private var isExecuting = false
     @State private var failure: String?
+    @State private var purgeNow = false
 
     init(request: ModelRemovalRequest) {
         _removal = State(initialValue: request.removal)
@@ -43,6 +44,7 @@ struct ModelRemovalSheet: View {
             LiveCheckRow(result: removal.liveCheck)
             RemarksView(remarks: removal.plans.flatMap(\.remarks))
             changes
+            if removal.keepsToolCopies { FreeSpaceNowToggle(isOn: $purgeNow) }
             if let failure {
                 Label(failure, systemImage: "exclamationmark.circle")
                     .foregroundStyle(.secondary)
@@ -112,13 +114,15 @@ struct ModelRemovalSheet: View {
             Button(confirmTitle, action: execute)
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .tint(.red)
+                // With a kept copy the removal stays undoable; red only once it is for good.
+                .tint(!removal.keepsToolCopies || purgeNow ? .red : nil)
                 .disabled(!removal.canExecute || isExecuting)
         }
     }
 
     /// "Delete" when the tools delete (Domovy keeps a copy), "Move to Trash" when files only move.
     private var confirmTitle: String {
+        if purgeNow && removal.keepsToolCopies { return "Delete Now" }
         if !removal.isPermanent { return destination == .trash ? "Move to Trash" : "Move to Quarantine" }
         return movesFiles ? "Remove" : "Delete"
     }
@@ -132,7 +136,7 @@ struct ModelRemovalSheet: View {
         isExecuting = true
         Task {
             do {
-                try await library.runModelRemoval(removal)
+                try await library.runModelRemoval(removal, purgeNow: purgeNow && removal.keepsToolCopies)
                 dismiss()
             } catch {
                 failure = error.localizedDescription
