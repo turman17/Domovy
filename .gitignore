@@ -21,6 +21,7 @@ xcuserdata/
 
 # Logs and scratch
 *.log
+!Tests/Fixtures/**/*.log
 scratch/
 
 # Test fixtures generated at runtime (committed fixtures live in Tests/Fixtures)
@@ -35,3 +36,6 @@ scratch/
 
 # SwiftPM workspace state
 .swiftpm/
+
+# Synthetic big fake home for UI performance runs (scripts/bighome.sh)
+.bighome/
