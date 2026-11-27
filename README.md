@@ -7,7 +7,7 @@ A free, open-source, native macOS app (and `domo` CLI) that finds every AI agent
 Native Swift · Offline · No telemetry · Nothing deleted permanently by default
 
 [![Release](https://img.shields.io/github/v/release/turman17/Domovy)](https://github.com/turman17/Domovy/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/turman17/Domovy/total)](https://github.com/turman17/Domovy/releases)
+[![Downloads](https://img.shields.io/github/downloads/turman17/Domovy/total?label=downloads)](https://github.com/turman17/Domovy/releases)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black)](https://github.com/turman17/Domovy/releases/latest)
 
@@ -55,12 +55,15 @@ Storage details, sources and what was verified are in [docs/research/agent_stora
 ## Install
 
 ```bash
+brew trust turman17/tap
 brew install --cask turman17/tap/domovy
 xattr -dr com.apple.quarantine /Applications/Domovy.app
 ```
 
 Or download `Domovy-v<version>.zip` from [Releases](https://github.com/turman17/Domovy/releases), move `Domovy.app` to `/Applications`, and run the same `xattr` command. The cask also puts `domo` on your `PATH`; with the zip, the app offers to install it (Domovy > Connect Agents…).
 
+> **Why `brew trust`?** Recent Homebrew versions load casks from third-party taps only after you trust the tap once. Older versions don't have the command and don't need it.
+>
 > **Why the `xattr` step?** Domovy is open source but not notarized (no paid Apple Developer account), so Gatekeeper blocks the first launch. Clearing the quarantine flag once fixes it — or approve the app under System Settings → Privacy & Security → "Open Anyway". Builds are signed with a stable identity, so permissions you grant survive updates.
 
 ### First run
