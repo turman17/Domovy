@@ -4,60 +4,40 @@ import Foundation
 
 struct Rm: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Remove a session and every artifact that belongs to it.",
-        discussion: "Nothing is deleted permanently: items move to the Trash (or the quarantine folder with --to quarantine) and `domo undo` puts them back."
+        abstract: "Remove sessions and every artifact that belongs to them.",
+        discussion: """
+        Name sessions by id, or select them with --older, --agent and --project (live sessions are never \
+        selected). Nothing is deleted permanently: items move to the Trash (or the quarantine folder with \
+        --to quarantine) and `domo undo` puts them back. Live sessions and sessions written to in the last \
+        10 minutes are refused. For scripts and agents: `--dry-run --json` prints the plan with a plan \
+        digest; `-y --if-plan <digest>` runs it only if it is still that plan.
+        """
     )
 
     @OptionGroup var options: RootOptions
 
-    @Argument(help: "Session id or a unique prefix of it (see `domo ls`).")
-    var id: String
+    @Argument(help: "Session ids or unique prefixes of them (see `domo ls`).")
+    var ids: [String] = []
 
-    @Flag(name: .long, help: "Print the plan and change nothing.")
-    var dryRun = false
+    @OptionGroup var filters: SessionFilters
 
-    @Flag(name: [.customShort("y"), .long], help: "Skip the confirmation prompt. Required when stdin is not a terminal.")
-    var yes = false
+    @OptionGroup var flags: PlanFlags
 
-    @Option(name: .long, help: "Where removed files go: trash (default) or quarantine.")
-    var to: Destination = .trash
+    @Option(name: .long, help: "Where removed files go: trash or quarantine. Defaults to the Settings choice (the Trash unless changed).")
+    var to: Destination?
 
     @Flag(name: .long, help: "Accept that undo may stop working (OpenCode, Cursor: once the app writes to its database again). Required with --yes for such plans.")
     var acceptLimitedUndo = false
 
     func run() async throws {
         do {
-            let (adapter, session) = try await options.session(matching: id)
-            var plan = try await adapter.deletePlan(for: session, destination: to)
-            print(Format.plan(plan))
-            if dryRun {
-                print("\nDry run: nothing was changed.")
-                return
-            }
-            guard plan.isEmpty == false, !plan.liveCheck.isLive else {
-                // The executor explains why; let it throw the typed error.
-                _ = try options.executor.execute(plan)
-                return
-            }
-            if plan.acknowledgement != nil, yes, !acceptLimitedUndo { throw DomoError.acknowledgementRequired }
-            if !yes {
-                var steps = plan.commands.map { "run `\($0.commandLine)`" }
-                steps += plan.databaseEdits.map { "delete \($0.rowCount) rows from \($0.database.lastPathComponent)" }
-                if !plan.moves.isEmpty || steps.isEmpty {
-                    steps.append("move \(plan.moves.count) items (\(Format.bytes(plan.totalBytes))) to \(to.displayName)")
-                }
-                let question = steps.joined(separator: " and ")
-                let accept = plan.acknowledgement.map { " \($0) Continue anyway?" } ?? ""
-                try confirm("\n\(question.prefix(1).uppercased() + question.dropFirst())?\(accept) [y/N] ")
-            }
-            // A yes at the prompt (or --accept-limited-undo) is the explicit OK.
-            plan.isAcknowledged = true
-            print("")
-            let entry = try options.executor.execute(plan)
-            let ran = plan.commands.isEmpty ? "" : "Ran \(plan.commands.map { "`\($0.commandLine)`" }.joined(separator: ", ")). "
-            let rows = plan.databaseEdits.isEmpty ? "" : "Deleted the chat's rows from \(plan.databaseEdits.map(\.database.lastPathComponent).joined(separator: ", ")) (integrity check passed). "
-            print("Done. \(ran)\(rows)Moved \(entry.moved.count) items and edited \(entry.indexRestores.count) index file(s). Undo with `domo undo`.")
-            Domo.printLeftovers([entry])
+            let ids = try await options.sessionIDs(ids, filters: filters)
+            try await PlanRunner.run(.delete, sessionIDs: ids, destination: options.destination(to), flags: flags,
+                                     acceptLimitedUndo: acceptLimitedUndo, options: options)
+        } catch let error as ExitCode {
+            throw error
+        } catch let error as ValidationError {
+            throw error
         } catch {
             throw Domo.fail(error)
         }
@@ -68,12 +48,14 @@ enum DomoError: Error, LocalizedError {
     case confirmationRequired
     case cancelled
     case acknowledgementRequired
+    case message(String)
 
     var errorDescription: String? {
         switch self {
         case .confirmationRequired: "Refusing to change anything without confirmation. Pass --yes to confirm, or --dry-run to only show the plan."
         case .cancelled: "Cancelled. Nothing was changed."
         case .acknowledgementRequired: "Nothing was changed: undo of this delete may stop working (see above). Pass --accept-limited-undo with --yes to go ahead."
+        case .message(let text): text
         }
     }
 }

@@ -7,8 +7,19 @@ struct Domo: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "domo",
         abstract: "Domovy: tidy up after AI coding agents.",
-        subcommands: [Ls.self, Du.self, Rm.self, Archive.self, Orphans.self, Clean.self, Models.self, Secrets.self, Redact.self, Purge.self, Undo.self, Ps.self, Freeze.self, Resume.self, Quit.self]
+        discussion: "With no command and stdin not a terminal (an agent starting it), runs the MCP server, like `domo mcp`.",
+        version: DomovyVersion.current,
+        subcommands: [Ls.self, Search.self, Du.self, Rm.self, Archive.self, Orphans.self, Clean.self, Leftovers.self, Models.self, Secrets.self, Redact.self, Purge.self, Undo.self, Ps.self, Freeze.self, Resume.self, Quit.self, Mcp.self, Install.self, Update.self, Connect.self, Disconnect.self, Rules.self]
     )
+
+    /// `domo` alone: the MCP server when stdin is piped (how agents start it), else the help.
+    func run() async throws {
+        guard isatty(STDIN_FILENO) == 0 else {
+            print(Self.helpMessage())
+            return
+        }
+        await Mcp.serve(DomovyContext.fromEnvironment())
+    }
 
     static func printLeftovers(_ entries: [UndoEntry]) {
         for note in entries.flatMap(\.notes) { print("\n\(note)") }
@@ -35,34 +46,35 @@ struct RootOptions: ParsableArguments {
         ClaudeCodeAdapter(home: home)
     }
 
-    /// Every adapter, in display order. A `--root` home never gets the real codex or opencode CLI.
-    var adapters: [any AgentAdapter] {
-        [
-            claudeCode,
-            CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: root != nil)),
-            GeminiAdapter(home: home),
-            AntigravityAdapter(home: home),
-            OpenCodeAdapter(home: home, cli: OpenCodeCLI.choice(home: home, isCustomHome: root != nil)),
-            CopilotAdapter(home: home),
-            CursorAdapter(home: home),
-        ]
+    /// Adapters and executor for this home. A `--root` home never gets the real codex or opencode CLI.
+    var context: DomovyContext {
+        DomovyContext(home: home, isCustomHome: root != nil)
     }
 
-    /// Adapters whose agent is present at this root.
-    func installedAdapters() async -> [any AgentAdapter] {
-        var result: [any AgentAdapter] = []
-        for adapter in adapters where await adapter.status() != .notInstalled { result.append(adapter) }
-        return result
+    /// Every adapter, in display order.
+    var adapters: [any AgentAdapter] {
+        context.adapters
+    }
+
+    /// Every installed agent's sessions, each agent listed once (Aider reuses the others'
+    /// project folders instead of listing them again).
+    func scan() async -> [AgentSessionScan] {
+        await context.scanSessions()
     }
 
     /// The one session across all agents with this id or unique id prefix.
     func session(matching idOrPrefix: String) async throws -> (adapter: any AgentAdapter, session: Session) {
+        try Self.session(matching: idOrPrefix, in: await scan())
+    }
+
+    static func session(matching idOrPrefix: String, in scans: [AgentSessionScan]) throws -> (adapter: any AgentAdapter, session: Session) {
         var matches: [(adapter: any AgentAdapter, session: Session)] = []
-        for adapter in await installedAdapters() {
+        for scan in scans {
+            if let error = scan.error { throw error }
             // OpenCode ids are mixed case; the others are lowercase.
-            for session in try await adapter.sessions() where session.id.lowercased().hasPrefix(idOrPrefix.lowercased()) {
-                if session.id.lowercased() == idOrPrefix.lowercased() { return (adapter, session) }
-                matches.append((adapter, session))
+            for session in scan.sessions where session.id.lowercased().hasPrefix(idOrPrefix.lowercased()) {
+                if session.id.lowercased() == idOrPrefix.lowercased() { return (scan.adapter, session) }
+                matches.append((scan.adapter, session))
             }
         }
         guard matches.count == 1, let match = matches.first else { throw AdapterError.sessionNotFound(idOrPrefix) }
@@ -74,9 +86,20 @@ struct RootOptions: ParsableArguments {
         ModelStores.at(home: home, isCustomHome: root != nil)
     }
 
-    /// Every disk footprint: the adapters, the measured-only agents and the model stores.
+    /// Every disk footprint: the adapters, the measured-only agents and the model stores,
+    /// without the agents hidden in Settings.
     var footprintProviders: [any FootprintProvider] {
-        adapters + FootprintScanner.measuredOnly(home: home) + FootprintScanner.modelStores(modelStores)
+        context.footprintProviders
+    }
+
+    /// `settings.json` in Domovy's folder under this home (the app's Settings window writes it).
+    var settings: DomovySettings {
+        SettingsStore.settings(storeRoot: DomovyContext.storeRoot(home: home))
+    }
+
+    /// `--to` when given, else the default destination from Settings.
+    func destination(_ to: Destination?) -> Destination {
+        settings.destination(to)
     }
 
     /// Guided cleanups and model removals. A `--root` home runs only stub CLIs from `<root>/bin`.

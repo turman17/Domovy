@@ -99,6 +99,10 @@ enum Format {
             lines.append("  \(bytes(move.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) \(marker.padding(toLength: 6, withPad: " ", startingAt: 0)) \(move.source.path)")
             lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) \(move.note)")
         }
+        for item in plan.relocations {
+            lines.append("  \(bytes(item.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) move   \(item.source.path)")
+            lines.append("  \(String(repeating: " ", count: 10))   to   \(item.target.path)")
+        }
         for item in plan.compressions {
             let sizes = "\(bytes(item.sizeBytes)) \u{2192} ~\(bytes(item.estimatedBytes))"
             lines.append("  \(sizes.padding(toLength: 22, withPad: " ", startingAt: 0)) \(item.file.path)")
@@ -129,6 +133,10 @@ enum Format {
             for removal in edit.listRemovals {
                 lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) edit   \(removal.table) \(removal.key)  (\(removal.note))")
             }
+        }
+        for removal in plan.jsonRemovals {
+            lines.append("  \(bytes(removal.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) entry  \(removal.file.path)")
+            lines.append("  \(String(repeating: " ", count: 10)) \(String(repeating: " ", count: 6)) \(removal.note); keeps a copy first")
         }
         for removal in plan.registryRemovals {
             lines.append("  \(bytes(removal.sizeBytes).padding(toLength: 10, withPad: " ", startingAt: 0)) entry  \(removal.file.path)")
@@ -220,5 +228,18 @@ enum Format {
         let base = home.standardizedFileURL.path + "/"
         let path = url.standardizedFileURL.path
         return path.hasPrefix(base) ? "~/" + path.dropFirst(base.count) : path
+    }
+}
+
+extension Format {
+    /// "1.2M".
+    static func tokens(_ count: Int64) -> String {
+        TokenCounts.compact(count)
+    }
+
+    /// "~$1.24", with "+" when some models have no price.
+    static func cost(_ estimate: CostEstimate) -> String {
+        let text = estimate.usd > 0 && estimate.usd < 0.01 ? "<$0.01" : "~$" + String(format: "%.2f", estimate.usd)
+        return estimate.isPartial ? text + "+" : text
     }
 }

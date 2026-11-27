@@ -5,7 +5,7 @@ import Foundation
 struct Secrets: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Scan sessions for API keys, tokens and passwords.",
-        discussion: "Prints masked previews only; values are never shown, logged or saved. Codex .jsonl.zst rollouts are skipped."
+        discussion: "Prints masked previews only; values are never shown, logged or saved. Codex .jsonl.zst rollouts are read but never rewritten: findings in them can only be removed by deleting the session."
     )
 
     @OptionGroup var options: RootOptions
@@ -15,14 +15,14 @@ struct Secrets: AsyncParsableCommand {
 
     func run() async throws {
         do {
-            let adapters = await options.installedAdapters()
+            let scans = await options.scan()
+            let adapters = scans.map(\.adapter)
             let sessions: [Session]
             if let id {
-                sessions = [try await options.session(matching: id).session]
+                sessions = [try RootOptions.session(matching: id, in: scans).session]
             } else {
-                var all: [Session] = []
-                for adapter in adapters { all += try await adapter.sessions() }
-                sessions = all
+                if let error = scans.lazy.compactMap(\.error).first { throw error }
+                sessions = scans.flatMap(\.sessions)
             }
             let targets = await SecretScanner.targets(for: sessions, adapters: adapters)
             let report = try await SecretScanner().scan(targets)

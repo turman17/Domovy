@@ -26,11 +26,12 @@ struct Clean: AsyncParsableCommand {
     @Flag(name: [.customShort("y"), .long], help: "Skip the confirmation prompt. Required when stdin is not a terminal.")
     var yes = false
 
-    @Option(name: .long, help: "Where removed files go: trash (default) or quarantine.")
-    var to: Destination = .trash
+    @Option(name: .long, help: "Where removed files go: trash or quarantine. Defaults to the Settings choice (the Trash unless changed).")
+    var to: Destination?
 
     func run() async throws {
         do {
+            let to = options.destination(self.to)
             let planner = options.cleanupPlanner
             let cleanup = try await planner.plan(category, destination: to)
             print(Format.cleanup(cleanup, home: options.home))

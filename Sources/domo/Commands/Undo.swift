@@ -3,15 +3,28 @@ import DomovyCore
 import Foundation
 
 struct Undo: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Undo the last `domo rm` or `domo archive`.")
+    static let configuration = CommandConfiguration(abstract: "Undo the last `domo rm` or `domo archive`, or the one with this undo id.")
 
     @OptionGroup var options: RootOptions
+
+    @Argument(help: "The undo id `domo rm` or `domo archive` printed (at least 8 characters). Defaults to the last action.")
+    var undoID: String?
 
     @Flag(name: .long, help: "List undo entries instead of undoing.")
     var list = false
 
+    @Flag(name: .long, help: "Print the result as JSON, for scripts and agents.")
+    var json = false
+
     func run() async throws {
         let executor = options.executor
+        if !list, undoID != nil || json {
+            // The same as the MCP tool `undo`.
+            let outcome = await DomovyTools(context: options.context).call("undo", arguments: ["undo_id": .string(undoID ?? "last")])
+            if json { PlanRunner.printJSON(outcome.isError ? ["error": .string(outcome.text)] : outcome.structured) } else { print(outcome.text) }
+            if outcome.isError { throw ExitCode.failure }
+            return
+        }
         do {
             if list {
                 let entries = try executor.undoLog.entries()

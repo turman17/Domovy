@@ -5,7 +5,12 @@ import Foundation
 /// Agent processes: `domo ps`, and `freeze`, `resume`, `quit` for one process tree.
 extension RootOptions {
     var processWatcher: ProcessWatcher {
-        ProcessWatcher(sessions: ProcessSessionResolver(home: home))
+        ProcessWatcher(sessions: ProcessSessionResolver(home: home), herdr: HerdrClient.at(home: home, isCustomHome: root != nil))
+    }
+
+    /// Herdr's panes and agents, so a session running in one is refused and says where.
+    var herdr: HerdrState {
+        HerdrClient.at(home: home, isCustomHome: root != nil).state() ?? .empty
     }
 
     var processController: ProcessController {
@@ -55,9 +60,11 @@ struct Ps: AsyncParsableCommand {
                 for child in node.children { add(child, depth: depth + 1) }
             }
             if !orphans {
-                for group in report.groups {
+                // Agents in Herdr first, by workspace and pane; the rest after, largest first.
+                for group in report.groups.sorted(by: Self.herdrOrder) {
                     let sessions = group.sessionIDs.map { String($0.prefix(8)) }
-                    add(group.root, depth: 0, title: group.root.name + (sessions.isEmpty ? "" : " · " + sessions.joined(separator: ", ")))
+                    let pane = group.herdr.map { " · Herdr \($0.title)" } ?? ""
+                    add(group.root, depth: 0, title: group.root.name + (sessions.isEmpty ? "" : " · " + sessions.joined(separator: ", ")) + pane)
                 }
             }
             for orphan in report.orphans { add(orphan, depth: 0) }
@@ -72,6 +79,17 @@ struct Ps: AsyncParsableCommand {
             if !report.orphans.isEmpty { print("Quit an orphan with `domo quit <pid>`; freeze any process tree with `domo freeze <pid>`.") }
         } catch {
             throw Domo.fail(error)
+        }
+    }
+}
+
+extension Ps {
+    static func herdrOrder(_ a: ProcessGroup, _ b: ProcessGroup) -> Bool {
+        switch (a.herdr, b.herdr) {
+        case let (x?, y?): (x.workspaceLabel, x.paneID) < (y.workspaceLabel, y.paneID)
+        case (.some, nil): true
+        case (nil, .some): false
+        case (nil, nil): a.root.totalBytes > b.root.totalBytes
         }
     }
 }

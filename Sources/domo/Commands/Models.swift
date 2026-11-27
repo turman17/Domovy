@@ -11,7 +11,9 @@ struct Models: AsyncParsableCommand {
 
     /// Every model across the stores at this root, largest first.
     static func all(_ options: RootOptions) async -> [LocalModel] {
-        let result = await FootprintScanner.scan(FootprintScanner.modelStores(options.modelStores))
+        let settings = options.settings
+        let stores = FootprintScanner.modelStores(options.modelStores).filter { !settings.isHidden($0.kind) }
+        let result = await FootprintScanner.scan(stores)
         for failure in result.failures { FileHandle.standardError.write(Data("domo: \(failure)\n".utf8)) }
         return result.footprints.flatMap(\.models).sorted { $0.sizeBytes > $1.sizeBytes }
     }
@@ -72,11 +74,12 @@ struct Models: AsyncParsableCommand {
         @Flag(name: [.customShort("y"), .long], help: "Skip the confirmation prompt. Required when stdin is not a terminal.")
         var yes = false
 
-        @Option(name: .long, help: "Where moved files go: trash (default) or quarantine.")
-        var to: Destination = .trash
+        @Option(name: .long, help: "Where moved files go: trash or quarantine. Defaults to the Settings choice (the Trash unless changed).")
+        var to: Destination?
 
         func run() async throws {
             do {
+                let to = options.destination(self.to)
                 let all = await Models.all(options)
                 let models = try ids.map { try Self.find($0, in: all) }
                 let planner = options.cleanupPlanner
