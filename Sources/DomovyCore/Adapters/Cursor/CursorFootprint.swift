@@ -16,17 +16,30 @@ public struct CursorFootprint: FootprintProvider {
     public let supportDirectory: URL
     /// `~/.cursor`.
     public let dotDirectory: URL
+    /// Cursor.app is installed. Without it, the extensions in `~/.cursor/extensions` are
+    /// leftovers nothing uses.
+    public let isAppInstalled: Bool
 
-    public init(supportDirectory: URL, dotDirectory: URL) {
+    /// - Parameter appInstalled: `nil` looks for Cursor.app in `/Applications` and `~/Applications`.
+    public init(supportDirectory: URL, dotDirectory: URL, appInstalled: Bool? = nil) {
         self.supportDirectory = supportDirectory.standardizedFileURL
         self.dotDirectory = dotDirectory.standardizedFileURL
+        let home = self.dotDirectory.deletingLastPathComponent()
+        self.isAppInstalled = appInstalled ?? Self.findApp(in: [URL(fileURLWithPath: "/Applications", isDirectory: true),
+                                                               home.appendingPathComponent("Applications", isDirectory: true)])
     }
 
-    public init(home: URL) {
+    public init(home: URL, appInstalled: Bool? = nil) {
         self.init(
             supportDirectory: home.appendingPathComponent("Library/Application Support/Cursor", isDirectory: true),
-            dotDirectory: home.appendingPathComponent(".cursor", isDirectory: true)
+            dotDirectory: home.appendingPathComponent(".cursor", isDirectory: true),
+            appInstalled: appInstalled
         )
+    }
+
+    /// Cursor.app directly in one of `folders` (bundle id `com.todesktop.230313mzl4w4u92`).
+    static func findApp(in folders: [URL]) -> Bool {
+        folders.contains { FileSystem.isDirectory($0.appendingPathComponent("Cursor.app", isDirectory: true)) }
     }
 
     /// The global chats database, `User/globalStorage/state.vscdb`.
@@ -67,6 +80,21 @@ public struct CursorFootprint: FootprintProvider {
                     guidance: summary == nil ? nil : .manageInSessions)
         builder.add("App data", appData(builder), reveal: supportDirectory, .keep,
                     "Settings, extensions state and caches Cursor needs.")
+        let extensions = dotDirectory.appendingPathComponent("extensions", isDirectory: true)
+        if isAppInstalled {
+            builder.add("Extensions", extensions, .keep, "VS Code extensions installed into Cursor. Manage them in Cursor's Extensions view.")
+        } else {
+            builder.add("Extensions", extensions, .safe,
+                        "VS Code extensions installed into Cursor, which is no longer in Applications. Nothing uses them; moving the folder to the Trash is safe.")
+        }
+        let tracking = dotDirectory.appendingPathComponent("ai-tracking", isDirectory: true)
+        if isAppInstalled {
+            builder.add("AI code tracking", tracking, .consequences,
+                        "Cursor's record of which code lines its AI wrote, by chat (ai-code-tracking.db), for its AI-usage stats. Cursor starts a new one if removed; those stats restart. Deleting a chat leaves its rows here.")
+        } else {
+            builder.add("AI code tracking", tracking, .safe,
+                        "Cursor's record of which code lines its AI wrote (ai-code-tracking.db). Cursor is no longer installed, so nothing reads it.")
+        }
         builder.add("Extensions and projects", builder.unclaimedChildren(of: dotDirectory), reveal: dotDirectory, .keep,
                     "Extensions, worktrees and project state in ~/.cursor. Left alone.")
         return builder.build()

@@ -95,6 +95,10 @@ final class AntigravityFixtureHome: Sendable {
         static let landing = "b2b2b2b2-2222-4222-8222-222222222222"
         /// App store; open (presence lock).
         static let open = "c3c3c3c3-3333-4333-8333-333333333333"
+        /// CLI store; no summary, title and workspace from history.jsonl.
+        static let history = "d4d4d4d4-4444-4444-8444-444444444444"
+        /// CLI store; an empty title, so the summary's preview is the title.
+        static let preview = "e5e5e5e5-5555-4555-8555-555555555555"
     }
 
     let home: URL
@@ -113,7 +117,7 @@ final class AntigravityFixtureHome: Sendable {
         try fm.copyItem(at: fixtures.appendingPathComponent(version, isDirectory: true), to: geminiDirectory)
         let conversation = try String(contentsOf: fixtures.appendingPathComponent("sql/conversation.sql"), encoding: .utf8)
         let summaries = try String(contentsOf: fixtures.appendingPathComponent("sql/summaries.sql"), encoding: .utf8)
-        for (store, id) in [(cliStore, IDs.uploader), (cliStore, IDs.landing), (appStore, IDs.open)] {
+        for (store, id) in [(cliStore, IDs.uploader), (cliStore, IDs.landing), (cliStore, IDs.history), (cliStore, IDs.preview), (appStore, IDs.open)] {
             let folder = store.appendingPathComponent("conversations", isDirectory: true)
             try fm.createDirectory(at: folder, withIntermediateDirectories: true)
             try CodexFixtureHome.buildDatabase(conversation, at: folder.appendingPathComponent("\(id).db"))
@@ -123,14 +127,20 @@ final class AntigravityFixtureHome: Sendable {
         try setDate(cliStore.appendingPathComponent("conversations/\(IDs.uploader).db"), now.addingTimeInterval(-1 * day))
         try setDate(cliStore.appendingPathComponent("conversations/\(IDs.landing).db"), now.addingTimeInterval(-3 * day))
         try setDate(appStore.appendingPathComponent("conversations/\(IDs.open).db"), now.addingTimeInterval(-600))
+        try setDate(cliStore.appendingPathComponent("conversations/\(IDs.history).db"), now.addingTimeInterval(-4 * day))
+        try setDate(cliStore.appendingPathComponent("conversations/\(IDs.preview).db"), now.addingTimeInterval(-5 * day))
     }
 
     deinit {
         try? FileManager.default.removeItem(at: home.deletingLastPathComponent())
     }
 
-    func adapter(openHandles: any OpenHandleChecker = UnavailableOpenHandleChecker()) -> AntigravityAdapter {
-        AntigravityAdapter(geminiHome: geminiDirectory, openHandles: openHandles, processes: FixedProcessLister([]))
+    func adapter(openHandles: any OpenHandleChecker = UnavailableOpenHandleChecker(), running: [RunningProcess] = []) -> AntigravityAdapter {
+        AntigravityAdapter(geminiHome: geminiDirectory, openHandles: openHandles, processes: FixedProcessLister(running))
+    }
+
+    func executor(running: [RunningProcess] = []) -> Executor {
+        Executor(storeRoot: storeRoot, processes: FixedProcessLister(running))
     }
 
     func setDate(_ url: URL, _ date: Date) throws {

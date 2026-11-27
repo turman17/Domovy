@@ -67,6 +67,16 @@ enum CopilotEvents {
         return Transcript(messages: messages, isTruncated: truncated, hiddenLineCount: hidden)
     }
 
+    /// The newest `limit` messages before `cursor`, read from the end of the file.
+    static func readPage(of file: URL, limit: Int, before cursor: TranscriptCursor?, masking findings: [SecretFinding]) throws -> Transcript {
+        try TranscriptTail.page(of: file, limit: limit, before: cursor, masking: findings) { lines in
+            lines.compactMap { line in
+                guard let event = try? JSONSerialization.jsonObject(with: line.data) as? [String: Any] else { return nil }
+                return message(from: event, index: Int(line.offset)).map { (line.offset, $0) }
+            }
+        }
+    }
+
     private static func message(from event: [String: Any], index: Int) -> TranscriptMessage? {
         let role: TranscriptMessage.Role
         switch event["type"] as? String {

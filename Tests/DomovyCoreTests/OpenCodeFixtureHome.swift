@@ -16,16 +16,20 @@ final class OpenCodeFixtureHome: Sendable {
     let home: URL
     let storeRoot: URL
     let stub: URL
-    var dataFolder: URL { home.appendingPathComponent(".local/share/opencode", isDirectory: true) }
-    var configFolder: URL { home.appendingPathComponent(".config/opencode", isDirectory: true) }
-    var database: URL { dataFolder.appendingPathComponent("opencode.db") }
+    let flavor: OpenCodeFlavor
+    var dataFolder: URL { home.appendingPathComponent(".local/share/\(flavor.folder)", isDirectory: true) }
+    var configFolder: URL { home.appendingPathComponent(".config/\(flavor.folder)", isDirectory: true) }
+    var database: URL { dataFolder.appendingPathComponent(flavor.databaseName) }
 
-    init(version: String = "1.18") throws {
+    /// `flavor: .kilo` builds the same rows as `kilo.db` in `.local/share/kilo` with the kilo stub
+    /// (Tests/Fixtures/kilo/README.md says why the schema is the same).
+    init(version: String = "1.18", flavor: OpenCodeFlavor = .openCode) throws {
+        self.flavor = flavor
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("domovy-opencode-tests-\(UUID().uuidString)", isDirectory: true)
         home = base.appendingPathComponent("home", isDirectory: true)
         storeRoot = base.appendingPathComponent("store", isDirectory: true)
-        stub = base.appendingPathComponent("bin/opencode")
+        stub = base.appendingPathComponent("bin/\(flavor.executable)")
         let fixtures = FixtureHome.fixturesRoot.appendingPathComponent("opencode", isDirectory: true)
         try fm.createDirectory(at: dataFolder.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fm.createDirectory(at: configFolder.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -34,7 +38,9 @@ final class OpenCodeFixtureHome: Sendable {
         let sql = try String(contentsOf: fixtures.appendingPathComponent("sql/opencode.sql"), encoding: .utf8)
         try CodexFixtureHome.buildDatabase(sql, at: database)
         try fm.createDirectory(at: stub.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try fm.copyItem(at: fixtures.appendingPathComponent("stub-opencode.sh"), to: stub)
+        let stubSource = flavor == .kilo
+            ? FixtureHome.fixturesRoot.appendingPathComponent("kilo/stub-kilo.sh") : fixtures.appendingPathComponent("stub-opencode.sh")
+        try fm.copyItem(at: stubSource, to: stub)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
     }
 
@@ -49,7 +55,7 @@ final class OpenCodeFixtureHome: Sendable {
         running: [RunningProcess]? = [],
         openFiles: [Int32: [String]] = [:]
     ) -> OpenCodeAdapter {
-        OpenCodeAdapter(dataFolder: dataFolder, configFolder: configFolder, cli: cli ?? .executable(stub),
+        OpenCodeAdapter(dataFolder: dataFolder, configFolder: configFolder, cli: cli ?? .executable(stub), flavor: flavor,
                         openHandles: openHandles, processes: FixedProcessLister(running, openFiles: openFiles))
     }
 
@@ -62,6 +68,6 @@ final class OpenCodeFixtureHome: Sendable {
     func touch(_ marker: String) { FileManager.default.createFile(atPath: url(marker).path, contents: Data()) }
 
     func stubInvocations() -> [String] {
-        ((try? String(contentsOf: url(".stub-opencode.log"), encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        ((try? String(contentsOf: url(".stub-\(flavor.executable).log"), encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
     }
 }

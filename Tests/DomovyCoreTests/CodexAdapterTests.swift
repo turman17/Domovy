@@ -38,7 +38,7 @@ struct CodexAdapterTests {
         #expect(live.projectName == "landing-site")
         #expect(live.status == .live)
 
-        // zstd rollout: never read; title and cwd come from state_5.sqlite.
+        // zstd rollout: the indexes name it; its cwd is read from the decompressed rollout.
         let compressed = try #require(sessions.first { $0.id == IDs.compressed })
         #expect(compressed.title == "Migrate cron jobs to the queue")
         #expect(compressed.projectPath == "/Users/dev/code/ledger")
@@ -239,7 +239,7 @@ struct CodexAdapterTests {
         #expect(CodexCLI.choice(home: fixture.home, isCustomHome: false, environment: ["DOMOVY_CODEX_CLI": ""]) == CodexCLI.Choice.none)
     }
 
-    @Test("transcript shows prompts, replies and tool calls; zstd rollouts are refused")
+    @Test("transcript shows prompts, replies and tool calls, from plain and zstd rollouts")
     func transcript() async throws {
         let fixture = try CodexFixtureHome()
         let adapter = fixture.adapter()
@@ -247,8 +247,12 @@ struct CodexAdapterTests {
         #expect(transcript.messages.map(\.role) == [.user, .assistant, .assistant])
         #expect(transcript.messages.first?.blocks == [.text("Add retries to the orbit API client\nUse exponential backoff.")])
         #expect(transcript.messages[1].blocks == [.toolCall("shell")])
+        let compressed = try await adapter.transcript(of: try await adapter.session(matching: IDs.compressed), limit: 50)
+        #expect(compressed.messages.map(\.role) == [.user, .assistant, .assistant])
+        #expect(compressed.messages.first?.blocks == [.text("Migrate cron jobs to the queue")])
+        // The bare `.zst` is a placeholder, not zstd: refused with a reason.
         await #expect(throws: AdapterError.self) {
-            try await adapter.transcript(of: try await adapter.session(matching: IDs.compressed), limit: 50)
+            try await adapter.transcript(of: try await adapter.session(matching: IDs.bare), limit: 50)
         }
     }
 }

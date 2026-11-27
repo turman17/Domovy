@@ -8,8 +8,9 @@ extension OpenCodeAdapter {
         guard FileSystem.isDirectory(root) else { throw AdapterError.notInstalled(kind) }
         var builder = FootprintBuilder(agent: kind, root: root)
 
-        let protected = [layout.config] + ["auth.json", "mcp-auth.json", "bin"].map { root.appendingPathComponent($0) }
-        builder.add("Settings and sign-in", protected, reveal: root, .keep, "OpenCode needs these to run. Domovy never removes them.")
+        let protected = [layout.config] + flavor.protectedFiles.sorted().map { root.appendingPathComponent($0) }
+        let app = flavor.appName, db = flavor.databaseName
+        builder.add("Settings and sign-in", protected, reveal: root, .keep, "\(app) needs these to run. Domovy never removes them.")
 
         let database = layout.databaseFiles.filter { FileSystem.exists($0) }
         let usage = DiskUsage.measure(database)
@@ -17,19 +18,19 @@ extension OpenCodeAdapter {
         let events = DiskUsage(allocated: Int64(Double(usage.allocated) * share), logical: Int64(Double(usage.logical) * share))
         let rest = DiskUsage(allocated: usage.allocated - events.allocated, logical: usage.logical - events.logical)
         let count = OpenCodeIndex.load(layout).topLevel.count
-        builder.add("Sessions (in opencode.db)", part: rest, of: database, reveal: root, .consequences,
-                    "\(count) \(count == 1 ? "session" : "sessions"), plus OpenCode's projects and sign-ins in the same file. Delete sessions one by one in Sessions; OpenCode runs the delete.",
+        builder.add("Sessions (in \(db))", part: rest, of: database, reveal: root, .consequences,
+                    "\(count) \(count == 1 ? "session" : "sessions"), plus \(app)'s projects and sign-ins in the same file. Delete sessions one by one in Sessions; \(app) runs the delete.",
                     guidance: .manageInSessions)
-        builder.add("Event log (in opencode.db)", part: events, of: database, reveal: root, .consequences,
-                    "OpenCode's append-only log of session changes, \(Int((share * 100).rounded()))% of the database. It is how this file grows to gigabytes.",
-                    guidance: .instructions(Self.eventLogAdvice))
+        builder.add("Event log (in \(db))", part: events, of: database, reveal: root, .consequences,
+                    "\(app)'s append-only log of session changes, \(Int((share * 100).rounded()))% of the database. It is how this file grows to gigabytes.",
+                    guidance: .instructions(kind == .openCode ? Self.eventLogAdvice : "Deleting old sessions in Sessions runs `\(flavor.executable) session delete`. Domovy never edits the database itself."))
         builder.claim(database)
 
         builder.add("File snapshots", layout.snapshots, .consequences,
-                    "Git repositories behind OpenCode's undo of file edits. Set \"snapshot\": false in opencode.json to stop them.")
+                    "Git repositories behind \(app)'s undo of file edits. Set \"snapshot\": false in its config to stop them.")
         builder.add("Older session files", layout.storage, .consequences,
-                    "Sessions and diffs from OpenCode versions before its database. Newer versions may still read them.")
-        builder.add("Logs", layout.logs, .safe, "Diagnostic logs. OpenCode writes new ones; remove them while it is quit.")
+                    "Sessions and diffs from \(app) versions before its database. Newer versions may still read them.")
+        builder.add("Logs", layout.logs, .safe, "Diagnostic logs. \(app) writes new ones; remove them while it is quit.")
         builder.add("Other", builder.unclaimedChildren(of: root), reveal: root, .keep,
                     "Caches and state Domovy does not manage yet. Left alone.")
         return builder.build()

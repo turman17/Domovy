@@ -461,3 +461,396 @@ Use `FileManager.trashItem` for reversible deletes. Use APFS decmpfs compression
 - Not verified: whether `trashItem` works on files inside other apps' Application Support without prompts (it should, because those are not sandbox containers).
 - Not verified: whether Claude Desktop, Cursor or the Codex app are sandboxed, which would bring their data into the `kTCCServiceSystemPolicyAppData` prompt scope.
 - No primary Apple source was fetched for the libproc APIs or the `F_PUNCHHOLE` semantics.
+
+## Q8. Agents installed on the development Mac but not yet supported
+
+Research date: 2026-11-23. Every item below was checked on a real install by names, sizes, nesting, mtimes, JSON key paths with value types, SQLite schemas and row counts, and app bundle versions. No transcript, prompt, title or other value was printed. SQLite files were opened with `mode=ro` (and `immutable=1` when the app was quit). Program code (app bundles, extension bundles) was read where docs were silent.
+
+### Takeaway
+Two new stores hold real sessions: **Zed's Agent Panel** and **VS Code chat** (Copilot Chat plus the Gemini Code Assist extension). Several other candidates do not hold their own sessions:
+- The Codex desktop app (`ChatGPT.app`, bundle id `com.openai.codex`) and Zed's external agents write into stores Domovy already reads.
+- `~/.opencode` is an install folder.
+- The 1.8 GB in `~/.cursor` is IDE extensions.
+- `Claude-3p` and `CampoUIInternal` are not agent session stores.
+
+The main new risk is cross-store references: Zed, VS Code and the Codex extension all keep their own records that point at Codex or Gemini CLI sessions, so deleting a session that Domovy already supports can leave entries behind in those apps.
+
+### Cited Findings
+
+**Zed (Agent Panel)**
+- Verified on a real install (Zed 1.29.3, bundle id `dev.zed.Zed`, executable `zed`, plus `cli` at `/usr/local/bin/zed`; 2026-11-23; Zed was not running):
+  - Native threads: `~/Library/Application Support/Zed/threads/threads.db` (SQLite, 472 KB, no WAL while quit), with one table, `threads (id TEXT PRIMARY KEY, summary TEXT, updated_at TEXT, data_type TEXT, data BLOB, parent_id TEXT, folder_paths TEXT, folder_paths_order TEXT, created_at TEXT)` and index `threads_list_metadata`. There are 4 rows here. `id` is a 36-character UUID, `updated_at` is ISO 8601 with microseconds and `Z`, and `data_type` is `zstd` on every row. `data` is a zstd-compressed JSON object with the fields `title`, `messages` (an array of `{User: {id, content}}` or `{Agent: …}`), `updated_at`, `detailed_summary`, `initial_project_snapshot {worktree_snapshots [{worktree_path, git_state}], timestamp}`, `cumulative_token_usage`, `request_token_usage`, `model {provider, model}`, `profile`, `subagent_context`, `thinking_enabled`, `thinking_effort`, `draft_prompt`, `ui_scroll_position`, `sandboxed_terminal_temp_dir` (a `$TMPDIR/zed-agent-…` folder, already gone for all 4 threads), `sandbox_grants` and `version` (`0.3.0`). The title and project can be read from the columns `summary` and `folder_paths` without decompressing.
+  - Legacy store `threads/threads-db.1.mdb/` (LMDB `data.mdb` + `lock.mdb`, 56 KB, last written 2026-02-28) is no longer written.
+  - Sidebar metadata is in the workspace DB `~/Library/Application Support/Zed/db/0-stable/db.sqlite` (WAL: `-wal` was 4.2 MB, `-shm` present). Table `sidebar_threads` is `STRICT` with the columns `thread_id BLOB PK` (16-byte UUID), `session_id`, `agent_id`, `title`, `updated_at`, `created_at`, `folder_paths`, `folder_paths_order`, `archived INTEGER`, `main_worktree_paths`, `main_worktree_paths_order`, `remote_connection`, `interacted_at` and `title_override`. It holds 7 rows here:
+    - 4 have `agent_id` NULL (Zed's native agent), and their `session_id` equals a `threads.id` in `threads.db`.
+    - 2 have no `session_id` at all.
+    - 1 has `agent_id = codex-acp`, and its `session_id` is a Codex thread id that exists in `~/.codex/state_5.sqlite` and `~/.codex/sessions/…/rollout-*.jsonl` (`originator = zed` there).
+  - Archive support tables: `archived_git_worktrees (id, worktree_path, main_repo_path, branch_name, staged_commit_hash, unstaged_commit_hash, original_commit_hash)` and `thread_archived_worktrees (thread_id, archived_worktree_id)` (both empty here). `sidebar_terminal_threads` is also empty. `kv_store` holds `agent_panel*` and `dock_panel_size|…:agent_panel` keys, one migration key named `thread-metadata-…-backfill`, and `dismissed-acp-thread-import`.
+  - Text threads (the older assistant): `~/.config/zed/conversations/<title> - <n>.zed.json`, 4 files, 16 KB, last written 2025-05. The file name contains the title, so it must not be logged. JSON fields: `id`, `zed`, `version`, `text`, `messages [{id {replica_id, value}, start, metadata {role, status, timestamp}}]`, `summary` and `slash_command_output_sections`. The prompt library is in `~/.config/zed/prompts/prompts-library-db.0.mdb` (LMDB).
+  - External agents: `Zed/external_agents/registry/registry.json` (`{version, agents [46 × {id, name, version, distribution {npx {package, args}}, …}], extensions}`) and `registry/npx/codex-acp/` (334 MB, an npm install of the ACP adapter). An ACP agent keeps its sessions in its own store (here, Codex). Zed keeps only the `sidebar_threads` row.
+  - Other large folders are not agent data: `copilot/` (437 MB, GitHub Copilot language server for edit predictions), `languages/` (389 MB), `node/` (198 MB), `extensions/` (166 MB), `hang_traces/`.
+  - Must never be deleted: `~/.config/zed/settings.json`, `keymap.json`, `tasks.json`, `prompts/`, and the rest of `db.sqlite`. That file is the whole workspace DB (panes, editors, trusted worktrees), so Domovy may at most delete rows in `sidebar_threads`.
+- Docs: a permanent delete happens from Thread History via the trash icon: it "removes the thread's conversation history and cleans up any associated worktree data". Deleted threads cannot be recovered. Archiving moves a thread to Thread History. If the thread ran in a linked worktree that no other thread uses, archiving "saves the worktree's Git state and removes it from disk", and restoring brings the worktree back. Since Parallel Agents, a thread must be archived before it can be deleted. Zed does not document a retention limit. — [Zed docs: parallel agents](https://zed.dev/docs/ai/parallel-agents); [agent panel](https://zed.dev/docs/ai/agent-panel); [zed#51458](https://github.com/zed-industries/zed/discussions/51458)
+
+**VS Code chat (GitHub Copilot Chat and other chat participants)**
+- Verified on a real install (VS Code 1.138.0 at `/Applications/Programing/Visual Studio Code.app`, bundle id `com.microsoft.VSCode`, executable `Code`; built-in `copilot` extension 0.66.0; 2026-11-23; VS Code was not running). The storage paths below come from the VS Code workbench bundle (`out/vs/workbench/workbench.desktop.main.js`, `ChatSessionStore`):
+  - Session files: a chat in a folder or workspace window is stored at `User/workspaceStorage/<workspace id>/chatSessions/<sessionId>.json`. With `chat.useLogSessionStorage` on (the default), the chat is also written as `<sessionId>.jsonl`. A chat in an empty window goes to `User/globalStorage/emptyWindowChatSessions/` instead. Chats moved between workspaces go to `globalStorage/transferredChatSessions/` (`ChatSessionStore.transferIndex`). An older location was `workspaceStorage/no-workspace/chatSessions`.
+  - Index: the key `chat.ChatSessionStore.index` in the matching `state.vscdb` `ItemTable` (global or workspace scope) holds `{version: 1, entries: {<sessionId>: {sessionId, title, lastMessageDate (ms), isImported, initialLocation, isEmpty, timing {created, lastRequestEnded}, lastResponseState}}}`. VS Code trims the index to the 400 most recent non-external entries. The trim removes index entries only, not the files. The older key `interactive.sessions` is `[]` here.
+  - VS Code's own delete (`internalDeleteSession`) deletes `<id>.json` and `<id>.jsonl`, then removes the index entry and flushes the index. `clearAllSessions` does this for every entry. Edit state is kept per workspace in `workspaceStorage/<id>/chatEditingSessions/<sessionId>/`.
+  - On this Mac: one workspace folder (`workspaceStorage/<13-digit id>/`, 56 KB), and no `chatSessions`, `chatEditingSessions` or `emptyWindowChatSessions` folder anywhere. The global index has 1 entry (`isEmpty` false, `initialLocation` panel) with no file behind it, so it is a dangling entry. Domovy must tolerate an index entry without a file, and a file without an index entry.
+  - The workspace `state.vscdb` has `agentSessions.model.cache` (`[{providerType, providerLabel, resource, icon, label, status, timing}]`) and `agentSessions.state.cache`. The global DB has `agent-host.db` with `sessions (session_uri PK, provider, start_time, external, registration_source, modified_time)` (0 rows) and `metadata` (`sessionRegistryBackfilled:copilotcli`).
+  - Copilot Chat globalStorage `globalStorage/github.copilot-chat/` (43 MB):
+    - `commandEmbeddings.json` (19 MB) and `settingEmbeddings.json` (23 MB) are caches that VS Code downloads again.
+    - `session-store.db` (+ WAL) has the same schema as the Copilot CLI's: `sessions (id, cwd, repository, host_type, branch, summary, agent_name, agent_description, created_at, updated_at)`, `turns (session_id, turn_index, user_message, assistant_response, timestamp)`, `checkpoints (session_id, checkpoint_number, title, overview, history, work_done, technical_details, important_files, next_steps, created_at)`, `session_files`, `session_refs` and the FTS5 `search_index`. All tables have 0 rows here. This settles the schema Domovy's Copilot CLI adapter assumes.
+    - Also present: `copilot.cli.oldGlobalSessions.json` (0 bytes), `copilotCli/` (a `copilot` CLI shim), `vscode-sessions-<uuid>/{diff.index, pathspec.txt}`, `memory-tool/memories/*.md` (user memory, keep), and `{ask,plan,explore}-agent/*.agent.md` (built-in agent definitions, keep).
+  - Must never be deleted: `User/settings.json`, `keybindings.json`, `snippets/`, `profiles/`, `sync/`, `chatLanguageModels.json`, `globalStorage/storage.json`, and every other key in `state.vscdb`. Sign-in state sits in the same table (for example `github.copilot-chat-github-read:user …`). `User/History/` (53 MB) is VS Code's local file history, not chat.
+- Codex VS Code extension `openai.chatgpt` (26.1007.21434 and 26.908.40401 installed side by side; the Cursor install has it too). Its sessions are Codex threads in `~/.codex` (`originator = codex_vscode`, 84 threads here). It also keeps a 42 KB global-state value under the key `openai.chatgpt` with `persisted-atom-state.prompt-history.<codex thread id>` (typed prompts per thread), `thread-descriptions-v1.<thread id>`, `heartbeat-thread-permissions-by-id.<thread id>` and `composer-prompt-drafts-v1.local:<thread id>`. Deleting a Codex thread leaves these entries, including prompt text, until the extension prunes them. Domovy cannot remove them without writing `state.vscdb`.
+- No other agent extensions are installed in VS Code (`~/.vscode/extensions`). The only AI extensions are `anthropic.claude-code` 2.1.270/2.1.296, which writes to `~/.claude`, `openai.chatgpt`, `openai.codex-audio` and `google.geminicodeassist`. There is no Cline, Roo, Kilo, Continue, Augment, Amazon Q, Codeium/Windsurf, Cody or Tabnine. No globalStorage folder exists for any of them.
+- Third-party confirmation of the layout: [microsoft/vscode#305818](https://github.com/microsoft/vscode/issues/305818); [chasm-cli storage.rs](https://docs.rs/crate/chasm-cli/2.0.0/source/src/storage.rs)
+
+**Gemini Code Assist (VS Code extension `google.geminicodeassist`)**
+- Verified on a real install (extension 2.100.0 and 2.104.0, 2026-11-23):
+  - Chats are not files. They live in VS Code extension global state: the `state.vscdb` key `google.geminicodeassist` (9.8 MB, nearly all of it the inner key `geminiCodeAssist.chatThreads`, the extension's `MementoKey.CHAT_THREADS`). The shape is `{<20-char scope key>: {<thread uuid>: {id, title, create_time, update_time, ideContextFileUris, ideContextFolderUris, additionalContext, a2aTaskId, history [{entity, markdownText, ideContext, chatSectionId}], version, selectedModelConfigId}}}`, with 3 threads here. The full chat text is inline.
+  - File checkpoints: `globalStorage/google.geminicodeassist/chat_checkpoint_files/<16-hex trace id>/<hex>` (4 files, 2026-07-09, `CHAT_CHECKPOINTS_STORAGE_PATH`). The extension prunes checkpoint folders that no thread references.
+  - Agent mode runs Gemini CLI's a2a server, shipped as `agent/a2a-server.mjs` in the extension. Its chats go to Gemini CLI's own store `~/.gemini/tmp/<project>/chats/session-…-a2a-serv.jsonl`. These are the 427 a2a chats with one shared session id noted in the Gemini section above. A thread's `a2aTaskId` links the two.
+  - `~/Library/Application Support/cloud-code/`: `cloudcode_cli/cloudcode_cli/<8-hex>/cloudcode_cli` (an 89 MB binary), `citations.log`, `install_id.txt`. `~/Library/Application Support/google-vscode-extension/auth/{credentials.json, application_default_credentials.json}` are sign-in files and must never be deleted.
+- Docs: chats are deleted from "Resume Previous Chat" via the delete control. The limit is 20 chats, and the oldest is deleted automatically. A single prompt and response pair can also be deleted. — [Gemini Code Assist: use chat](https://developers.google.com/gemini-code-assist/docs/use-gemini-code-assist-chat); [chat with Gemini Code Assist](https://developers.google.com/gemini-code-assist/docs/chat-gemini)
+
+**Codex desktop app**
+- Verified on a real install (2026-11-23):
+  - `/Applications/ChatGPT.app` has bundle id `com.openai.codex`, version 26.1111.71704 and executable `ChatGPT`. It embeds `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` (codex-cli 0.169.1; Homebrew `codex` is 0.169.0) and runs it as `codex app-server --listen stdio://`. Its helpers are `cua_node/bin/node` and `node_repl`.
+  - The app uses the same `~/.codex` store Domovy already supports: the running `app-server` held `~/.codex/logs_2.sqlite` and `queue_1.sqlite` open. In `state_5.sqlite` `threads`, the columns `originator` and `thread_source` tell sources apart: `codex_work_desktop` (app, 12), `codex_vscode` (extension, 84), `codex-tui` (CLI, 70), `zed` (ACP, 1). The column `source` is `cli`, `vscode` or a JSON `{"subagent": …}`. Newer columns are `name`, `is_pinned`, `thread_section_id`, `section_position`, `project_id`, `daybreak_enabled`, `creator_user_id`, `creator_account_id` and `attached_thread_parent_id` (no pinned or sectioned threads here).
+  - `~/Library/Application Support/Codex/` (268 MB) is the app's embedded Chromium browser profile: `Default/`, `codex-browser-app/`, `component_crx_cache/`, `CertificateRevocation/`, `WasmTtsEngine/`, `Crashpad/`, `sentry/`. It also holds `executor-plugins/codex-app-tools/` (an MCP plugin), an empty `artifact-sessions/{store, runtime-generations}`, and `browser-sidebar-page-states.json` (`{pages: {"browser:<uuid>": {browserTabId, conversationId, page {title, url, navigation, updatedAt, …}}}}`). Neither of the two `conversationId`s here is a local Codex thread id. `~/Library/Application Support/com.openai.codex/` holds only `production-appcast-bootstrap.json`, and `~/Library/Caches/com.openai.codex` is 912 KB (Sparkle).
+  - When this was checked, `codex app-server` and six `node_repl` helpers were running while the main `ChatGPT` process was not. Domovy's Codex live check must match `CodexCLI.app/…/codex` and `app-server`, not only `ChatGPT`.
+
+**Cursor (beyond what the adapter covers)**
+- Verified on a real install (2026-11-23). `~/.cursor` is 1.8 GB, and nearly all of it is `extensions/` (60 VS Code extensions installed into Cursor). Cursor.app itself is gone, so these are leftovers. They are not chat data.
+  - `ai-tracking/ai-code-tracking.db` has `ai_code_hashes (hash, source, fileExtension, fileName, requestId, conversationId, timestamp, createdAt)` (0 rows), `scored_commits` and `tracking_state`. `conversationId` refers to a chat, so a delete would leave rows here.
+  - Also present: `projects/<p>/{agent-tools, rules, terminals}` (28 KB), `argv.json`, `cli-config.json`, `ide_state.json`, `mcp.json`.
+  - There is no `chats/` folder and no `worktrees/` folder.
+  - The Cursor agent CLI is installed: `~/.local/bin/cursor-agent` links to `~/.local/share/cursor-agent/versions/2025.10.01-369e3d0/cursor-agent` (137 MB of versions). It has never written `~/.cursor/chats` here.
+  - Domovy's Cursor adapter covers `state.vscdb` chats, `~/.cursor/chats`, `projects/*/agent-transcripts` and the CLI process. It reports the rest of `~/.cursor` as "keep". It does not cover `ai-tracking`, `extensions/` (left by an uninstalled app), `worktrees/` or old `cursor-agent` versions.
+
+**OpenCode install folder**
+- Verified on a real install (2026-11-23): `~/.opencode` (199 MB) is an install folder. It holds `bin/opencode` (138 MB, Mach-O arm64), `node_modules/` (61 MB: `@opencode-ai/*`, `@ai-sdk/*`, `effect`, …), `package.json` and `package-lock.json`. It holds no sessions. Domovy's OpenCode adapter correctly reads `~/.local/share/opencode/opencode.db` (1 MB). `~/.config/opencode` is 61 MB (plugins under `node_modules`) and `~/.cache/opencode` is 4.4 MB. All three must be kept.
+
+**Not agent session stores**
+- `~/Library/Application Support/Claude-3p/`: Claude Desktop's third-party-inference (Bedrock, Vertex, Foundry, gateway) profile. Here it holds only `claude_desktop_config.json` `{enterpriseConfig: {}, _cfprefsMigrated: bool}`. The docs place `configLibrary/` under it. It is configuration and must be kept. If 3P mode is used, its sessions presumably sit under this folder in the same layout as `Claude/`; this is not verified. — [Claude Desktop on 3P](https://www.claude.com/docs/third-party/claude-desktop/overview); [configuration format](https://claude.com/docs/third-party/claude-desktop/configuration-format.md)
+- `~/Library/Application Support/CampoUIInternal/SlidingHashedChatIDs.json` (an array of 6 strings): written by Apple's private `CampoUIInternal.framework` (with `CampoServices`, `CampoUIServices` and the `CampoRemoteService` XPC service), with preferences `com.apple.campo` (`ResumableConversation_chatID`, `campo.unsentMessages`, …). This is macOS's own chat feature, not a coding agent. Out of scope; never touch.
+- `/Applications/Copilot.app` is Microsoft Copilot (`com.microsoft.copilot-mac` 25.7.441030001), a consumer chat app, not GitHub Copilot CLI. There is still no `~/.copilot` folder.
+- `~/Applications/Herdr.app` (`dev.herdr.app` 0.1.7, config in `~/.config/herdr-app/`) and `com.openai.chat` / `com.openai.atlas` (ChatGPT classic and Atlas) were seen but not examined.
+
+### Inferences
+- Zed session unit: one `sidebar_threads` row, plus for native threads the `threads.db` row with the same id. A thread with `agent_id` set belongs to that agent's store, so Domovy should show it under the owning adapter (Codex, Claude Code) with a "listed in Zed" note. Deleting one of those means removing the agent's session and, optionally, the Zed row. Deleting natively means removing the `threads.db` row and the `sidebar_threads` row, plus `thread_archived_worktrees` and orphaned `archived_git_worktrees` rows. It needs Zed quit (rule 4) and a backup of both DBs. Archiving: Zed's own archive is the `archived` flag, so Domovy could either set it (a DB write, Zed quit) or export the decompressed thread JSON and keep the row. Zed has no CLI for threads, so editing the files is the only option. `updated_at` is a column, not an mtime, so rule 5 is about leaving the DB files' mtimes alone.
+- VS Code chat session unit: `<sessionId>.json` + `.jsonl` in the index's storage root, plus the `chatEditingSessions/<sessionId>/` folder and the index entry. Moving the files to the Trash is safe while VS Code is quit. Removing the index entry is a `state.vscdb` write and needs the same quit, backup and read-only fallback Domovy uses for Cursor. Without the index edit, VS Code keeps a dangling history entry, which it already tolerates.
+- Gemini Code Assist session unit: one thread inside the `google.geminicodeassist` JSON value. Deleting means rewriting a 9.8 MB JSON blob in `state.vscdb`, so it should stay read-only (list and size only) until Domovy has a tested VS Code writer. Point users to the extension's own delete instead. Its agent-mode chats are already deletable through the Gemini CLI adapter.
+- Several apps keep their own records that point at sessions Domovy can already delete: Zed's `sidebar_threads` (Codex and Claude via ACP), the `openai.chatgpt` extension state (prompt history keyed by Codex thread id), Gemini Code Assist's `a2aTaskId`, and VS Code's `agent-host.db` (Copilot CLI). A delete plan for a Codex or Gemini session should list these as entries it leaves behind.
+
+### Gaps
+- Not verified: the JSON shape inside VS Code `chatSessions/*.json(l)`, because no such file exists here. The format needs a fixture built from an install that has chats.
+- Not verified: what Zed's delete does to an ACP thread's session in the external agent's store, and how `archived_git_worktrees` commits are kept alive (refs vs. dangling objects).
+- Not verified: Gemini Code Assist's 20-chat cap against the stored data (3 threads here), and what the 20-character scope key means.
+- Not verified: where Claude Desktop 3P mode stores sessions.
+
+## Q9. Agents not installed on the development Mac (from source, not verified on a real install)
+
+Research date: 2026-11-23. Every finding here comes from reading source code at the commit named, or from docs. None of the agents is installed on this Mac. Before an adapter relies on any of it, re-verify it against a real install and build a fixture from that install. "[3P]" marks a third-party parser or community source. Source repos were shallow-cloned and only read (nothing was built or run).
+
+### Takeaway
+- Qwen Code is a Gemini CLI fork, but its storage now looks like Claude Code: one JSONL per session under `~/.qwen/projects/<cwd slug>/chats/`. It has sidecar files, a native `chats/archive/` folder, a live-session registry and per-session writer locks. It has no CLI delete command.
+- Agents with a scriptable delete of their own:
+  - Crush: `crush session rm`
+  - Kilo: `kilo session delete`
+  - Cline: `cline history delete`
+  - Kiro CLI: `kiro-cli chat --delete-session`
+  - Amp: `amp threads delete|archive`, which acts on the server
+- Agents that are plain files Domovy can move: Kimi, Roo Code, Continue, Auggie, Factory Droid and Aider.
+- Read-only:
+  - Windsurf and Trae: encrypted.
+  - Warp and Amazon Q: the live database of a running app; Amazon Q also stores auth in the same DB.
+  - Junie and the Kiro IDE: layout undocumented or recently changed.
+  - iFlow: the service shut down.
+
+### Cited Findings
+
+**Qwen Code (`QwenLM/qwen-code` @ `09b8135e`, CLI 0.28.3)**
+- Root and overrides:
+  - Global dir is `~/.qwen`; `QWEN_HOME` replaces it. — [storage.ts#L193-L203](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/config/storage.ts#L193-L203)
+  - Session data goes under the "runtime base dir". By default that is the global dir; `QWEN_RUNTIME_DIR` overrides it. — [storage.ts#L169-L191](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/config/storage.ts#L169-L191)
+- Project directory: `<runtime>/projects/<slug>/`. The slug is the project root with every non-alphanumeric character replaced by `-`, the same scheme as Claude Code, but with no truncation or hash. — [storage.ts#L619-L623](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/config/storage.ts#L619-L623), [paths.ts#L388-L392](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/utils/paths.ts#L388-L392)
+- The temp directory still uses a SHA-256 of the project root: `<runtime>/tmp/<sha256>/` holds `tool-results/`, `checkpoints/` and `shell_history`. Code comments still say chats live in `~/.qwen/tmp/<project_id>/chats/`; that is out of date. — [storage.ts#L625-L634](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/config/storage.ts#L625-L634)
+- Transcript:
+  - File: `projects/<slug>/chats/<sessionId>.jsonl`, created exclusively with `wx` and append-only. The file name must match `^[0-9a-fA-F-]{32,36}\.jsonl$`. — [chatRecordingService.ts#L1511-L1531](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/chatRecordingService.ts#L1511-L1531), [sessionService.ts#L547](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/sessionService.ts#L547)
+  - Each record has `uuid`, `parentUuid`, `sessionId`, `timestamp` (ISO), `type` (`user|assistant|tool_result|system`) and an optional `subtype`, plus `cwd`, `version`, `gitBranch` and `model`.
+  - The title is a `system` record with `subtype: custom_title` (with `titleSource` `manual|auto`).
+  - Subtypes `parent_session` and `session_source` link forks and subagent sessions. — [chatRecordingService.ts#L431-L470](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/chatRecordingService.ts#L431-L470)
+- Per-session sidecars next to the transcript, in the same folder:
+  - `.title.json` (`{displayName, source, updatedAt}`, a list label)
+  - `.artifacts.json`
+  - `.branch.json`
+  - `.goal.json`
+  - `.pr.json`
+  - `.worktree.json`
+  - `.ledger.jsonl`
+  - `.runtime.json`
+  — [sessionService.ts#L1035-L1110](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/sessionService.ts#L1035-L1110), [#L1210-L1218](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/sessionService.ts#L1210-L1218), [storage.ts#L726-L740](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/config/storage.ts#L726-L740)
+- Archive is native: archived sessions, with all their sidecars, move to `chats/archive/`, which has the same layout. — [sessionService.ts#L1039-L1047](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/sessionService.ts#L1039-L1047)
+- Other per-session data:
+  - `projects/<slug>/subagents/<sessionId>/` (subagent JSONL transcripts) — [agent-transcript.ts#L66-L80](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/agents/agent-transcript.ts#L66-L80)
+  - `~/.qwen/file-history/<sessionId>/`
+  - `<runtime>/resources/<sessionId>/`
+  - artifact snapshots under `<runtime>/artifacts/snapshots/`
+  - a per-project `projects/<slug>/session-organization.v1.json`, which records list grouping and pins
+- Qwen's own delete is `SessionService.removeSession`. Under a writer lease, it unlinks the transcript (active or archived) and the session's artifact snapshots. It then removes:
+  - the worktree, PR, goal, title, branch and artifact-summary sidecars
+  - the prompt ledgers
+  - `file-history/<id>`
+  - `resources/<id>`
+  - the entry in `session-organization`
+  Reading the code, it does not remove `subagents/<id>/`. — [sessionService.ts#L4201-L4210](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/sessionService.ts#L4201-L4210), [#L4577-L4620](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/sessionService.ts#L4577-L4620)
+- Commands:
+  - `qwen sessions list [--json] [--limit N]` lists the current project's sessions, one JSON per line with `sessionId`, `cwd`, `startTime`, `mtime`, `prompt`, `gitBranch`, `filePath`, `messageCount` and `customTitle`.
+  - `qwen sessions ps` lists running sessions. — [commands/sessions.ts#L13-L20](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/cli/src/commands/sessions.ts#L13-L20)
+  - There is no CLI delete. Delete exists only as the interactive `/delete`, which refuses the current session, and through the `qwen serve` HTTP API. — [useDeleteCommand.ts#L90-L104](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/cli/src/ui/hooks/useDeleteCommand.ts#L90-L104)
+- Liveness:
+  - Each running top-level session writes `~/.qwen/sessions/<pid>.json` (or `<pid>-<8hex>.json` for an ACP host). The fields are `pid`, `procStart`, `sessionId`, `cwd`, `name`, `startedAt` and `qwenVersion`. The session removes the file on exit. Records that fail the pid plus start-token check are stale. — [session-registry.ts#L8-L60](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/session-registry.ts#L8-L60)
+  - Writers hold `<runtime>/tmp/session-writer-locks/<id>.lock`. — [session-writer-lease.ts#L1709-L1719](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/services/session-writer-lease.ts#L1709-L1719)
+  - `.runtime.json` is never deleted, so it says nothing about liveness.
+- Retention: no session retention setting was found (unlike Gemini CLI's `sessionRetention`). Only overflow tool results older than 24 h are swept at startup and on `/clear`. — [client.ts#L1009-L1010](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/core/client.ts#L1009-L1010)
+- Never delete:
+  - `settings.json`
+  - `oauth_creds.json`
+  - `mcp-oauth-tokens.json`
+  - `google_accounts.json`
+  - `installation_id`
+  - `memory.md`
+  - `commands/`, `skills/`, `extensions/`, `workflows/`, `bin/`
+  - `projects/<slug>/memory/`
+  - the project's `.qwen/`
+  — [storage.ts#L15-L24, L205-L226](https://github.com/QwenLM/qwen-code/blob/09b8135e6929df2e7f6a5cee8e55c47980b5f92e/packages/core/src/config/storage.ts#L205-L226)
+
+**Kiro (AWS)**
+- Kiro CLI has several formats, by version [3P, kiro-cli-history README]:
+  - CLI 3.0: `~/.kiro/sessions/<workspace-hash>/sess_<id>/`, holding `session.json` (title, `workspacePaths`, `modelId`), `messages.jsonl`, `publish.cursor` and `snapshots/`.
+  - CLI 2.x classic: `~/.kiro/sessions/cli/<id>.jsonl` plus `<id>.json`.
+  - CLI 2.x TUI and 1.x: `~/Library/Application Support/kiro-cli/data.sqlite3`.
+  - `KIRO_HOME` moves `~/.kiro`.
+  — [pypi kiro-cli-history](https://pypi.org/project/kiro-cli-history/)
+- Official commands: `kiro-cli chat --list-sessions [--all-cwds]`, `kiro-cli chat --delete-session <ID>` (permanent, refuses a session active elsewhere), and `/sessions clean`. — [Kiro docs: session management](https://kiro.dev/docs/cli/chat/session-management/)
+- Kiro IDE stores sessions under `~/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/<workspace-hash>/`. The format changed around February 2026, from `.chat` JSON to index files plus execution files [3P]. One user report shows this folder at 13 GB. — [kirodotdev/Kiro#5469](https://github.com/kirodotdev/Kiro/issues/5469)
+- Amazon Q Developer CLI (`aws/amazon-q-developer-cli` @ `15cc8f3c`, maintenance only, replaced by Kiro CLI):
+  - Storage: `~/Library/Application Support/amazon-q/data.sqlite3`.
+  - Table `conversations(key = absolute cwd, value = JSON)` keeps one conversation per directory.
+  - The same DB holds auth in `state` and `auth_kv`.
+  — [paths.rs#L327-L332](https://github.com/aws/amazon-q-developer-cli/blob/15cc8f3cd18c4272925ce1c7053268eedff1ea0a/crates/chat-cli/src/util/paths.rs#L327-L332), [007_conversations_table.sql](https://github.com/aws/amazon-q-developer-cli/blob/15cc8f3cd18c4272925ce1c7053268eedff1ea0a/crates/chat-cli/src/database/sqlite_migrations/007_conversations_table.sql#L1-L4)
+
+**Crush (`charmbracelet/crush` @ `ee51fe87`)**
+- Storage is one SQLite DB per project, `<project>/.crush/crush.db`, in WAL mode with `foreign_keys=ON`.
+  - `sessions` columns: `id`, `parent_session_id`, `title`, `message_count`, `created_at` and `updated_at` (unix seconds).
+  - `messages` and `files` cascade on delete. Child sessions (`parent_session_id`) do not.
+  - There is no cwd column; the project is the folder that holds the DB.
+- `~/.local/share/crush/projects.json` (`{projects:[{path, data_dir, last_accessed}]}`) is the only global list of these DBs. That folder is `~/.local/share` on macOS too.
+- Own commands: `crush session list --json`, `crush session rm <id>`, `-D <data-dir>`. `crush.lock` holds `{pid, version, started_at}`, but only in server mode.
+- Keep `~/.local/share/crush/crush.json` (OAuth tokens) and `~/.config/crush/`.
+— [connect.go#L19-L29](https://github.com/charmbracelet/crush/blob/ee51fe87bb306a945bf9057edf94f5574b192fd2/internal/db/connect.go#L19-L29), [load.go#L1407-L1427](https://github.com/charmbracelet/crush/blob/ee51fe87bb306a945bf9057edf94f5574b192fd2/internal/config/load.go#L1407-L1427), [initial.sql](https://github.com/charmbracelet/crush/blob/ee51fe87bb306a945bf9057edf94f5574b192fd2/internal/db/migrations/20250424200609_initial.sql#L4-L60)
+
+**Goose (`block/goose` @ `059fee25`)**
+- Location: the code uses the XDG strategy on macOS, so data is in `~/.local/share/goose/sessions/sessions.db`. The docs and a code comment instead say `~/Library/Application Support/Block/goose/`; check both. `GOOSE_PATH_ROOT` overrides it. Before v1.10.0, sessions were `.jsonl` files.
+- `sessions` has `name`, `working_dir`, `created_at`, `updated_at`, `archived_at` (native archive) and `parent_session_id`.
+- `messages` does not cascade. Goose's own delete runs one transaction: messages, then `usage_ledger`, then tags, then the session.
+- `goose session list -f json` works. `goose session remove --session-id <id>` always asks for confirmation on a TTY.
+- Keep `~/.config/goose/` (`config.yaml`, `secrets.yaml`).
+— [paths.rs#L8-L38](https://github.com/block/goose/blob/059fee25f13fa92be561a7d42cdd04ececef5a98/crates/goose/src/config/paths.rs#L8-L38), [session_manager.rs#L2598-L2633](https://github.com/block/goose/blob/059fee25f13fa92be561a7d42cdd04ececef5a98/crates/goose/src/session/session_manager.rs#L2598-L2633), [cli.rs#L519-L559](https://github.com/block/goose/blob/059fee25f13fa92be561a7d42cdd04ececef5a98/crates/goose-cli/src/cli.rs#L519-L559)
+
+**Aider (`Aider-AI/aider` @ `5dc9490b`)**
+- Aider has no session concept and no index. Files per repo, in the git root or cwd:
+  - `.aider.chat.history.md`: appended by every run, each run starting with `# aider chat started at <time>`.
+  - `.aider.input.history`
+  - `.aider.tags.cache.v3/` or `v4/`: a rebuildable cache.
+  - Paths can be changed with `--chat-history-file` and `--input-history-file`, or `AIDER_*` environment variables.
+- `~/.aider/oauth-keys.env` is a credential.
+— [args.py#L270-L288](https://github.com/Aider-AI/aider/blob/5dc9490bb35f9729ef2c95d00a19ccd30c26339c/aider/args.py#L270-L288), [repomap.py#L35-L43](https://github.com/Aider-AI/aider/blob/5dc9490bb35f9729ef2c95d00a19ccd30c26339c/aider/repomap.py#L35-L43)
+
+**Cline (`cline/cline` @ `34c104e6`)**
+- Cline is now built on an SDK, and the VS Code extension, the CLI and JetBrains share `~/.cline` (`CLINE_DIR` or `CLINE_DATA_DIR` override it).
+- Index: SQLite `~/.cline/data/db/sessions.db`, table `sessions`, with `session_id`, `pid`, `status`, `started_at`, `ended_at`, `cwd`, `prompt`, `metadata_json` (title), `messages_path` and `parent_session_id`.
+- Session data: `~/.cline/data/sessions/<id>/` with `<id>.messages.json`, `<id>.json` and `<id>.compaction.json`.
+- Checkpoints are git refs in the user's repo (`refs/cline/checkpoints/<id>/*`).
+- Legacy layout: `<root>/state/taskHistory.json` plus `tasks/<id>/`, where `<root>` is `~/.cline/data` or `globalStorage/saoudrizwan.claude-dev`.
+- Own delete: `cline history delete --session-id <id>`. Keep `secrets.json`, `globalState.json`, `settings/`.
+— [paths.ts#L186-L254](https://github.com/cline/cline/blob/34c104e6fc49781cda4adcd73ffdccd8f029fef9/sdk/packages/shared/src/storage/paths.ts#L186-L254), [persistence-service.ts#L586-L640](https://github.com/cline/cline/blob/34c104e6fc49781cda4adcd73ffdccd8f029fef9/sdk/packages/core/src/session/services/persistence-service.ts#L586-L640)
+
+**Roo Code (`RooCodeInc/Roo-Code` @ `b867ec91`, last commit 2026-05-15)**
+- Session folders: `~/Library/Application Support/<Code|Cursor|Windsurf|VSCodium>/User/globalStorage/rooveterinaryinc.roo-cline/tasks/<id>/`. Each holds `api_conversation_history.json`, `ui_messages.json`, `task_metadata.json` and `history_item.json` (`task` title, `ts`, `workspace`, `childIds`, `size`).
+- `tasks/_index.json` is a cache that gets reconciled.
+- Roo also mirrors `taskHistory` into VS Code `state.vscdb`, but only as a fallback.
+- Checkpoints: a shadow repo `checkpoints/<sha256(cwd)[:8]>/` with branch `roo-<id>`.
+- Own delete: removes the task from the history, then the branch, then `rm -rf tasks/<id>`.
+— [ClineProvider.ts#L1737-L1803](https://github.com/RooCodeInc/Roo-Code/blob/b867ec9145750d0ae1ff7f02d35406e9bf2a0b16/src/core/webview/ClineProvider.ts#L1737-L1803), [TaskHistoryStore.ts#L20-L30](https://github.com/RooCodeInc/Roo-Code/blob/b867ec9145750d0ae1ff7f02d35406e9bf2a0b16/src/core/task-persistence/TaskHistoryStore.ts#L20-L30)
+
+**Kilo Code (`Kilo-Org/kilocode` @ `bfdec549`)**
+- Kilo is now an OpenCode fork. The extension starts `kilo serve`.
+- Storage: `~/.local/share/kilo/kilo.db` (`KILO_DB` overrides it), with the same `session`, `message` and `part` tables as OpenCode, including `time_archived`. Config is in `~/.config/kilo/`, auth in `auth.json`.
+- Own delete: `kilo session delete <id>`.
+- Legacy Kilo (a Roo fork) kept `taskHistory` only in VS Code `state.vscdb`.
+— [global.ts#L12-L26](https://github.com/Kilo-Org/kilocode/blob/bfdec5496922452222223c01b4cc6c89305b0279/packages/core/src/global.ts#L12-L26), [cmd/session.ts#L55-L69](https://github.com/Kilo-Org/kilocode/blob/bfdec5496922452222223c01b4cc6c89305b0279/packages/opencode/src/cli/cmd/session.ts#L55-L69)
+
+**Continue (`continuedev/continue` @ `5522c6f4`)**
+- Sessions: `~/.continue/sessions/<id>.json`, indexed by `sessions/sessions.json` (`[{sessionId, title, dateCreated, workspaceDirectory, messageCount}]`). `CONTINUE_GLOBAL_DIR` overrides the root.
+- Own delete: unlinks the file and rewrites the index, with no locking.
+- Keep `config.yaml`, `config.json` and `.env`.
+— [paths.ts#L78-L112](https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/core/util/paths.ts#L78-L112), [history.ts#L60-L85](https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/core/util/history.ts#L60-L85)
+
+**Kimi CLI (`MoonshotAI/kimi-cli` @ `9ab1286b`)**
+- Root: `~/.kimi/` (`KIMI_SHARE_DIR` overrides it).
+- `kimi.json` lists `work_dirs[{path, last_session_id}]`.
+- Session folder: `sessions/<md5(workdir)>/<id>/`, holding `context.jsonl`, `wire.jsonl` and `state.json` (`custom_title`, `archived`, `archived_at`).
+- Kimi's own delete is `rmtree` of the folder. Archive is a flag. The web UI auto-archives after 15 days.
+- Keep `credentials/`, `config.toml`, `mcp.json`.
+— [metadata.py#L17-L40](https://github.com/MoonshotAI/kimi-cli/blob/9ab1286b8fe4e6bcd116949a27ce5e0ac3389c82/src/kimi_cli/metadata.py#L17-L40), [web/store/sessions.py#L183-L193](https://github.com/MoonshotAI/kimi-cli/blob/9ab1286b8fe4e6bcd116949a27ce5e0ac3389c82/src/kimi_cli/web/store/sessions.py#L183-L193)
+
+**Other agents (briefly)**
+- Amp: threads are stored on the server. Commands: `amp threads list|archive|delete`. The local `~/.local/share/amp/threads/T-<uuid>.json` looks like a cache [3P]. Keep `secrets.json`. — [Amp docs: threads](https://ampcode.com/docs/threads)
+- Factory Droid: `~/.factory/sessions/<cwd-slug>/<uuid>.jsonl` plus `<uuid>.settings.json`, Claude-Code-like [3P]. Sessions may also sync to the cloud (`cloudSessionSync`). No local delete command was found. — [Factory docs: settings](https://docs.factory.ai/factory-app/settings)
+- Auggie (Augment CLI v1.2.2, read from the shipped npm bundle):
+  - Sessions: `~/.augment/sessions-v2/--<cwd slug>--/<id>.jsonl`. The first line is `{type:"session", id, timestamp, cwd}`.
+  - Legacy sessions are in `~/.augment/sessions/`.
+  - `auggie session list --json` works. Keep `session.json` (auth) and `settings.json`.
+  — [Augment CLI reference](https://docs.augmentcode.com/cli/reference)
+- Windsurf / Devin Desktop:
+  - `~/.codeium/windsurf/cascade/*.pb` hold conversations, reportedly encrypted per conversation [3P].
+  - `memories/` holds memories, and `memories/global_rules.md` is written by the user.
+  — [Windsurf docs: memories](https://docs.windsurf.com/windsurf/cascade/memories)
+- Warp: the agent conversations live in Warp's main app DB [3P], which also syncs to the cloud:
+  - Path: `~/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable/warp.sqlite`.
+  - Tables: `agent_conversations`, `ai_queries`.
+  — [Warp docs: agent conversations](https://docs.warp.dev/agents/cli/agent-conversations.md)
+- Junie CLI:
+  - Home: `~/.junie` holds `settings.json` and `trust/`.
+  - Each session has `events.jsonl`, `transcript.md` and `subagents/`. The exact folder is not documented.
+  - Full context is kept for only the last 10 sessions.
+  - The IDE plugin's storage is undocumented.
+  — [Junie CLI docs](https://junie.jetbrains.com/docs/junie-cli.html)
+- Trae: `~/Library/Application Support/Trae CN/ModularData/ai-agent/database.db`, an SQLCipher-style encrypted SQLite [3P]. No export or delete command. — [xitula/trae-session-export](https://github.com/xitula/trae-session-export)
+- Grok CLI: the community `superagent-ai/grok-cli` (`grok-dev`) stores everything in `~/.grok/grok.db`. Its `sessions` table has `title`, `cwd_at_start`, `status` (`active|archived`) and timestamps, and child tables cascade. Keep `user-settings.json` and especially `wallet.json`. xAI's official "Grok Build" also installs a `grok` binary, and its storage is unknown. — [db.ts#L23-L40](https://github.com/superagent-ai/grok-cli/blob/fb97af83f06dca873281d60168430f06c8de6324/src/storage/db.ts#L23-L40), [migrations.ts#L28-L62](https://github.com/superagent-ai/grok-cli/blob/fb97af83f06dca873281d60168430f06c8de6324/src/storage/migrations.ts#L28-L62)
+- iFlow CLI: shut down on 2026-04-17 (per the README). It was a Gemini fork with `~/.iflow/{settings.json, tmp/<hash>/, snapshots/<hash>, cache/<hash>/checkpoints}`. The transcript format is undocumented. — [iflow-cli README](https://github.com/iflow-ai/iflow-cli/blob/4642808afbc6580ac117d930f6c64ac0d84955c7/README.md#L1-L2)
+
+### Inferences
+- Qwen Code adapter:
+  - Session key: (slug, sessionId).
+  - Delete plan: the transcript plus every sidecar listed above, `subagents/<id>/`, `file-history/<id>/` and `resources/<id>/`, all moved to the Trash.
+  - Archive plan: move the transcript and its sidecars into `chats/archive/` with mtimes kept. Qwen itself then shows the session as archived.
+  - Refuse while a live `sessions/<pid>.json` names the session, or while its writer lock or file handles are held.
+  - Never touch `session-organization.v1.json`, because that is an edit to an index file. A dangling entry there is harmless; verify this.
+  - Because the slug is lossy, take the real cwd from the records' `cwd` field.
+- Crush, Kilo and Cline can follow the "agent's own command" rule exactly. Crush needs a second pass for child sessions.
+- Goose's delete prompts for confirmation, so it cannot be scripted. Direct DB edits would need Goose quit and a backup.
+- Kimi and Roo Code have native archive or delete semantics that are plain file operations, so they are cheap to support.
+- Aider is "one file per repo". Discovering it means scanning project folders, so it can only work for folders Domovy already knows about from other agents.
+- Suggested order, by popularity and ease:
+  1. Qwen Code
+  2. Kilo, which reuses the OpenCode adapter
+  3. Cline
+  4. Crush
+  5. Roo Code
+  6. Kimi
+  7. Continue
+  8. Goose
+  9. Kiro CLI
+  10. Auggie, Factory and Aider
+  11. Read-only for the rest
+
+### Gaps
+- Nothing in this section was verified on a real install.
+- Qwen:
+  - Whether `removeSession` really leaves `subagents/<id>/`.
+  - Whether older Qwen versions (Gemini-style `~/.qwen/tmp/<sha256>/chats/`) are still read or migrated.
+  - What `QWEN_RUNTIME_DIR` does to `file-history`.
+- Goose: which macOS data path is real.
+- Kiro: the CLI 3.0 layout comes from one third-party README. The official docs only say "SQLite in `~/.kiro/`".
+- Factory, Auggie, Warp, Trae and Amp: local layouts rest on third-party parsers or bundle greps.
+- Junie IDE plugin and xAI Grok Build: storage unknown.
+
+### Adapter notes (2026-11-23)
+Added from the source clones above (each fixture README in `Tests/Fixtures/<agent>/` cites file and line):
+- Qwen Code: archive in Qwen's sense, `chats/archive/` renames without `.runtime.json`
+  (sessionService.ts#L2198-L2310). `removeSession` does not delete `.runtime.json` or `subagents/<id>/`;
+  Domovy's delete moves both. The legacy `tmp/<sha256>/chats/` is not read by 0.28 (no reader or migration);
+  Domovy only measures it. `QWEN_RUNTIME_DIR` is not followed.
+- Kimi CLI: no lock or pid file for a running session; the only signals are open files and a running
+  `kimi`. Its archive flag is only read. `kimi.json` `last_session_id` is not cleared by Domovy.
+- Roo Code: `tasks/_index.json` and the `state.vscdb` mirror reconcile themselves when a folder goes
+  (TaskHistoryStore.ts#L244-L290, ClineProvider.ts#L2285-L2300). `customStoragePath` is not followed.
+- Crush: `crush session delete` leaves child sessions (`title-<id>`, sub-agent tasks), so Domovy runs it for
+  each child first. The CLI migrates the database on open; Domovy snapshots it first.
+- Cline: `cline history delete` also deletes `refs/cline/checkpoints/<id>` in the project's git repository,
+  which Domovy cannot undo; the plan says so. A `messages_path` outside `sessions/<id>/` is refused.
+- Kilo Code: same tables as OpenCode; the OpenCode adapter runs with Kilo's flavor and pins `KILO_DB`.
+- Continue: the list `sessions.json` is rewritten on every save, so Domovy cuts its entry only while VS Code,
+  Cursor, `cn` and `continue-binary` are quit.
+
+### Adapter notes, last batch (2026-11-23)
+Each fixture README in `Tests/Fixtures/<agent>/` cites file and line (or bundle function):
+- Auggie: full. The npm bundle `@augmentcode/auggie@1.2.2` is a fork of pi's coding agent. A session is
+  `sessions-v2/--<slug>--/<id>.jsonl` with header `{type: session, version: 3, id, cwd}` and `<id>.files/` for
+  pasted images; Auggie's own delete (picker only) runs `trash` then removes `<id>.files/`. Domovy moves both;
+  archive compresses. No lock or pid file; open files and a running `auggie` refuse. A header version above 3 or
+  a file not named after its id makes it read-only. Legacy `sessions/` is measured only.
+- Factory Droid: full, from Factory's own `session-navigation` skill (factory-plugins, removed 2026-10-24) and a
+  third-party reader checked against droid 0.126.0. Delete moves `<uuid>.jsonl` and `<uuid>.settings.json`; the
+  plan says a cloud-synced copy is not deleted. Gate: the first record is `session_start` with the file's id.
+- Aider: full. Repositories come from the project paths of every other adapter's sessions, `~/.claude.json`
+  `projects`, and search folders (`DOMOVY_AIDER_ROOTS`, `agents.aider.searchFolders` in `<Domovy folder>/settings.json`, which replaced `aider-search-roots.txt`; each checked
+  with its direct subfolders); a known path is also checked at its git root. Nothing else is crawled. Delete
+  moves the two history files and the tag caches; the plan's scope is the repository folder. Custom
+  `--chat-history-file` paths are not found. Gate: the history's first line is Aider's run header.
+- Grok CLI (community `grok-dev`): full delete, no archive. It has no delete command, so Domovy deletes the
+  session's rows (tool results, tool calls, usage, compactions, messages, session) with Grok quit, after a clone
+  and with an integrity check, like Cursor. Gate: the tables and columns of migrations.ts and `user_version` 1-3;
+  a `~/.grok` without `grok.db` (xAI's Grok Build) is read-only. `wallet.json` is never touched.
+- Goose: read-only listing from both `~/.local/share/goose` and `~/Library/Application Support/Block/goose`
+  (which one Goose uses on macOS is still unverified); its delete prompts.
+- Kiro: read-only. Kiro's docs say "SQLite in ~/.kiro" and a third-party reader says session folders, so Domovy
+  lists the CLI 3.0 and 2.x folders it can read and never runs `kiro-cli chat --delete-session` (permanent, and
+  Domovy could not keep a copy of what it removes). IDE `kiro.kiroagent` and `kiro-cli/data.sqlite3` are measured.
+- Amazon Q CLI: read-only listing of `conversations`; the database also holds the sign-in, so it is never written.
+- Measured only (Disk screen): Windsurf (encrypted cascade `.pb`), Trae (encrypted database), Warp (live synced
+  app database), Amp (threads live on the server; nothing destructive offered), Junie (layout undocumented),
+  iFlow (service shut down; footprint only).
+
+## Herdr (terminal workspace manager agents run in)
+
+Verified on the development Mac, 2026-11-27: `/opt/homebrew/bin/herdr` 0.9.5 (Homebrew, the only Cellar version), headless `herdr server` (ppid 1), the Herdr app `~/Applications/Herdr.app` (`dev.herdr.app` 0.1.7, 61 MB). Only read-only commands were run (`--help`, `status`, `workspace|tab|pane|agent list`, `pane process-info`, `pane layout`, `api snapshot`, `api schema`, `integration status`). Docs: https://herdr.dev/llms-full.txt and `docs/next/website/src/content/docs/` in herdrdev/herdr v0.9.5.
+
+**Folders** (names and sizes only):
+- `~/.config/herdr/` (about 230 KB): `config.toml`, `config.toml.bak` (written by `config reset-keys`), `herdr-server.log` (113 KB), `herdr-client.log`, `herdr.log` when present, `session.json` (layout plus the agents' native session ids used to resume on restore), `session-snapshots/` (at most 48, one per 15 minutes at most), `session-backups/` (3 newest copies of unreadable `session.json`, docs), `session-history.json` only with `[experimental] pane_history`, `.plugins.lock`, and sockets `herdr.sock` (API), `herdr-client.sock`, `herdr.sock.agent` (symlink to the launchd SSH agent). Named sessions keep their own state and logs under `sessions/<name>/` (docs). `HERDR_CONFIG_PATH` moves the config, `HERDR_SOCKET_PATH` the socket.
+- `~/.config/herdr-app/` (about 16 MB, the app): `mods/` (14 MB), `icons/`, `layouts/`, `themes/`, `telemetry/`, `data/`, `frame/`, `installed.json`, `settings.json`, `view.json`, `window.json`, `herdr-app.sock`. Also `~/.local/bin/herdr-core` (5 MB), `herdr-app` and `hc` symlinks, `~/Library/Preferences/dev.herdr.app.plist`.
+- Nothing in `~/Library/Application Support`, `~/Library/Caches` or `~/Library/Logs`.
+- Worktrees: `[worktrees] directory` in `config.toml`, default `~/.herdr/worktrees`, laid out `<directory>/<repo>/<branch-slug>` (`herdr --default-config`). `herdr worktree remove` runs `git worktree remove` and keeps the branch. None exist yet on the development Mac.
+- Old binaries: the docs do not mention `.old` files for `herdr update` on macOS. `~/.local/bin/agy.<n>.old` (157 MB) is Antigravity's self-update leftover, not Herdr's.
+
+**Processes**: `herdr server` is a launchd child; every pane is a login shell (`-zsh`) whose parent is the server, and agents run below those shells. `herdr pane process-info --pane <id>` gives `.result.process_info.shell_pid` (and foreground command lines, which Domovy never decodes). Domovy maps an agent tree to its pane by walking up to a shell pid, and never counts anything below a Herdr process as orphaned.
+
+**JSON (protocol 22)**: every command prints `{"id": ..., "result": {...}}`; server errors are JSON on stderr with exit 1, syntax errors exit 2. `workspace list` → `workspaces[]` with `workspace_id` (`w1`), `label`, `number`, `active_tab_id`, `pane_count`, `tab_count`, `agent_status`, `focused`. `pane list` → `panes[]` with `pane_id` (`w1:p1`), `tab_id`, `workspace_id`, `cwd`, `foreground_cwd`, `agent_status`, `terminal_id`, `terminal_title` (may echo agent content: never read). `agent list` → `agents[]` with the pane fields plus `agent` (kind), `name`, `completion_seq`, `state_change_seq` and `agent_session` `{agent, kind: "id"|"path", source, value}` when the agent's Herdr integration reported its session: Claude Code and Codex session ids match Domovy's session ids exactly. `api snapshot` has the same lists but no `agent_session`. `workspace create` / `tab create` → `.result.root_pane.pane_id`; `agent start` → `agent_started` with `agent` and `argv`. Statuses: `idle`, `working`, `blocked`, `done`, `unknown`.
+
+**Integrations** (`herdr integration install <agent>`) write a hook script into the agent's own config and register it there: `~/.claude/hooks/herdr-agent-state.sh` + `settings.json` hooks, `~/.codex/herdr-agent-state.sh` + `hooks.json` + `[features] hooks = true`, `~/.config/opencode/plugins/herdr-*.js`, `~/.cursor/herdr-agent-state.sh` + `hooks.json`, `~/.gemini/config/hooks/herdr-agent-state.sh` (Antigravity CLI), and similar for the others. These are agent configuration: keep them. Installed here: claude v11, codex v10, opencode v13, cursor v2, antigravity-cli v4.
+
+**MCP and skills**: Herdr has no MCP server or skills config of its own (no mention in the docs or `--default-config`); it ships one skill (`herdr --skill`) for agents. Panes inherit the user's environment plus `HERDR_ENV=1`, `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`, `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `TERM_PROGRAM=herdr`, so agents started by Herdr read their normal `~/.claude`, `~/.codex` config and get Domovy's MCP server and skill from `domo connect` already. Herdr is not a connect target.
+
+**Domovy's use**: Processes grouped by workspace and pane; live sessions say "Live in Herdr: <workspace>, pane <id>" and are refused; Resume opens a new tab in the workspace whose pane works in the project folder (else a new workspace there) and runs `herdr agent start <name> --kind <kind> --pane <id> -- <resume args>`; Show in Herdr runs `herdr agent focus <pane>`. Disk: logs safe, layout snapshots consequences, layout/settings and the app keep; Herdr worktrees appear among leftovers (a pane shell working inside one keeps it).
+
+### Herdr agent kinds Domovy does not support yet
+
+Herdr kinds: pi, claude, codex, gemini, cursor, devin, agy, cline, omp, mastracode, opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qwen, letta, maki, muse. Domovy lists sessions for claude, codex, gemini, cursor, agy, cline, opencode, copilot, kimi, kiro, droid, grok, kilo, qwen and measures amp. None of the folders below exist on the development Mac; all from docs ([D]) or third-party readers ([3P]).
+
+| Kind (binary) | Sessions | Source |
+|---|---|---|
+| pi (`pi`) | `~/.pi/agent/sessions/--<cwd-dashed>--/<timestamp>_<id>.jsonl` (JSONL tree); `PI_CODING_AGENT_DIR` overrides | [D] https://pi.dev/docs/latest/session-format |
+| omp (`omp`, oh-my-pi) | `~/.omp/agent/sessions`, likely pi's format (fork) | [3P] https://cmux.com/docs/agent-integrations/oh-my-pi |
+| devin (`devin`) | SQLite `sessions.db` under `~/.local/share/devin/`; config `~/.config/devin/config.json`; `DEVIN_SESSIONS_DIR` overrides | [D] https://docs.devin.ai/federal/air-gapped/on-disk-formats |
+| hermes (`hermes`) | `~/.hermes/state.db` (SQLite, WAL, FTS5), older `~/.hermes/sessions/*.jsonl`; `HERMES_HOME` overrides | [D] https://hermes-agent.nousresearch.com/docs/developer-guide/session-storage |
+| qodercli (`qodercli`) | `~/.qoder/projects/<project>/<session-id>.jsonl` + `<session-id>/state.json`; `QODER_CONFIG_DIR` overrides | [D] https://docs.qoder.com/cli/sessions |
+| letta (`letta`) | on Letta's server by default; local mode `~/.letta/lc-local-backend` | [D] https://docs.letta.com/letta-code/local-mode |
+| mastracode (`mastracode`) | `~/Library/Application Support/mastracode/mastra.db` (LibSQL); `~/.mastracode/` is config | [D] https://mastra.ai/docs/mastra-code/configuration |
+| maki (`maki`) | undocumented; `maki session export/import` exists; config `~/.config/maki/init.lua` | [D] https://github.com/tontinton/maki |
+| muse (`muse`) | not identified | ? |

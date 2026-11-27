@@ -8,14 +8,28 @@ public struct Transcript: Hashable, Sendable {
     public let isTruncated: Bool
     /// Lines left out because they hold a possible secret that could not be masked.
     public let hiddenLineCount: Int
+    /// For a page read from the end: where the older messages before it end; `nil` when the
+    /// page starts at the beginning of the conversation.
+    public let olderCursor: TranscriptCursor?
 
-    public init(messages: [TranscriptMessage], isTruncated: Bool, hiddenLineCount: Int = 0) {
+    public init(messages: [TranscriptMessage], isTruncated: Bool, hiddenLineCount: Int = 0, olderCursor: TranscriptCursor? = nil) {
         self.messages = messages
         self.isTruncated = isTruncated
         self.hiddenLineCount = hiddenLineCount
+        self.olderCursor = olderCursor
     }
 
     public static let empty = Transcript(messages: [], isTruncated: false)
+}
+
+/// Where a page of a transcript ends, as its adapter counts: a byte offset of the first line
+/// of the newer page for line-based files, a message index otherwise.
+public struct TranscriptCursor: Hashable, Sendable {
+    public let position: Int64
+
+    public init(_ position: Int64) {
+        self.position = position
+    }
 }
 
 public struct TranscriptMessage: Identifiable, Hashable, Sendable {

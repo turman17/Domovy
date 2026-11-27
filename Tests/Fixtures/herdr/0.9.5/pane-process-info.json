@@ -1,0 +1,1 @@
+{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":410,"foreground_processes":[{"argv":["claude"],"argv0":"claude","cmdline":"claude","cwd":"/Users/dev/code/orbit","name":"claude","pid":410}],"pane_id":"w2:p1","shell_pid":400},"type":"pane_process_info"}}

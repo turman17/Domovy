@@ -1,0 +1,2 @@
+{"type": "metadata", "protocol_version": "1.0"}
+{"timestamp": 1795600000.0, "message": {"type": "TurnBegin", "payload": {"user_input": "Rework the footer"}}}

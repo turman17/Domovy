@@ -3,7 +3,7 @@ import Foundation
 /// Reads plain `.jsonl` Codex rollouts for display. Records are `{type, payload}`:
 /// `session_meta` (cwd), `response_item` (messages, tool calls), `event_msg` (user_message).
 /// Older rollouts have no wrapper; the record itself is then the payload. `.jsonl.zst` files
-/// need zstd, which Domovy does not have yet, so they are never read.
+/// (Codex's own compression of old rollouts) are read through the vendored zstd decoder.
 /// Transcripts may hold secrets: reads are bounded and nothing read here is logged.
 enum CodexRollout {
     struct Header: Sendable {
@@ -15,10 +15,7 @@ enum CodexRollout {
     static let maxTitleLength = 120
 
     static func readHeader(of url: URL) -> Header {
-        guard !url.lastPathComponent.hasSuffix(".zst"),
-              let handle = try? FileHandle(forReadingFrom: url) else { return Header() }
-        defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: maxHeaderBytes), !data.isEmpty else { return Header() }
+        guard let data = try? Zstd.prefix(of: url, maxBytes: maxHeaderBytes), !data.isEmpty else { return Header() }
 
         var header = Header()
         var firstResponsePrompt: String?
@@ -46,17 +43,12 @@ enum CodexRollout {
 
     /// User and assistant messages with tool calls as one-line summaries, for the preview pane.
     static func readTranscript(of url: URL, maxMessages: Int, maxBytes: Int = 4 * 1024 * 1024, masking findings: [SecretFinding] = []) throws -> Transcript {
-        guard !url.lastPathComponent.hasSuffix(".zst") else {
-            throw AdapterError.unreadable(url, reason: "it is compressed with zstd, which Domovy cannot read yet")
-        }
-        let handle: FileHandle
+        let data: Data
         do {
-            handle = try FileHandle(forReadingFrom: url)
+            data = try Zstd.prefix(of: url, maxBytes: maxBytes + 1)
         } catch {
             throw AdapterError.unreadable(url, reason: error.localizedDescription)
         }
-        defer { try? handle.close() }
-        let data = (try? handle.read(upToCount: maxBytes + 1)) ?? Data()
         var truncated = data.count > maxBytes
         let budget = data.prefix(maxBytes)
         var lines = budget.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true)
@@ -64,21 +56,50 @@ enum CodexRollout {
 
         let mask = TranscriptMask(findings: findings, file: url)
         var hidden = 0
-        var messages: [TranscriptMessage] = []
-        for (index, raw) in lines.enumerated() {
-            if messages.count >= maxMessages {
-                truncated = true
-                break
-            }
-            guard let line = mask.apply(Data(raw), at: Int64(raw.startIndex - data.startIndex)) else {
+        var masked: [TranscriptTail.Line] = []
+        for raw in lines {
+            let offset = Int64(raw.startIndex - data.startIndex)
+            guard let line = mask.apply(Data(raw), at: offset) else {
                 hidden += 1
                 continue
             }
-            guard let record = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+            masked.append(TranscriptTail.Line(offset: offset, data: line))
+        }
+        let parsed = parse(masked)
+        if parsed.count > maxMessages { truncated = true }
+        let messages = parsed.prefix(maxMessages).map(\.message)
+        return Transcript(messages: messages, isTruncated: truncated, hiddenLineCount: hidden)
+    }
+
+    /// The newest `limit` messages before `cursor`. A compressed rollout is read up to
+    /// `maxCompressedBytes` from its start, as it cannot be read from the end.
+    static func readPage(of url: URL, limit: Int, before cursor: TranscriptCursor?, masking findings: [SecretFinding] = [],
+                         maxCompressedBytes: Int = 32 * 1024 * 1024) throws -> Transcript {
+        guard url.lastPathComponent.hasSuffix(".zst") else {
+            return try TranscriptTail.page(of: url, limit: limit, before: cursor, masking: findings, parse: parse)
+        }
+        var data: Data
+        do {
+            data = try Zstd.prefix(of: url, maxBytes: maxCompressedBytes + 1)
+        } catch {
+            throw AdapterError.unreadable(url, reason: error.localizedDescription)
+        }
+        let cut = data.count > maxCompressedBytes
+        if cut, let lastNewline = data.prefix(maxCompressedBytes).lastIndex(of: UInt8(ascii: "\n")) {
+            data = data.prefix(through: lastNewline)
+        }
+        return try TranscriptTail.page(of: url, limit: limit, before: cursor, masking: findings, contents: data, contentsCut: cut, parse: parse)
+    }
+
+    /// Masked lines, oldest first, as messages; a tool call joins the assistant message before it.
+    private static func parse(_ lines: [TranscriptTail.Line]) -> [TranscriptTail.Parsed] {
+        var messages: [TranscriptTail.Parsed] = []
+        for line in lines {
+            guard let record = try? JSONSerialization.jsonObject(with: line.data) as? [String: Any] else { continue }
             let (type, payload) = unwrap(record)
             guard type == "response_item" || type == nil else { continue }
             let timestamp = (record["timestamp"] as? String).flatMap(parseDate)
-            let id = "\(index)"
+            let id = "\(line.offset)"
             switch payload["type"] as? String {
             case "message":
                 guard let role = payload["role"] as? String, let text = text(of: payload), !text.isEmpty else { continue }
@@ -89,20 +110,21 @@ enum CodexRollout {
                 case "assistant": mapped = .assistant
                 default: continue
                 }
-                messages.append(TranscriptMessage(id: id, role: mapped, timestamp: timestamp, blocks: [.text(text)]))
+                messages.append((line.offset, TranscriptMessage(id: id, role: mapped, timestamp: timestamp, blocks: [.text(text)])))
             case "function_call", "custom_tool_call", "local_shell_call":
                 let name = (payload["name"] as? String) ?? "shell"
                 let block = TranscriptMessage.Block.toolCall(name)
-                if let last = messages.last, last.role == .assistant {
-                    messages[messages.count - 1] = TranscriptMessage(id: last.id, role: .assistant, timestamp: last.timestamp, blocks: last.blocks + [block])
+                if let last = messages.last, last.message.role == .assistant {
+                    let merged = TranscriptMessage(id: last.message.id, role: .assistant, timestamp: last.message.timestamp, blocks: last.message.blocks + [block])
+                    messages[messages.count - 1] = (last.offset, merged)
                 } else {
-                    messages.append(TranscriptMessage(id: id, role: .assistant, timestamp: timestamp, blocks: [block]))
+                    messages.append((line.offset, TranscriptMessage(id: id, role: .assistant, timestamp: timestamp, blocks: [block])))
                 }
             default:
                 continue
             }
         }
-        return Transcript(messages: messages, isTruncated: truncated, hiddenLineCount: hidden)
+        return messages
     }
 
     // MARK: Helpers

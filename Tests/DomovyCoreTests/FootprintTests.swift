@@ -1,4 +1,4 @@
-import DomovyCore
+@testable import DomovyCore
 import Foundation
 import Testing
 
@@ -151,7 +151,7 @@ struct FootprintTests {
         let before = try Data(contentsOf: database)
         let modified = try database.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
 
-        let footprint = try await CursorFootprint(home: home).footprint()
+        let footprint = try await CursorFootprint(home: home, appInstalled: true).footprint()
         let byName = Self.byName(footprint)
         let chats = try #require(byName["Chats database"])
         #expect(chats.disposition == .consequences)
@@ -164,6 +164,25 @@ struct FootprintTests {
         #expect(footprint.totalBytes == Self.allocatedBytes(below: support) + Self.allocatedBytes(below: dot))
         #expect(try Data(contentsOf: database) == before)
         #expect(try database.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate == modified)
+    }
+
+    @Test("without Cursor.app, ~/.cursor/extensions and ai-tracking are leftovers marked safe")
+    func cursorLeftovers() async throws {
+        let home = try Self.home()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let dot = home.appendingPathComponent(".cursor", isDirectory: true)
+        try Self.copyFixture("cursor/3.0/dot-cursor", to: dot)
+        try FileManager.default.createDirectory(at: dot.appendingPathComponent("ai-tracking"), withIntermediateDirectories: true)
+        try Data(repeating: 0, count: 8192).write(to: dot.appendingPathComponent("ai-tracking/ai-code-tracking.db"))
+        let gone = Self.byName(try await CursorFootprint(home: home, appInstalled: false).footprint())
+        #expect(gone["Extensions"]?.disposition == .safe)
+        #expect(gone["AI code tracking"]?.disposition == .safe)
+        let installed = Self.byName(try await CursorFootprint(home: home, appInstalled: true).footprint())
+        #expect(installed["Extensions"]?.disposition == .keep)
+        #expect(installed["AI code tracking"]?.disposition == .consequences)
+        #expect(!CursorFootprint.findApp(in: [home]))
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Cursor.app"), withIntermediateDirectories: true)
+        #expect(CursorFootprint.findApp(in: [home]))
     }
 
     @Test("Cursor with only ~/.cursor still reports it")

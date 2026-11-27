@@ -44,8 +44,9 @@ public struct GeminiAdapter: AgentAdapter {
     }
 
     /// Convenience for a home directory: `<home>/.gemini`.
-    public init(home: URL) {
-        self.init(geminiHome: home.appendingPathComponent(".gemini", isDirectory: true))
+    public init(home: URL, expiringWindowDays: Int = 7) {
+        self.init(geminiHome: home.appendingPathComponent(".gemini", isDirectory: true), expiringWindowDays: expiringWindowDays,
+                  openHandles: LibprocOpenHandleChecker.shared)
     }
 
     // MARK: AgentAdapter
@@ -95,7 +96,23 @@ public struct GeminiAdapter: AgentAdapter {
     }
 
     public func liveCheck(_ session: Session) async throws -> LiveCheckResult {
-        await liveness(try artifacts(of: session).filter { $0.kind != .indexEntry }.map(\.url))
+        guard let result = await liveChecks(for: [session]).first else { throw AdapterError.sessionNotFound(session.id) }
+        return try result.get()
+    }
+
+    /// A batch reads each project folder once and asks one open-file question.
+    public func liveChecks(for sessions: [Session]) async -> [Result<LiveCheckResult, any Error>] {
+        let lookup = TargetLookup(layout: layout)
+        let files = sessions.map { session in
+            Result { () throws -> [URL] in
+                artifacts(of: try locate(session, in: lookup)).filter { $0.kind != .indexEntry }.map(\.url)
+            }
+        }
+        let holders = await openHandleHolders(of: files.compactMap { try? $0.get() }, checker: openHandles)
+        var next = holders.makeIterator()
+        return zip(sessions, files).map { session, files in
+            files.flatMap { _ in next.next().map { .success(liveness(holders: $0)) } ?? .failure(AdapterError.sessionNotFound(session.id)) }
+        }
     }
 
     /// Moves the chat and what Gemini CLI keys by its id (or every chat of a group).
@@ -155,10 +172,35 @@ public struct GeminiAdapter: AgentAdapter {
     /// Compresses the chat and its bulky companions in place with APFS transparent compression.
     /// Gemini CLI reads them unchanged and can resume; modification times stay as they were.
     public func archivePlan(for session: Session) async throws -> Plan {
-        _ = try locate(session)
-        try requireWritable()
+        guard let planned = await archivePlans(for: [session]).first else { throw AdapterError.sessionNotFound(session.id) }
+        return try planned.result.get()
+    }
+
+    /// A batch reads each project folder once and asks one open-file question for every chat.
+    public func archivePlans(for sessions: [Session]) async -> [PlannedSession] {
+        let writable = Result { try requireWritable() }
+        let lookup = TargetLookup(layout: layout)
+        let parts = sessions.map { session in
+            Result { () throws -> [FileCompression] in
+                let target = try locate(session, in: lookup)
+                try writable.get()
+                return try compressions(of: artifacts(of: target))
+            }
+        }
+        let holders = await openHandleHolders(of: parts.compactMap { try? $0.get().map(\.file) }, checker: openHandles)
+        var next = holders.makeIterator()
+        return zip(sessions, parts).map { session, part in
+            PlannedSession(session: session, result: part.flatMap { compressions in
+                guard let holders = next.next() else { return .failure(AdapterError.sessionNotFound(session.id)) }
+                return .success(Plan(agent: kind, sessionID: session.id, action: .archive, destination: nil, moves: [], indexEdits: [],
+                                     compressions: compressions, liveCheck: liveness(holders: holders), scope: self.scope))
+            })
+        }
+    }
+
+    private func compressions(of artifacts: [Artifact]) throws -> [FileCompression] {
         var compressions: [FileCompression] = []
-        for artifact in try await artifacts(of: session) where Self.archivedNotes.contains(artifact.note) {
+        for artifact in artifacts where Self.archivedNotes.contains(artifact.note) {
             for file in APFSCompression.regularFiles(at: artifact.url) {
                 if layout.isProtected(file) { throw AdapterError.protectedPathInPlan(file) }
                 guard !APFSCompression.isCompressed(file), FileSystem.size(of: file) > APFSCompression.minimumUsefulSize else { continue }
@@ -171,9 +213,7 @@ public struct GeminiAdapter: AgentAdapter {
                 ))
             }
         }
-        let live = await liveness(compressions.map(\.file))
-        return Plan(agent: kind, sessionID: session.id, action: .archive, destination: nil, moves: [], indexEdits: [],
-                    compressions: compressions, liveCheck: live, scope: self.scope)
+        return compressions
     }
 
     /// A group of empty chats has nothing to show.
@@ -314,12 +354,8 @@ public struct GeminiAdapter: AgentAdapter {
     // MARK: Liveness
 
     /// Live when a process holds one of the session's files open. Gemini CLI appends to its chat
-    /// without keeping it open, so delete also requires Gemini CLI to be quit.
-    private func liveness(_ urls: [URL]) async -> LiveCheckResult {
-        liveness(holders: await openHandles.holders(of: urls))
-    }
-
-    /// The live check from the holders of the session's files (`nil`: the check could not run).
+    /// without keeping it open, so delete also requires Gemini CLI to be quit. The live check
+    /// from the holders of the session's files (`nil`: the check could not run).
     private func liveness(holders: [OpenHandleHolder]?) -> LiveCheckResult {
         var reasons: [String] = []
         let status: LiveCheckResult.OpenHandleStatus

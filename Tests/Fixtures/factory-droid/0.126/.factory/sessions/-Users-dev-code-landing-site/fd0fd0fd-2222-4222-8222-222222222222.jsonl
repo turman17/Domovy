@@ -1,0 +1,2 @@
+{"type": "session_start", "id": "fd0fd0fd-2222-4222-8222-222222222222", "title": "", "cwd": "/Users/dev/code/landing-site"}
+{"type": "message", "id": "n1", "message": {"role": "user", "content": [{"type": "text", "text": "Add a dark mode toggle"}]}}

@@ -41,9 +41,11 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     }
 
     /// Convenience for a home directory: `<home>/.claude`, linked to Claude Desktop's list.
-    public init(home: URL) {
+    public init(home: URL, expiringWindowDays: Int = 7) {
         self.init(
             configDirectory: home.appendingPathComponent(".claude", isDirectory: true),
+            expiringWindowDays: expiringWindowDays,
+            openHandles: LibprocOpenHandleChecker.shared,
             desktopRegistry: ClaudeDesktopRegistry(home: home)
         )
     }
@@ -101,70 +103,158 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     }
 
     public func liveCheck(_ session: Session) async throws -> LiveCheckResult {
-        try requireOurs(session)
-        let urls = collectArtifacts(id: session.id, transcript: session.transcriptURL).map(\.url)
-        return await liveness.check(sessionID: session.id, artifactURLs: urls)
+        guard let result = await liveChecks(for: [session]).first else { throw AdapterError.sessionNotFound(session.id) }
+        return try result.get()
+    }
+
+    /// A batch reads `history.jsonl`, `security/` and the liveness files once and asks one
+    /// open-file question; each session gets what a check of its own would have got.
+    public func liveChecks(for sessions: [Session]) async -> [Result<LiveCheckResult, any Error>] {
+        let batch = Batch(adapter: self, desktop: .empty)
+        let groups = sessions.map { session in
+            Result { () throws -> [URL] in
+                try requireOurs(session)
+                return batch.artifacts(of: session).map(\.url)
+            }
+        }
+        let checked = await batch.liveness(zip(sessions, groups).compactMap { session, group in
+            (try? group.get()).map { (session.id, $0) }
+        })
+        var next = checked.makeIterator()
+        return zip(sessions, groups).map { session, group in
+            group.flatMap { _ in next.next().map { .success($0) } ?? .failure(AdapterError.sessionNotFound(session.id)) }
+        }
     }
 
     public func deletePlan(for session: Session, destination: Destination = .trash) async throws -> Plan {
-        try requireOurs(session)
-        try requireWritable()
+        guard let planned = await deletePlans(for: [session], destination: destination).first else {
+            throw AdapterError.sessionNotFound(session.id)
+        }
+        return try planned.result.get()
+    }
 
+    /// A batch reads Claude Desktop's registry, `history.jsonl`, `security/`, each project
+    /// folder and the liveness files once, asks one open-file question for every session and
+    /// checks for Claude Desktop once. Each plan is exactly what a plan of its own would be; the
+    /// executor checks again right before it changes anything.
+    public func deletePlans(for sessions: [Session], destination: Destination) async -> [PlannedSession] {
+        let writable = Result { try requireWritable() }
         let desktop = desktopSnapshot()
-        let artifacts = collectArtifacts(id: session.id, transcript: session.transcriptURL, desktop: desktop)
+        let batch = Batch(adapter: self, desktop: desktop)
+        var parts: [Result<DeleteParts, any Error>] = []
+        for session in sessions {
+            parts.append(Result {
+                try requireOurs(session)
+                try writable.get()
+                return try deleteParts(for: session, artifacts: batch.artifacts(of: session), desktop: desktop, history: batch.shared.history)
+            })
+        }
+        let found = zip(sessions, parts).compactMap { session, part in (try? part.get()).map { (session: session, parts: $0) } }
+        let checked = await batch.liveness(found.map { ($0.session.id, $0.parts.moves.map(\.source)) })
+        // Asked once, and only when a plan changes Claude Desktop's list.
+        let blocking = found.contains { !$0.parts.removals.isEmpty } ? desktopProcesses.blockingReasons([ClaudeDesktopRegistry.processMatcher]) : []
+        var next = checked.makeIterator()
+        return zip(sessions, parts).map { session, part in
+            PlannedSession(session: session, result: part.flatMap { part in
+                guard let base = next.next() else { return .failure(AdapterError.sessionNotFound(session.id)) }
+                let removals = part.removals
+                return .success(Plan(
+                    agent: kind,
+                    sessionID: session.id,
+                    action: .delete,
+                    destination: destination,
+                    moves: part.moves,
+                    indexEdits: part.edits,
+                    registryRemovals: removals,
+                    remarks: part.remarks,
+                    mustNotBeRunning: removals.isEmpty ? [] : [ClaudeDesktopRegistry.processMatcher],
+                    liveCheck: Self.desktopChecked(base, blocking: removals.isEmpty ? nil : blocking),
+                    scope: self.scope
+                ))
+            })
+        }
+    }
+
+    /// What one session's delete plan moves and edits.
+    private struct DeleteParts {
         var moves: [FileMove] = []
         var edits: [IndexEdit] = []
         var removals: [RegistryRemoval] = []
         var remarks: [String] = []
+    }
+
+    private func deleteParts(for session: Session, artifacts: [Artifact], desktop: ClaudeDesktopRegistry.Snapshot,
+                             history: [String: HistoryLines]) throws -> DeleteParts {
+        var parts = DeleteParts()
         for artifact in artifacts {
             // Defensive: collectArtifacts never produces protected paths, but a plan must prove it.
             if layout.isProtected(artifact.url) { throw AdapterError.protectedPathInPlan(artifact.url) }
             switch artifact.kind {
             case .file, .folder:
-                moves.append(FileMove(source: artifact.url, kind: artifact.kind, sizeBytes: artifact.sizeBytes, note: artifact.note))
+                parts.moves.append(FileMove(source: artifact.url, kind: artifact.kind, sizeBytes: artifact.sizeBytes, note: artifact.note))
             case .indexEntry where artifact.url == layout.history:
-                if let edit = historyEdit(for: session.id) { edits.append(edit) }
+                if let edit = historyEdit(for: session.id, in: history) { parts.edits.append(edit) }
             case .indexEntry:
                 guard let entry = desktop.entries.first(where: { $0.file == artifact.url }) else { continue }
                 if case .readOnly(let reason) = desktop.status {
-                    remarks.append("Claude Desktop still lists this session: \(reason)")
+                    parts.remarks.append("Claude Desktop still lists this session: \(reason)")
                 } else {
-                    removals.append(ClaudeDesktopRegistry.removal(of: entry, note: artifact.note))
+                    parts.removals.append(ClaudeDesktopRegistry.removal(of: entry, note: artifact.note))
                 }
             }
         }
-        if !removals.isEmpty {
-            remarks.append("Claude Desktop stops listing this session. Its entry is backed up first, so undo puts it back.")
+        if !parts.removals.isEmpty {
+            parts.remarks.append("Claude Desktop stops listing this session. Its entry is backed up first, so undo puts it back.")
         }
-        let live = await desktopChecked(
-            await liveness.check(sessionID: session.id, artifactURLs: moves.map(\.source)),
-            touchesRegistry: !removals.isEmpty
-        )
-        return Plan(
-            agent: kind,
-            sessionID: session.id,
-            action: .delete,
-            destination: destination,
-            moves: moves,
-            indexEdits: edits,
-            registryRemovals: removals,
-            remarks: remarks,
-            mustNotBeRunning: removals.isEmpty ? [] : [ClaudeDesktopRegistry.processMatcher],
-            liveCheck: live,
-            scope: self.scope
-        )
+        return parts
     }
 
     /// Compresses the session's cold files in place with APFS transparent compression.
     /// Claude Code reads them unchanged and can resume the session; mtimes stay, so its
     /// retention sweep still applies. `history.jsonl` is shared and stays as it is.
     public func archivePlan(for session: Session) async throws -> Plan {
-        try requireOurs(session)
-        try requireWritable()
+        guard let planned = await archivePlans(for: [session]).first else { throw AdapterError.sessionNotFound(session.id) }
+        return try planned.result.get()
+    }
 
+    /// A batch reads the shared files and the liveness files once and asks one open-file
+    /// question; each plan is exactly what a plan of its own would be.
+    public func archivePlans(for sessions: [Session]) async -> [PlannedSession] {
+        let writable = Result { try requireWritable() }
+        let batch = Batch(adapter: self, desktop: .empty)
+        var parts: [Result<[FileCompression], any Error>] = []
+        for session in sessions {
+            parts.append(Result {
+                try requireOurs(session)
+                try writable.get()
+                return try compressions(of: batch.artifacts(of: session))
+            })
+        }
+        let checked = await batch.liveness(zip(sessions, parts).compactMap { session, part in
+            (try? part.get()).map { (session.id, $0.map(\.file)) }
+        })
+        var next = checked.makeIterator()
+        return zip(sessions, parts).map { session, part in
+            PlannedSession(session: session, result: part.flatMap { compressions in
+                guard let live = next.next() else { return .failure(AdapterError.sessionNotFound(session.id)) }
+                return .success(Plan(
+                    agent: kind,
+                    sessionID: session.id,
+                    action: .archive,
+                    destination: nil,
+                    moves: [],
+                    indexEdits: [],
+                    compressions: compressions,
+                    liveCheck: live,
+                    scope: self.scope
+                ))
+            })
+        }
+    }
+
+    private func compressions(of artifacts: [Artifact]) throws -> [FileCompression] {
         var compressions: [FileCompression] = []
-        for artifact in collectArtifacts(id: session.id, transcript: session.transcriptURL)
-        where Self.archivedNotes.contains(artifact.note) {
+        for artifact in artifacts where Self.archivedNotes.contains(artifact.note) {
             for file in APFSCompression.regularFiles(at: artifact.url) {
                 if layout.isProtected(file) { throw AdapterError.protectedPathInPlan(file) }
                 guard !APFSCompression.isCompressed(file),
@@ -178,18 +268,44 @@ public struct ClaudeCodeAdapter: AgentAdapter {
                 ))
             }
         }
-        let live = await liveness.check(sessionID: session.id, artifactURLs: compressions.map(\.file))
-        return Plan(
-            agent: kind,
-            sessionID: session.id,
-            action: .archive,
-            destination: nil,
-            moves: [],
-            indexEdits: [],
-            compressions: compressions,
-            liveCheck: live,
-            scope: self.scope
-        )
+        return compressions
+    }
+
+    /// What a batch of artifacts, live checks or plans reads once: the shared files, each
+    /// project folder's set-aside copies and the liveness files. Lives for one call only, so a
+    /// plan never sees an older read than its batch.
+    private final class Batch {
+        let adapter: ClaudeCodeAdapter
+        let shared: SharedFiles
+        private var setAside: [URL: [String: [URL]]] = [:]
+
+        init(adapter: ClaudeCodeAdapter, desktop: ClaudeDesktopRegistry.Snapshot) {
+            self.adapter = adapter
+            self.shared = SharedFiles(desktop: desktop, history: adapter.historyLines(), security: FileSystem.children(of: adapter.layout.security))
+        }
+
+        func artifacts(of session: Session) -> [Artifact] {
+            let slug = session.transcriptURL.deletingLastPathComponent()
+            if setAside[slug] == nil {
+                var byID: [String: [URL]] = [:]
+                for entry in FileSystem.children(of: slug) {
+                    if let id = ClaudeCodeLayout.sessionID(ofSetAsideCopyNamed: entry.lastPathComponent) { byID[id, default: []].append(entry) }
+                }
+                setAside[slug] = byID
+            }
+            return adapter.collectArtifacts(id: session.id, transcript: session.transcriptURL, setAside: setAside[slug]?[session.id] ?? [], shared: shared)
+        }
+
+        /// One live check per session and its files: the liveness files read once, one
+        /// open-file question for all.
+        func liveness(_ groups: [(sessionID: String, urls: [URL])]) async -> [LiveCheckResult] {
+            let liveness = adapter.liveness
+            let markers = liveness.readMarkers()
+            let holders = await openHandleHolders(of: groups.map(\.urls), checker: liveness.openHandles)
+            return zip(groups, holders).map { group, holders in
+                liveness.result(markerReasons: liveness.markerReasons(sessionID: group.sessionID, markers: markers), holders: holders)
+            }
+        }
     }
 
     /// Artifacts worth compressing: transcripts and their bulky companions. Small state the
@@ -204,10 +320,20 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         return try TranscriptReader(maxMessages: limit).read(session.transcriptURL, masking: findings)
     }
 
+    public func transcriptPage(of session: Session, limit: Int, before cursor: TranscriptCursor?, masking findings: [SecretFinding]) async throws -> Transcript {
+        try requireOurs(session)
+        return try TranscriptReader.readPage(session.transcriptURL, limit: limit, before: cursor, masking: findings)
+    }
+
     /// Adds "Claude Desktop is running" to a live check when the plan changes Desktop's list.
     func desktopChecked(_ base: LiveCheckResult, touchesRegistry: Bool) async -> LiveCheckResult {
         guard touchesRegistry else { return base }
-        let blocking = desktopProcesses.blockingReasons([ClaudeDesktopRegistry.processMatcher])
+        return Self.desktopChecked(base, blocking: desktopProcesses.blockingReasons([ClaudeDesktopRegistry.processMatcher]))
+    }
+
+    /// `base` with the reasons Claude Desktop blocks for; `nil` when the plan leaves its list alone.
+    static func desktopChecked(_ base: LiveCheckResult, blocking: [String]?) -> LiveCheckResult {
+        guard let blocking else { return base }
         return LiveCheckResult(
             isLive: base.isLive || !blocking.isEmpty,
             reasons: base.reasons + blocking,
@@ -283,7 +409,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     }
 
     /// What every session's artifacts are looked up in. A listing reads it once for all its
-    /// sessions; artifacts, live checks and plans read it fresh for the one session they need.
+    /// sessions, a batch of live checks or plans once for its sessions (one session: fresh).
     struct SharedFiles {
         let desktop: ClaudeDesktopRegistry.Snapshot
         /// `history.jsonl` lines by lowercased session id.
@@ -300,7 +426,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
 
     /// `collectArtifacts` with the session's set-aside copies (`.orphaned-*`, `.superseded-*`
     /// next to the transcript) and the shared files already read.
-    private func collectArtifacts(id: String, transcript: URL, setAside: [URL], shared: SharedFiles) -> [Artifact] {
+    fileprivate func collectArtifacts(id: String, transcript: URL, setAside: [URL], shared: SharedFiles) -> [Artifact] {
         var artifacts: [Artifact] = []
         func add(_ url: URL, _ kind: Artifact.Kind, _ note: String) {
             guard FileSystem.exists(url), !layout.isProtected(url) else { return }
@@ -332,10 +458,6 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     }
 
     /// Lines of `history.jsonl` that reference the session, or `nil` when there are none.
-    private func historyEdit(for id: String) -> IndexEdit? {
-        historyEdit(for: id, in: historyLines())
-    }
-
     private func historyEdit(for id: String, in history: [String: HistoryLines]) -> IndexEdit? {
         guard let lines = history[id.lowercased()], !lines.indices.isEmpty else { return nil }
         let indices = lines.indices
@@ -351,7 +473,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
 
     /// Every line of `history.jsonl` by the session it references, parsed once. Lines match
     /// as in `JSONLines.indices`: `sessionId` equal ignoring case.
-    private func historyLines() -> [String: HistoryLines] {
+    fileprivate func historyLines() -> [String: HistoryLines] {
         guard let data = try? Data(contentsOf: layout.history) else { return [:] }
         var result: [String: HistoryLines] = [:]
         for (index, line) in JSONLines.split(data).lines.enumerated() {

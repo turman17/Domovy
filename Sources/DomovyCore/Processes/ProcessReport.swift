@@ -50,7 +50,14 @@ public struct ProcessNode: Identifiable, Hashable, Codable, Sendable {
 public struct ProcessGroup: Identifiable, Hashable, Codable, Sendable {
     public var id: ProcessKey { root.key }
     public let root: ProcessNode
+    /// The Herdr workspace and pane the agent runs in, when it runs in one.
+    public let herdr: HerdrPlacement?
     public var agent: AgentKind { root.agent ?? .claudeCode }
+
+    public init(root: ProcessNode, herdr: HerdrPlacement? = nil) {
+        self.root = root
+        self.herdr = herdr
+    }
     /// Sessions of every process in the tree.
     public var sessionIDs: [String] {
         var seen: [String] = []

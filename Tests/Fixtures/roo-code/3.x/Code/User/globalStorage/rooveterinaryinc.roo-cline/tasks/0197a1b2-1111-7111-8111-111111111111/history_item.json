@@ -1,0 +1,1 @@
+{"id": "0197a1b2-1111-7111-8111-111111111111", "number": 1, "ts": 1795500000000, "task": "Add retry with backoff to the uploader", "tokensIn": 1200, "tokensOut": 800, "totalCost": 0.01, "size": 20000, "workspace": "/Users/dev/code/orbit-api", "mode": "code", "status": "completed", "childIds": ["0197a1b2-2222-7222-8222-222222222222"]}

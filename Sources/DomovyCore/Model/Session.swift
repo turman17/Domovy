@@ -40,6 +40,9 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
     /// Chats shown as this one row: Gemini CLI's a2a server writes hundreds of empty chats under
     /// one session id. 1 for an ordinary session.
     public let memberCount: Int
+    /// Which app of the agent wrote the session, when it has several ("VS Code" for a Codex
+    /// thread from the extension, "Zed" for one started from Zed's Agent Panel).
+    public let origin: String?
 
     public init(
         id: String,
@@ -54,7 +57,8 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         isArchived: Bool = false,
         desktop: DesktopLink? = nil,
         retentionNote: String? = nil,
-        memberCount: Int = 1
+        memberCount: Int = 1,
+        origin: String? = nil
     ) {
         self.id = id
         self.agent = agent
@@ -69,11 +73,13 @@ public struct Session: Identifiable, Hashable, Codable, Sendable {
         self.desktop = desktop
         self.retentionNote = retentionNote
         self.memberCount = memberCount
+        self.origin = origin
     }
 
     /// "Claude Code · Desktop" when Claude Desktop lists the session too.
     public var agentLabel: String {
-        desktop == nil ? agent.displayName : "\(agent.displayName) \u{00B7} Desktop"
+        if desktop != nil { return "\(agent.displayName) \u{00B7} Desktop" }
+        return origin.map { "\(agent.displayName) \u{00B7} \($0)" } ?? agent.displayName
     }
 
     /// Last path component of the project, for compact display.

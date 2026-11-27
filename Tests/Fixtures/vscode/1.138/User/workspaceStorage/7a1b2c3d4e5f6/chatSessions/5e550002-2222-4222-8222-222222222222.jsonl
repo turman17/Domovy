@@ -1,0 +1,6 @@
+{"kind": 0, "v": {"version": 3, "sessionId": "5e550002-2222-4222-8222-222222222222", "creationDate": 1795200000000, "customTitle": "Old title", "requests": []}}
+{"kind": 2, "k": ["requests"], "v": [{"requestId": "request_1", "message": {"text": "Make the hero image lazy load", "parts": []}, "response": [], "timestamp": 1795200001000}]}
+{"kind": 2, "k": ["requests", 0, "response"], "v": [{"value": "Added loading=lazy to the hero image."}]}
+{"kind": 1, "k": ["customTitle"], "v": "Lazy load the hero image"}
+{"kind": 2, "k": ["requests"], "v": [{"requestId": "request_2", "message": {"text": "Also the logo", "parts": []}, "response": [{"value": "Done."}]}]}
+{"kind": 3, "k": ["requests", 1, "response"]}

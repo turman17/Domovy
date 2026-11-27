@@ -12,6 +12,19 @@ struct CodexIndex: Sendable {
     struct Thread: Sendable {
         let title: String?
         let cwd: String?
+        /// Which app started the thread (`originator`), in words: "Codex app", "VS Code", "CLI", "Zed".
+        let origin: String?
+    }
+
+    /// `threads.originator`, verified values on 0.169: `codex_work_desktop` (the ChatGPT app),
+    /// `codex_vscode` (the extension), `codex-tui` (the CLI), `zed` (Zed's codex-acp).
+    static func origin(_ originator: String?) -> String? {
+        guard let value = originator?.lowercased(), !value.isEmpty else { return nil }
+        if value.contains("vscode") { return "VS Code" }
+        if value.contains("desktop") { return "Codex app" }
+        if value == "zed" || value.contains("zed") { return "Zed" }
+        if value.contains("tui") || value.contains("cli") || value.contains("exec") { return "CLI" }
+        return nil
     }
 
     static let sessionIndexKey = "id"
@@ -31,10 +44,11 @@ struct CodexIndex: Sendable {
         index.names = names
         index.historyLines = lineCounts(layout.history, key: historyKey)
         if let db = SQLiteReader(url: layout.stateDatabase) {
-            for row in db.rows("SELECT id, title, cwd FROM threads") {
-                guard row.count == 3, let id = row[0]?.lowercased() else { continue }
+            let originator = db.columns(of: "threads").contains("originator") ? "originator" : "NULL"
+            for row in db.rows("SELECT id, title, cwd, \(originator) FROM threads") {
+                guard row.count == 4, let id = row[0]?.lowercased() else { continue }
                 let cwd = row[2].flatMap { $0.isEmpty ? nil : $0 }
-                index.threads[id] = Thread(title: row[1].flatMap(CodexRollout.cleanTitle), cwd: cwd)
+                index.threads[id] = Thread(title: row[1].flatMap(CodexRollout.cleanTitle), cwd: cwd, origin: origin(row[3]))
             }
         }
         return index
@@ -55,20 +69,41 @@ struct CodexIndex: Sendable {
 
     /// Lines of `file` whose `key` equals `id`, as a plan edit; `nil` when there are none.
     static func edit(_ file: URL, key: String, id: String) -> IndexEdit? {
-        guard let data = try? Data(contentsOf: file) else { return nil }
-        let split = JSONLines.split(data)
-        let indices = JSONLines.indices(in: split.lines, where: key, equals: id)
-        guard !indices.isEmpty else { return nil }
-        let bytes = indices.reduce(Int64(0)) { $0 + Int64(split.lines[$1].count) + 1 }
-        let n = indices.count
-        return IndexEdit(
-            file: file,
-            lineNumbers: indices,
-            matchKey: key,
-            matchValue: id,
-            removedBytes: bytes,
-            note: "\(n) \(n == 1 ? "entry" : "entries") in \(file.lastPathComponent); the file itself stays"
-        )
+        LineLookup(file, key: key).edit(id: id)
+    }
+
+    /// One read of a `.jsonl` index for many plans: each line's number and bytes by its `key`,
+    /// lowercased, matched as `JSONLines.indices` matches (equal ignoring case).
+    struct LineLookup {
+        let file: URL
+        let key: String
+        private var lines: [String: (indices: [Int], bytes: Int64)] = [:]
+
+        init(_ file: URL, key: String) {
+            self.file = file
+            self.key = key
+            guard let data = try? Data(contentsOf: file) else { return }
+            for (index, line) in JSONLines.split(data).lines.enumerated() {
+                guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                      let value = (object[key] as? String)?.lowercased() else { continue }
+                lines[value, default: ([], 0)].indices.append(index)
+                lines[value, default: ([], 0)].bytes += Int64(line.count) + 1
+            }
+        }
+
+        /// The lines whose `key` equals `id`, as a plan edit; `nil` when there are none.
+        func edit(id: String) -> IndexEdit? {
+            guard let found = lines[id.lowercased()], !found.indices.isEmpty else { return nil }
+            let n = found.indices.count
+            return IndexEdit(
+                file: file,
+                lineNumbers: found.indices,
+                matchKey: key,
+                matchValue: id,
+                removedBytes: found.bytes,
+                note: "\(n) \(n == 1 ? "entry" : "entries") in \(file.lastPathComponent); the file itself stays"
+            )
+        }
     }
 
     // MARK: Database rows
@@ -105,15 +140,32 @@ struct CodexIndex: Sendable {
 
     /// Rows that reference the thread, per database that has any.
     static func databaseRows(root: URL, id: String) -> [DatabaseRows] {
-        threadTables.compactMap { spec in
-            let url = root.appendingPathComponent(spec.file)
-            guard let db = SQLiteReader(url: url) else { return nil }
-            let present = db.tables()
-            let counts = spec.tables.compactMap { table, column -> (String, String, Int)? in
-                guard present.contains(table), let n = db.count(table: table, column: column, equals: id), n > 0 else { return nil }
-                return (table, column, n)
+        RowCounter(root: root).rows(id: id)
+    }
+
+    /// Codex's databases opened read-only once, with the thread tables each has, for counting
+    /// the rows of many threads. Close it (let it go) before asking who holds files open.
+    final class RowCounter {
+        private let databases: [(url: URL, reader: SQLiteReader, tables: [(table: String, column: String)])]
+
+        init(root: URL) {
+            databases = CodexIndex.threadTables.compactMap { spec in
+                let url = root.appendingPathComponent(spec.file)
+                guard let db = SQLiteReader(url: url) else { return nil }
+                let present = db.tables()
+                return (url, db, spec.tables.filter { present.contains($0.table) })
             }
-            return counts.isEmpty ? nil : DatabaseRows(database: url, tables: counts.map { (table: $0.0, column: $0.1, count: $0.2) })
+        }
+
+        /// Rows that reference the thread, per database that has any.
+        func rows(id: String) -> [DatabaseRows] {
+            databases.compactMap { database in
+                let counts = database.tables.compactMap { table, column -> (table: String, column: String, count: Int)? in
+                    guard let n = database.reader.count(table: table, column: column, equals: id), n > 0 else { return nil }
+                    return (table, column, n)
+                }
+                return counts.isEmpty ? nil : DatabaseRows(database: database.url, tables: counts)
+            }
         }
     }
 }

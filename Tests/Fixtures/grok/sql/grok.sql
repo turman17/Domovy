@@ -1,0 +1,22 @@
+-- Schema after superagent-ai/grok-cli@fb97af83 src/storage/migrations.ts (user_version 3). Rows are synthetic.
+PRAGMA user_version = 3;
+CREATE TABLE workspaces (id TEXT PRIMARY KEY, scope_key TEXT NOT NULL UNIQUE, canonical_path TEXT NOT NULL, git_root TEXT, display_name TEXT NOT NULL, last_seen_at TEXT NOT NULL) STRICT;
+CREATE TABLE sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, title TEXT, recap_text TEXT, recap_model TEXT, recap_updated_at TEXT, model TEXT NOT NULL, mode TEXT NOT NULL, cwd_at_start TEXT NOT NULL, cwd_last TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
+CREATE TABLE messages (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, seq INTEGER NOT NULL, role TEXT NOT NULL, message_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (session_id, seq)) STRICT;
+CREATE TABLE tool_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, message_seq INTEGER NOT NULL, tool_call_id TEXT NOT NULL, tool_name TEXT NOT NULL, args_json TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, UNIQUE(session_id, tool_call_id)) STRICT;
+CREATE TABLE tool_results (id INTEGER PRIMARY KEY AUTOINCREMENT, tool_call_row_id INTEGER NOT NULL REFERENCES tool_calls(id) ON DELETE CASCADE, output_kind TEXT NOT NULL, output_json TEXT NOT NULL, success INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT;
+CREATE TABLE usage_events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, message_seq INTEGER, source TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, cost_micros INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL) STRICT;
+CREATE TABLE compactions (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, first_kept_seq INTEGER NOT NULL, summary TEXT NOT NULL, tokens_before INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL) STRICT;
+INSERT INTO workspaces VALUES ('w1', 'path:/Users/dev/code/orbit-api', '/Users/dev/code/orbit-api', '/Users/dev/code/orbit-api', 'orbit-api', '2026-11-20T10:00:00.000Z');
+INSERT INTO sessions VALUES ('g1g1g1g1-1111-4111-8111-111111111111', 'w1', 'Uploader retries', NULL, NULL, NULL, 'grok-code', 'agent', '/Users/dev/code/orbit-api', '/Users/dev/code/orbit-api', 'active', '2026-11-20T10:00:00.000Z', '2026-11-20T10:05:00.000Z');
+INSERT INTO sessions VALUES ('g1g1g1g1-2222-4222-8222-222222222222', 'w1', 'Old experiment', NULL, NULL, NULL, 'grok-code', 'agent', '/Users/dev/code/orbit-api', '/Users/dev/code/orbit-api', 'archived', '2026-11-01T10:00:00.000Z', '2026-11-01T10:05:00.000Z');
+INSERT INTO messages VALUES ('g1g1g1g1-1111-4111-8111-111111111111', 0, 'user', '{"role":"user","content":"Add retries to the uploader"}', '2026-11-20T10:00:01.000Z');
+INSERT INTO messages VALUES ('g1g1g1g1-1111-4111-8111-111111111111', 1, 'assistant', '{"role":"assistant","content":[{"type":"text","text":"Reading the uploader."},{"type":"tool-call","toolCallId":"c1","toolName":"read_file","input":{}}]}', '2026-11-20T10:00:03.000Z');
+INSERT INTO messages VALUES ('g1g1g1g1-1111-4111-8111-111111111111', 2, 'tool', '{"role":"tool","content":[]}', '2026-11-20T10:00:04.000Z');
+INSERT INTO messages VALUES ('g1g1g1g1-2222-4222-8222-222222222222', 0, 'user', '{"role":"user","content":"Try a different parser"}', '2026-11-01T10:00:01.000Z');
+INSERT INTO tool_calls VALUES (1, 'g1g1g1g1-1111-4111-8111-111111111111', 1, 'c1', 'read_file', '{}', 'completed', '2026-11-20T10:00:03.000Z', '2026-11-20T10:00:04.000Z');
+INSERT INTO tool_calls VALUES (2, 'g1g1g1g1-2222-4222-8222-222222222222', 0, 'c2', 'read_file', '{}', 'completed', '2026-11-01T10:00:03.000Z', NULL);
+INSERT INTO tool_results VALUES (1, 1, 'text', '"file body"', 1, '2026-11-20T10:00:04.000Z');
+INSERT INTO tool_results VALUES (2, 2, 'text', '"other body"', 1, '2026-11-01T10:00:04.000Z');
+INSERT INTO usage_events VALUES (1, 'g1g1g1g1-1111-4111-8111-111111111111', 1, 'chat', 'grok-code', 10, 5, 15, 0, '2026-11-20T10:00:03.000Z');
+INSERT INTO compactions VALUES (1, 'g1g1g1g1-1111-4111-8111-111111111111', 1, 'Summary', 100, '2026-11-20T10:04:00.000Z');

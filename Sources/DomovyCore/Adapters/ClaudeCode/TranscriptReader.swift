@@ -49,6 +49,17 @@ public struct TranscriptReader: Sendable {
         return Transcript(messages: messages, isTruncated: truncated, hiddenLineCount: hidden)
     }
 
+    /// The newest `limit` messages before `cursor`, read from the end of the file.
+    public static func readPage(_ url: URL, limit: Int, before cursor: TranscriptCursor?, masking findings: [SecretFinding] = []) throws -> Transcript {
+        try TranscriptTail.page(of: url, limit: limit, before: cursor, masking: findings) { lines in
+            lines.compactMap { line in
+                guard let object = try? JSONSerialization.jsonObject(with: line.data) as? [String: Any] else { return nil }
+                let cwd = (object["cwd"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                return message(from: object, lineIndex: Int(line.offset), cwd: cwd).map { (line.offset, $0) }
+            }
+        }
+    }
+
     // MARK: Records
 
     private static func message(from object: [String: Any], lineIndex: Int, cwd: String?) -> TranscriptMessage? {

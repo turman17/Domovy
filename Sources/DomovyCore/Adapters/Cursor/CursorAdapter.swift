@@ -38,7 +38,7 @@ public struct CursorAdapter: AgentAdapter {
     /// Convenience for a home directory.
     public init(home: URL) {
         self.init(supportDirectory: home.appendingPathComponent("Library/Application Support/Cursor", isDirectory: true),
-                  dotDirectory: home.appendingPathComponent(".cursor", isDirectory: true))
+                  dotDirectory: home.appendingPathComponent(".cursor", isDirectory: true), openHandles: LibprocOpenHandleChecker.shared)
     }
 
     /// `Application Support/Cursor` and `~/.cursor` (CLI chats, plain-text copies).

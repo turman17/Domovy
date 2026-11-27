@@ -41,7 +41,7 @@ public struct CopilotAdapter: AgentAdapter {
 
     /// Convenience for a home directory: `<home>/.copilot`.
     public init(home: URL) {
-        self.init(copilotHome: home.appendingPathComponent(".copilot", isDirectory: true))
+        self.init(copilotHome: home.appendingPathComponent(".copilot", isDirectory: true), openHandles: LibprocOpenHandleChecker.shared)
     }
 
     // MARK: AgentAdapter
@@ -111,6 +111,11 @@ public struct CopilotAdapter: AgentAdapter {
     public func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript {
         let folder = try locate(session)
         return try CopilotEvents.readTranscript(of: folder.appendingPathComponent("events.jsonl"), maxMessages: limit, masking: findings)
+    }
+
+    public func transcriptPage(of session: Session, limit: Int, before cursor: TranscriptCursor?, masking findings: [SecretFinding]) async throws -> Transcript {
+        let folder = try locate(session)
+        return try CopilotEvents.readPage(of: folder.appendingPathComponent("events.jsonl"), limit: limit, before: cursor, masking: findings)
     }
 
     // MARK: Sessions

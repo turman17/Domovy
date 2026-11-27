@@ -11,16 +11,19 @@ public actor ProcessWatcher {
     private var previousAt: Date?
     private var history: MemoryHistory
     private var remembered: [ProcessKey: AgentKind] = [:]
+    private var herdr: HerdrShellCache?
 
     public init(
         source: any ProcessSource = LibprocProcessSource(),
         sessions: ProcessSessionResolver?,
+        herdr: HerdrClient? = nil,
         policy: GrowthPolicy = .standard,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.source = source
         self.sessions = sessions
         self.now = now
+        self.herdr = herdr.map(HerdrShellCache.init(client:))
         history = MemoryHistory(policy: policy)
     }
 
@@ -31,7 +34,7 @@ public actor ProcessWatcher {
         let elapsed = previousAt.map { date.timeIntervalSince($0) } ?? 0
         history.record(Dictionary(processes.compactMap { p in p.footprintBytes.map { (p.key, $0) } }, uniquingKeysWith: { a, _ in a }), at: date)
         let output = ProcessAnalyzer(source: source, sessions: sessions).analyze(.init(
-            processes: processes, previousCPU: previousCPU, elapsed: elapsed, history: history, remembered: remembered, now: date
+            processes: processes, previousCPU: previousCPU, elapsed: elapsed, history: history, remembered: remembered, herdr: herdr?.map(for: processes), now: date
         ))
         let alive = Set(processes.map(\.key))
         remembered = remembered.filter { alive.contains($0.key) }.merging(output.members) { _, new in new }

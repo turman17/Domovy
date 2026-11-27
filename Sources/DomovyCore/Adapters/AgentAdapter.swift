@@ -74,9 +74,17 @@ public protocol AgentAdapter: FootprintProvider {
     /// planned does not stop the others; its error is in its result.
     func deletePlans(for sessions: [Session], destination: Destination) async -> [PlannedSession]
     func archivePlan(for session: Session) async throws -> Plan
+    /// Archive plans for several sessions of this agent, in order, like `deletePlans`.
+    func archivePlans(for sessions: [Session]) async -> [PlannedSession]
+    /// Live checks for several sessions of this agent, in order, each what `liveCheck` would
+    /// answer. Adapters override it to read shared files and ask the open-file question once.
+    func liveChecks(for sessions: [Session]) async -> [Result<LiveCheckResult, any Error>]
     /// The first `limit` messages of the conversation, for display only. Values of `findings`
     /// in the transcript are replaced by their masked previews before anything is parsed.
     func transcript(of session: Session, limit: Int, masking findings: [SecretFinding]) async throws -> Transcript
+    /// The newest `limit` messages before `cursor` (`nil`: the end of the conversation), for a
+    /// reader that opens at the newest message and loads older pages as it scrolls up.
+    func transcriptPage(of session: Session, limit: Int, before cursor: TranscriptCursor?, masking findings: [SecretFinding]) async throws -> Transcript
 }
 
 extension AgentAdapter {
@@ -85,6 +93,24 @@ extension AgentAdapter {
     /// The first `limit` messages, unmasked.
     public func transcript(of session: Session, limit: Int) async throws -> Transcript {
         try await transcript(of: session, limit: limit, masking: [])
+    }
+
+    /// Messages kept by the default `transcriptPage`, for agents whose transcripts are not
+    /// line-based files that can be read from the end.
+    static var pagedReadLimit: Int { 5_000 }
+
+    /// Pages cut from the first messages the adapter reads. Its own byte budget still applies:
+    /// when that cuts the conversation, `isTruncated` says the newest messages were not reached.
+    public func transcriptPage(of session: Session, limit: Int, before cursor: TranscriptCursor?, masking findings: [SecretFinding]) async throws -> Transcript {
+        let all = try await transcript(of: session, limit: Self.pagedReadLimit, masking: findings)
+        let end = min(cursor.map { Int(max(0, $0.position)) } ?? all.messages.count, all.messages.count)
+        let start = max(0, end - max(0, limit))
+        return Transcript(
+            messages: Array(all.messages[start..<end]),
+            isTruncated: cursor == nil && all.isTruncated,
+            hiddenLineCount: cursor == nil ? all.hiddenLineCount : 0,
+            olderCursor: start > 0 ? TranscriptCursor(Int64(start)) : nil
+        )
     }
 
     /// One plan at a time. Adapters whose plans read shared files override this to read them
@@ -99,6 +125,32 @@ extension AgentAdapter {
             }
         }
         return planned
+    }
+
+    /// One plan at a time, like the default `deletePlans`.
+    public func archivePlans(for sessions: [Session]) async -> [PlannedSession] {
+        var planned: [PlannedSession] = []
+        for session in sessions {
+            do {
+                planned.append(PlannedSession(session: session, result: .success(try await archivePlan(for: session))))
+            } catch {
+                planned.append(PlannedSession(session: session, result: .failure(error)))
+            }
+        }
+        return planned
+    }
+
+    /// One check at a time.
+    public func liveChecks(for sessions: [Session]) async -> [Result<LiveCheckResult, any Error>] {
+        var results: [Result<LiveCheckResult, any Error>] = []
+        for session in sessions {
+            do {
+                results.append(.success(try await liveCheck(session)))
+            } catch {
+                results.append(.failure(error))
+            }
+        }
+        return results
     }
 
     /// Delete plan with the default, reversible destination.

@@ -13,7 +13,7 @@ extension AntigravityAdapter {
             builder.add(prefix + "Settings, sign-in, tools", AntigravityStore.protectedEntries.sorted().map { store.root.appendingPathComponent($0) },
                         reveal: store.root, .keep, "Antigravity needs these to run. Domovy never removes them.")
             builder.add(prefix + "Conversations", [store.conversations, store.brain, store.annotations], reveal: store.root, .consequences,
-                        "\(count) \(count == 1 ? "conversation" : "conversations") and their brain folders. Antigravity keeps the newest \(Self.conversationCap); delete others in Antigravity itself.",
+                        "\(count) \(count == 1 ? "conversation" : "conversations") and their brain folders. Antigravity keeps the newest \(Self.conversationCap). Delete or archive them in Sessions.",
                         guidance: .manageInSessions)
             builder.add(prefix + "Implicit memory", store.root.appendingPathComponent("implicit", isDirectory: true), .consequences,
                         "What Antigravity learned across conversations. It starts over without it.")

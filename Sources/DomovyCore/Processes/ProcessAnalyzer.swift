@@ -15,6 +15,8 @@ struct ProcessAnalyzer {
         var history: MemoryHistory = MemoryHistory(policy: .standard)
         /// Processes seen in an agent's tree earlier, so they are recognised once orphaned.
         var remembered: [ProcessKey: AgentKind] = [:]
+        /// Herdr pane shells, so each agent tree is labelled with its workspace and pane.
+        var herdr: HerdrProcessMap?
         var now = Date()
     }
 
@@ -111,15 +113,19 @@ struct ProcessAnalyzer {
 
         let groups = roots.compactMap { pid -> ProcessGroup? in
             guard let agent = agentOf[pid], let root = node(pid, agent: agent, rootAgent: agent, isRoot: true, orphan: false) else { return nil }
-            return ProcessGroup(root: root)
+            return ProcessGroup(root: root, herdr: input.herdr?.placement(of: pid, table: table))
         }.sorted { $0.root.totalBytes > $1.root.totalBytes }
 
         // Orphans: your processes reparented to launchd that an agent started, by memory of an
         // earlier sample, by where their executable lives, or because they look like MCP servers.
+        // Anything Herdr runs (its server, and every pane below it) still has a home: never an orphan.
+        func runsUnderHerdr(_ process: RawProcess) -> Bool {
+            HerdrProcessMap.isHerdr(process) || Self.ancestors(of: process.pid, table: table).contains { table[$0].map(HerdrProcessMap.isHerdr) == true }
+        }
         let inTrees = Set(members.keys.map(\.pid))
         let orphans = input.processes.compactMap { process -> ProcessNode? in
             guard process.ppid == 1, process.uid == me, agentOf[process.pid] == nil, !inTrees.contains(process.pid),
-                  !ProcessClassifier.isSystem(process), !protected.contains(process.pid) else { return nil }
+                  !ProcessClassifier.isSystem(process), !protected.contains(process.pid), !runsUnderHerdr(process) else { return nil }
             let hint = input.remembered[process.key] ?? ProcessClassifier.agentHint(path: process.executablePath)
             guard hint != nil || isMCP(process) else { return nil }
             return node(process.pid, agent: hint, rootAgent: nil, isRoot: true, orphan: true)
