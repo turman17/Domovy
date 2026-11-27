@@ -23,11 +23,14 @@ struct SessionsView: View {
     let search: String
 
     @Environment(SessionLibrary.self) private var library
-    @State private var selection: Set<Session.ID> = Set([AppEnvironment.startSelection].compactMap { $0 })
+    /// Rows and selection. Only the views that read the selection redraw when it changes.
+    @State private var model = SessionsTableModel(selection: Set([AppEnvironment.startSelection].compactMap { $0 }))
     @State private var statusFilter: StatusFilter = .all
-    @State private var sortOrder = [KeyPathComparator(\SessionRow.lastActive, order: .reverse)]
-    /// Column widths, kept here so they survive the table being rebuilt on a sort.
-    @State private var columns = TableColumnCustomization<SessionRow>()
+    /// Starts on Settings > Sessions > Sort sessions by.
+    @State private var sortOrder = SessionColumn.sortOrder(AppSettings.shared.settings.defaultSort)
+    /// Column widths, kept here so they survive the table being rebuilt on a sort. Which
+    /// columns show is a setting, kept in step both ways.
+    @State private var columns = SessionColumn.customization(hidden: AppSettings.shared.settings.hiddenColumns)
     @State private var showInspector = true
     @State private var dismissedBanners: Set<AgentKind> = []
     @State private var deleteRequest: DeleteRequest?
@@ -37,19 +40,37 @@ struct SessionsView: View {
     @State private var redactRequest: RedactRequest?
     @State private var purgeRequest: PurgeRequest?
     @State private var showsFlaggedOnly = false
+    /// List or By Project: Settings > Sessions, kept across launches.
+    private var layout: SessionsLayout { AppSettings.shared.settings.sessionsLayout }
     /// The popover's filter for a moment after it arrives, so the sidebar switch it causes
     /// does not reset it.
     @State private var requestedFilter: StatusFilter?
     @State private var errorMessage: String?
+    /// `search` once typing rests: each filter pass redraws the table.
+    @State private var appliedSearch = ""
+    @State private var searchPace = LoadPace(delay: .milliseconds(150))
+    /// The column sort from before a transcript search put its matches best first.
+    @State private var sortBeforeSearch: [KeyPathComparator<SessionRow>]?
 
-    /// Every session as a row, text formatted once per reload or scan, so scrolling draws
-    /// cells without formatting and sorting only reorders.
+    /// Empties the toolbar search, which ContentView owns.
+    let clearSearch: () -> Void
+
+    init(agentFilter: AgentKind?, search: String, clearSearch: @escaping () -> Void) {
+        self.agentFilter = agentFilter
+        self.search = search
+        self.clearSearch = clearSearch
+        _appliedSearch = State(initialValue: search)
+    }
+
+    /// Every session as a row, text formatted off the main actor once per reload or scan, so
+    /// scrolling draws cells without formatting and sorting only reorders.
     @State private var allRows: [SessionRow] = []
-    /// `allRows` filtered and sorted for the table.
-    @State private var rows: [SessionRow] = []
+    /// The data `allRows` was built from; until it matches `rowData`, no empty state shows.
+    @State private var builtRowData: RowData?
 
     private var rowData: RowData {
-        RowData(sessions: library.sessions, findingCounts: library.secretFindings.mapValues(\.count))
+        RowData(revision: library.revision, findingCounts: library.secretFindings.mapValues(\.count),
+                tokenRevision: library.tokenRevision, busy: library.busySessions)
     }
 
     private var rowView: RowView {
@@ -57,64 +78,43 @@ struct SessionsView: View {
             agentFilter: agentFilter,
             statusFilter: statusFilter,
             showsFlaggedOnly: showsFlaggedOnly,
-            search: search,
+            search: isTranscriptSearch ? "" : appliedSearch,
             sortOrder: sortOrder
         )
     }
 
-    /// Selected sessions in table order.
-    private var selectedSessions: [Session] {
-        guard !selection.isEmpty else { return [] }
-        return rows.lazy.filter { selection.contains($0.id) }.map(\.session)
+    private var isTranscriptSearch: Bool { library.transcriptSearch.scope == .transcripts && !appliedSearch.isEmpty }
+
+    /// The rows on screen: the filters, then the transcript search's matches when it is on.
+    private func visibleRows(_ rows: [SessionRow]) -> [SessionRow] {
+        let shown = rowView.apply(to: rows)
+        return isTranscriptSearch ? library.transcriptSearch.filter(shown, byRelevance: sortOrder.isEmpty) : shown
     }
 
-    /// The one selected session, or nil when none or several are selected.
-    private var selectedSession: Session? {
-        guard selection.count == 1, let id = selection.first else { return nil }
-        return library.sessions.first { $0.id == id }
+    /// A transcript search shows its matches best first until a column is clicked; the column
+    /// sort from before comes back when it ends.
+    private func useRelevanceSort(_ on: Bool) {
+        if on, sortBeforeSearch == nil {
+            sortBeforeSearch = sortOrder
+            sortOrder = []
+        } else if !on, let previous = sortBeforeSearch {
+            if sortOrder.isEmpty { sortOrder = previous }
+            sortBeforeSearch = nil
+        }
     }
 
-    /// What Quick Look, Get Info and scrolling use: the first selected row.
-    private var primarySession: Session? {
-        selectedSession ?? selectedSessions.first
-    }
-
-    private var canDeleteSelection: Bool {
-        selectedSessions.contains(where: canDelete)
-    }
-
-    private func canDelete(_ session: Session) -> Bool {
-        session.status != .live && library.busySessions[session.id] == nil
-    }
-
-    private var canArchiveSelection: Bool {
-        selectedSessions.contains(where: canArchive)
-    }
-
-    private func canArchive(_ session: Session) -> Bool {
-        session.status != .live && !session.isArchived && session.canArchive && library.readOnlyAgents[session.agent] == nil
-            && library.busySessions[session.id] == nil
-    }
-
-    /// One retention banner per agent whose sweep is about to take sessions.
-    private var banners: [(rule: RetentionRule, sessions: [Session])] {
-        library.expiringByAgent.filter { !dismissedBanners.contains($0.rule.agent) && (agentFilter == nil || agentFilter == $0.rule.agent) }
-    }
+    private var selectedSessions: [Session] { model.selectedSessions }
+    private var selectedSession: Session? { model.selectedSession }
+    private var primarySession: Session? { model.primarySession }
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(banners, id: \.rule.agent) { banner in
-                let archivable = banner.sessions.filter { !$0.isArchived }
-                RetentionBanner(
-                    rule: banner.rule,
-                    sessions: banner.sessions,
-                    withinDays: library.expiringWithinDays(banner.sessions),
-                    archivableCount: banner.rule.canArchive ? archivable.count : 0,
-                    onArchiveAll: { requestArchive(archivable) },
-                    onReview: { statusFilter = .expiring },
-                    onDismiss: { dismissedBanners.insert(banner.rule.agent) }
-                )
-            }
+            RetentionBanners(
+                agentFilter: agentFilter,
+                dismissed: $dismissedBanners,
+                onArchiveAll: { requestArchive($0) },
+                onReview: { statusFilter = .expiring }
+            )
             if library.secretScan != .idle {
                 SecretScanBanner(
                     state: library.secretScan,
@@ -128,37 +128,65 @@ struct SessionsView: View {
                     }
                 )
             }
-            table
+            if hasActiveFilters {
+                ActiveFiltersBar(
+                    search: search,
+                    statusFilter: statusFilter,
+                    showsFlaggedOnly: showsFlaggedOnly,
+                    onClearSearch: clearSearch,
+                    onClearStatus: { statusFilter = .all },
+                    onClearFlagged: { showsFlaggedOnly = false },
+                    onClearAll: clearFilters
+                )
+                Divider()
+            }
+            sessionsContent
+                .tourAnchor(.sessionsList)
         }
+        .onExitCommand { if hasActiveFilters { clearFilters() } }
         .overlay { emptyState }
         .overlay(alignment: .bottom) { toastOverlay }
         .navigationTitle(showsFlaggedOnly ? "Flagged by the secret scan" : statusFilter == .expiring ? "Expiring soon" : (agentFilter?.displayName ?? "Sessions"))
-        .navigationSubtitle("\(rows.count) \(rows.count == 1 ? "session" : "sessions") · \(rows.reduce(0) { $0 + $1.sizeBytes }.formatted(.byteCount(style: .file)))")
-        .onChange(of: rowData, initial: true) { _, data in
-            allRows = data.sessions.map { SessionRow($0, secretCount: data.findingCounts[$0.id] ?? 0) }
-            rows = rowView.apply(to: allRows)
+        .navigationSubtitle(model.subtitle)
+        .task(id: rowData) {
+            let data = rowData
+            let built = await SessionRow.build(library.sessions, findingCounts: data.findingCounts, tokens: library.tokenUsage,
+                                               tokenAgents: library.tokenAgents, busy: data.busy)
+            guard !Task.isCancelled else { return }
+            allRows = built
+            model.setAll(built)
+            model.setRows(visibleRows(built))
+            builtRowData = data
         }
-        .onChange(of: rowView) { _, view in rows = view.apply(to: allRows) }
+        .task(id: search) {
+            #if DEBUG
+            // The harness times the filter itself, not the wait.
+            if AppEnvironment.perfEnabled { appliedSearch = search; return }
+            #endif
+            guard await searchPace.wait() else { return }
+            appliedSearch = search
+        }
+        .onChange(of: rowView) { old, view in
+            model.setRows(visibleRows(allRows), reordered: old.sortOrder != view.sortOrder)
+        }
+        .onChange(of: library.transcriptSearch.revision) { model.setRows(visibleRows(allRows)) }
+        .onChange(of: isTranscriptSearch ? appliedSearch : "", initial: true) { _, text in
+            library.transcriptSearch.search(text)
+            useRelevanceSort(!text.isEmpty)
+        }
         .onChange(of: library.sessions.isEmpty) { _, isEmpty in
             if !isEmpty, AppEnvironment.opensInfoAtLaunch, infoSession == nil { infoSession = primarySession }
         }
         .toolbar { toolbar }
+        #if DEBUG
+        .onAppear { PerfDriver.shared.rowIDs = { [model] in model.rows.map(\.id) } }
+        // In a child view, so a command does not redraw the whole sessions view by itself.
+        .background { PerfHook(handle: perfHandle) }
+        #endif
         .inspector(isPresented: $showInspector) {
-            if selection.count > 1 {
-                SelectionSummary(
-                    sessions: selectedSessions,
-                    canArchive: canArchiveSelection,
-                    canDelete: canDeleteSelection,
-                    onArchive: requestArchiveSelection,
-                    onDelete: requestDelete
-                )
-                .inspectorColumnWidth(min: 260, ideal: 300, max: 420)
-            } else if let selectedSession {
-                SessionInspector(session: selectedSession, onArchive: requestArchiveSelection, onDelete: requestDelete, onRedact: requestRedact)
-                    .inspectorColumnWidth(min: 260, ideal: 300, max: 420)
-            } else {
-                ContentUnavailableView("No session selected", systemImage: "bubble.left.and.text.bubble.right", description: Text("Select a session to read it."))
-            }
+            SelectionInspector(model: model, onArchive: requestArchiveSelection, onDelete: requestDelete, onRedact: requestRedact)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .tourAnchor(.inspector)
         }
         .sheet(item: $deleteRequest) { request in
             DeletePlanSheet(request: request)
@@ -217,94 +245,62 @@ struct SessionsView: View {
     // MARK: Pieces
 
     private var table: some View {
-        ScrollViewReader { proxy in
-            sessionsTable
-                // A new sort rebuilds the table: letting it animate every row to its new
-                // place takes AppKit seconds with hundreds of rows.
-                .id(sortOrder.map { "\($0.keyPath)\($0.order == .forward)" })
-                .onChange(of: sortOrder) {
-                    guard let first = primarySession?.id else { return }
-                    Task { proxy.scrollTo(first, anchor: .center) }
-                }
+        SessionsTable(model: model, sortOrder: $sortOrder, columns: $columns) { ids in
+            // Right-clicking inside a selection gives the whole selection, like the Finder.
+            if ids.count > 1 {
+                selectionMenu(for: model.rows.filter { ids.contains($0.id) }.map(\.session))
+            } else if let id = ids.first, let session = model.session(id) {
+                rowMenu(for: session)
+            }
+        } onOpen: { previewSession = $0 } onDelete: { requestDelete() }
+        .onChange(of: columns) { _, columns in
+            let hidden = SessionColumn.hidden(in: columns)
+            if hidden != AppSettings.shared.settings.hiddenColumns { AppSettings.shared.update { $0.hiddenColumns = hidden } }
+        }
+        .onChange(of: AppSettings.shared.settings.hiddenColumns) { _, hidden in
+            if hidden != SessionColumn.hidden(in: columns) { SessionColumn.apply(hidden: hidden, to: &columns) }
         }
     }
 
-    private var sessionsTable: some View {
-        Table(rows, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columns) {
-            TableColumn("Title", value: \.title) { row in
-                HStack(spacing: 6) {
-                    if row.memberCount > 1 {
-                        Image(systemName: "square.stack")
-                            .foregroundStyle(.secondary)
-                            .help("\(row.memberCount) chats shown as one row")
-                    }
-                    Text(row.title).lineLimit(1)
-                }
-            }
-                .width(min: 180, ideal: 320)
-                .customizationID("title")
-            TableColumn("Agent", value: \.agentLabel) { row in
-                HStack(spacing: 6) {
-                    AgentGlyph(agent: row.session.agent)
-                    Text(row.agentLabel)
-                        .lineLimit(1)
-                }
-                .help(row.agentHelp)
-            }
-            .width(min: 100, ideal: 150)
-            .customizationID("agent")
-            TableColumn("Project", value: \.project) { Text($0.project.isEmpty ? "—" : $0.project).foregroundStyle(.secondary) }
-                .width(min: 80, ideal: 100)
-                .customizationID("project")
-            TableColumn("Last active", value: \.lastActive) { row in
-                Text(row.relativeDate)
-                    .foregroundStyle(.secondary)
-                    .help(row.absoluteDate)
-            }
-                .width(min: 90, ideal: 100)
-                .customizationID("lastActive")
-            TableColumn("Size", value: \.sizeBytes) { row in
-                Text(row.sizeText)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .help(row.exactBytes)
-            }
-            .width(min: 60, ideal: 70)
-            .customizationID("size")
-            TableColumn("Status", value: \.statusSortKey) { row in
-                HStack(spacing: 6) {
-                    if let status = library.busySessions[row.id] {
-                        Label {
-                            Text(status)
-                        } icon: {
-                            ProgressView().controlSize(.mini)
-                        }
-                        .foregroundStyle(.secondary)
-                    } else {
-                        StatusLabel(session: row.session)
-                    }
-                    SecretMarker(count: row.secretCount)
-                }
-            }
-            .width(min: 96, ideal: 116)
-            .customizationID("status")
+    /// The list or the projects outline, with File > Export Transcript… for the selection.
+    private var sessionsContent: some View {
+        Group {
+            if layout == .projects { projectsView } else { table }
         }
-        .contextMenu(forSelectionType: Session.ID.self) { ids in
-            // Right-clicking inside a selection gives the whole selection, like the Finder.
-            if ids.count > 1 {
-                selectionMenu(for: rows.filter { ids.contains($0.id) }.map(\.session))
-            } else if let id = ids.first, let session = library.sessions.first(where: { $0.id == id }) {
-                rowMenu(for: session)
-            }
-        } primaryAction: { ids in
-            if let session = rows.first(where: { ids.contains($0.id) })?.session { previewSession = session }
+        .focusedSceneValue(\.exportTranscripts, exportAction)
+        .focusedSceneValue(\.sessionCommands, sessionCommands)
+    }
+
+    /// The Session menu: the same actions as the toolbar, with their shortcuts.
+    private var sessionCommands: SessionCommands {
+        let primary = model.primarySession
+        let sessions = model.selectedSessions
+        // Assigned one by one: the memberwise call crashes the Swift 6.4 type checker.
+        var commands = SessionCommands()
+        if let primary {
+            commands.quickLook = { previewSession = primary }
+            commands.getInfo = { infoSession = primary }
         }
-        .onDeleteCommand(perform: requestDelete)
-        .onKeyPress(.space) {
-            guard let primarySession else { return .ignored }
-            previewSession = primarySession
-            return .handled
+        if sessions.contains(where: library.canArchive) { commands.archive = { requestArchiveSelection() } }
+        if sessions.contains(where: library.canDelete) { commands.delete = { requestDelete() } }
+        return commands
+    }
+
+    private var exportAction: ExportAction? {
+        guard !model.selectedSessions.isEmpty else { return nil }
+        return ExportAction { [model, library] in TranscriptExporter.export(model.selectedSessions, library: library) }
+    }
+
+    private var projectsView: some View {
+        ProjectsView(rows: model.rows) { ids in
+            model.selection = ids
+        } onOpen: { previewSession = $0 } onArchive: { sessions in
+            if sessions.count == 1 { requestArchive(sessions.filter(library.canArchive)) } else { requestArchiveBatch(sessions) }
+        } onDelete: { requestDelete($0) } onExport: {
+            TranscriptExporter.export($0, library: library)
+        } onShowInList: { group in
+            AppSettings.shared.update { $0.sessionsLayout = .list }
+            library.requestedSearch = group.name
         }
     }
 
@@ -320,8 +316,9 @@ struct SessionsView: View {
             }
         }
         Divider()
+        ResumeButtons(session: session)
         if let command = resumeCommand(for: session) {
-            Button("Copy Resume Command", systemImage: "terminal") { copyToPasteboard(command) }
+            Button("Copy Resume Command", systemImage: "doc.on.doc") { copyToPasteboard(command) }
         }
         Button("Copy Session ID", systemImage: "number") { copyToPasteboard(session.id) }
         Button("Copy Transcript Path", systemImage: "doc.on.doc") { copyToPasteboard(session.transcriptURL.path) }
@@ -333,18 +330,30 @@ struct SessionsView: View {
             library.requestedSearch = session.projectName
         }
         .disabled(session.projectName == nil)
+        .help(session.projectName == nil ? "This session has no project folder" : "")
         Button("Scan for Secrets", systemImage: "key") { library.scanSecrets([session]) }
+        Button("Export Transcript\u{2026}", systemImage: "square.and.arrow.up") { TranscriptExporter.export([session], library: library) }
         Divider()
         Button("Archive\u{2026}", systemImage: "archivebox") {
-            selection = [session.id]
+            model.selection = [session.id]
             requestArchive([session])
         }
-        .disabled(!canArchive(session))
+        .disabled(!library.canArchive(session))
+        .help(library.canArchive(session) ? "" : library.readOnlyNote(for: session) ?? unavailableReason(session, archiving: true))
         Button("Move to Trash\u{2026}", systemImage: "trash") {
-            selection = [session.id]
+            model.selection = [session.id]
             requestDelete([session])
         }
-        .disabled(!canDelete(session))
+        .disabled(!library.canDelete(session))
+        .help(library.canDelete(session) ? "" : library.readOnlyNote(for: session) ?? unavailableReason(session, archiving: false))
+    }
+
+    /// Why Archive or Move to Trash is off for a session the agent lets Domovy change.
+    private func unavailableReason(_ session: Session, archiving: Bool) -> String {
+        if session.status == .live { return "This session is live. Quit the \(session.agent.displayName) session using it first." }
+        if archiving, session.isArchived { return "This session is already archived." }
+        if library.busySessions[session.id] != nil { return "This session is still being archived or moved." }
+        return archiving ? "This session has no file to compress." : "This session can\u{2019}t be moved right now."
     }
 
     /// Right-click menu on several rows: actions that make sense for all of them at once.
@@ -355,16 +364,19 @@ struct SessionsView: View {
             copyToPasteboard(sessions.map(\.id).joined(separator: "\n"))
         }
         Button("Scan \(n) for Secrets", systemImage: "key") { library.scanSecrets(sessions) }
+        Button("Export \(n) Transcripts\u{2026}", systemImage: "square.and.arrow.up") { TranscriptExporter.export(sessions, library: library) }
         Divider()
         Button("Archive \(n) Sessions\u{2026}", systemImage: "archivebox") { requestArchiveBatch(sessions) }
-            .disabled(!sessions.contains(where: canArchive))
+            .disabled(!sessions.contains(where: library.canArchive))
+            .help(library.commonReadOnlyNote(for: sessions) ?? "")
         Button("Move \(n) Sessions to Trash\u{2026}", systemImage: "trash") { requestDelete(sessions) }
-            .disabled(!sessions.contains(where: canDelete))
+            .disabled(!sessions.contains(where: library.canDelete))
+            .help(library.commonReadOnlyNote(for: sessions) ?? "")
     }
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        if AppEnvironment.isDevHome {
+        if AppEnvironment.isDevHome, !AppEnvironment.isScreenshot {
             ToolbarItem {
                 Label("Dev home", systemImage: "hammer")
                     .labelStyle(.titleAndIcon)
@@ -383,6 +395,14 @@ struct SessionsView: View {
             }
         }
         ToolbarItem {
+            Picker("View", selection: AppSettings.shared.binding(\.sessionsLayout)) {
+                Label("List", systemImage: "list.bullet").tag(SessionsLayout.list)
+                Label("By Project", systemImage: "folder").tag(SessionsLayout.projects)
+            }
+            .pickerStyle(.segmented)
+            .help(layout == .list ? "Show sessions grouped by project folder" : "Show every session in one list")
+        }
+        ToolbarItem {
             Menu {
                 Picker("Status", selection: $statusFilter) {
                     ForEach(StatusFilter.allCases) { filter in
@@ -396,66 +416,27 @@ struct SessionsView: View {
             .help(statusFilter == .all ? "Filter by status" : "Showing \(statusFilter.rawValue.lowercased()) sessions")
         }
         ToolbarItem {
-            Menu {
-                Button("Scan All Sessions") { library.scanSecrets(library.sessions) }
-                Button(selection.count > 1 ? "Scan \(selection.count) Selected Sessions" : "Scan Selected Session") {
-                    library.scanSecrets(selectedSessions)
-                }
-                .disabled(selection.isEmpty)
-                Divider()
-                Button("Redact Selected Session\u{2026}", action: requestRedact)
-                    .disabled(!canRedactSelection)
-                Button("Purge Originals\u{2026}", action: requestPurge)
-            } label: {
-                Label("Secrets", systemImage: library.flaggedSessionCount > 0 ? "key.fill" : "key")
-            }
-            .help("Scan transcripts for API keys, tokens and passwords (\u{21E7}\u{2318}S)")
+            SecretsMenu(model: model, onRedact: requestRedact, onPurge: requestPurge)
         }
         ToolbarItemGroup {
-            Button("Archive…", systemImage: "archivebox", action: requestArchiveSelection)
-                .keyboardShortcut("a", modifiers: [.command, .option])
-                .disabled(!canArchiveSelection)
-                .help(archiveHelp)
-            Button("Delete…", systemImage: "trash", action: requestDelete)
-                .keyboardShortcut(.delete, modifiers: .command)
-                .disabled(!canDeleteSelection)
-                .help(deleteHelp)
-            Button("Get Info", systemImage: "info.circle") { infoSession = primarySession }
-                .keyboardShortcut("i", modifiers: .command)
-                .disabled(primarySession == nil)
-                .help("Everything Domovy knows about this session (\u{2318}I)")
+            ArchiveButton(model: model, action: requestArchiveSelection)
+            DeleteButton(model: model, action: requestDelete)
+            GetInfoButton(model: model) { infoSession = model.primarySession }
             Button("Inspector", systemImage: "sidebar.trailing") { showInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])
                 .help("Show or hide the transcript")
         }
     }
 
-    private var canRedactSelection: Bool {
-        guard let selectedSession, selectedSession.status != .live else { return false }
-        return library.findings(for: selectedSession).contains(where: \.isRedactable)
+    private var hasActiveFilters: Bool {
+        !search.isEmpty || statusFilter != .all || showsFlaggedOnly
     }
 
-    private var archiveHelp: String {
-        if selection.count > 1 {
-            let n = selectedSessions.filter(canArchive).count
-            return n == 0
-                ? "None of the selected sessions can be archived: they are live, already archived or read-only."
-                : "Compress \(n) of the \(selection.count) selected sessions on disk; the others are left alone (⌥⌘A)"
-        }
-        guard let selectedSession else { return "Select a session to archive it" }
-        if selectedSession.status == .live { return "This session is live. Quit the Claude Code session using it first." }
-        if selectedSession.isArchived { return "This session is already archived." }
-        return "Compress this session on disk; Claude Code can still resume it (⌥⌘A)"
-    }
-
-    private var deleteHelp: String {
-        if selection.count > 1 {
-            let n = selectedSessions.filter { $0.status != .live }.count
-            return n == 0 ? "All selected sessions are live." : "Move \(n) selected \(n == 1 ? "session" : "sessions") to the Trash; live ones are left alone (⌘⌫)"
-        }
-        guard let selectedSession else { return "Select a session to delete it" }
-        if selectedSession.status == .live { return "This session is live. Quit the Claude Code session using it first." }
-        return "Move this session to the Trash (⌘⌫)"
+    /// Back to every session of the sidebar's choice: search, status and flagged-only off.
+    private func clearFilters() {
+        clearSearch()
+        statusFilter = .all
+        showsFlaggedOnly = false
     }
 
     /// "No Antigravity sessions expire soon": what the filters left out, in plain words.
@@ -474,22 +455,33 @@ struct SessionsView: View {
     @ViewBuilder
     private var emptyState: some View {
         if library.sessions.isEmpty && !library.isLoading {
-            ContentUnavailableView(
-                "All tidy",
-                systemImage: "house",
-                description: Text(library.errorMessage ?? "No agent sessions in this home folder. The house is in order.")
-            )
-        } else if rows.isEmpty && !library.isLoading {
-            if !search.isEmpty {
-                ContentUnavailableView.search(text: search)
+            if let error = library.errorMessage {
+                ContentUnavailableView("Couldn\u{2019}t Read Sessions", systemImage: "exclamationmark.triangle", description: Text(error))
+            } else if !AppSettings.shared.settings.hiddenAgents.isEmpty {
+                ContentUnavailableView("No Sessions Shown", systemImage: "eye.slash",
+                                       description: Text("Some agents are hidden in Settings > Agents. The others have no sessions."))
+            } else {
+                ContentUnavailableView("All tidy", systemImage: "house",
+                                       description: Text("No agent sessions in this home folder. The house is in order."))
+            }
+        } else if model.rows.isEmpty && !library.isLoading && builtRowData == rowData {
+            if library.transcriptSearch.scope == .transcripts, !search.isEmpty, library.transcriptSearch.isPending(for: search) {
+                TranscriptSearchPending(text: library.transcriptSearch.progressText)
+            } else if !search.isEmpty {
+                ContentUnavailableView {
+                    Label("No Results for \u{201C}\(search)\u{201D}", systemImage: "magnifyingglass")
+                } description: {
+                    Text(library.transcriptSearch.scope == .transcripts
+                        ? "Nothing in these transcripts matches."
+                        : "No titles, projects or session IDs match. You can also search inside transcripts.")
+                } actions: {
+                    Button("Clear Filters", action: clearFilters)
+                }
             } else {
                 ContentUnavailableView {
                     Label(filteredEmptyTitle, systemImage: "line.3.horizontal.decrease.circle")
                 } actions: {
-                    Button("Show All Sessions") {
-                        statusFilter = .all
-                        showsFlaggedOnly = false
-                    }
+                    Button("Show All Sessions", action: clearFilters)
                 }
             }
         }
@@ -514,7 +506,7 @@ struct SessionsView: View {
     private func requestArchiveSelection() {
         let sessions = selectedSessions
         if sessions.count == 1 {
-            guard canArchiveSelection else { return }
+            guard sessions.contains(where: library.canArchive) else { return }
             requestArchive(sessions)
         } else {
             requestArchiveBatch(sessions)
@@ -523,15 +515,16 @@ struct SessionsView: View {
 
     /// Archives what can be archived and says what was left alone.
     private func requestArchiveBatch(_ sessions: [Session]) {
-        let archivable = sessions.filter(canArchive)
+        let archivable = sessions.filter(library.canArchive)
         guard !archivable.isEmpty else { return }
-        var notes: [String] = []
-        let live = sessions.filter { $0.status == .live }.count
+        var notes = library.readOnlyNotes(for: sessions)
+        let writable = sessions.filter { library.readOnlyAgents[$0.agent] == nil }
+        let live = writable.filter { $0.status == .live }.count
         if live > 0 { notes.append(Self.leftAlone(live, "live")) }
-        let archived = sessions.filter { $0.status != .live && $0.isArchived }.count
+        let archived = writable.filter { $0.status != .live && $0.isArchived }.count
         if archived > 0 { notes.append(Self.leftAlone(archived, "already archived")) }
-        let other = sessions.count - archivable.count - live - archived
-        if other > 0 { notes.append("\(other) \(other == 1 ? "session" : "sessions") from a read-only agent or with nothing to compress \(other == 1 ? "is" : "are") left alone.") }
+        let other = writable.count - archivable.count - live - archived
+        if other > 0 { notes.append("\(other) \(other == 1 ? "session has" : "sessions have") no file to compress or \(other == 1 ? "is" : "are") still being changed, and \(other == 1 ? "is" : "are") left alone.") }
         requestArchive(archivable, notes: notes)
     }
 
@@ -548,7 +541,7 @@ struct SessionsView: View {
     }
 
     private func requestRedact() {
-        guard let session = selectedSession, canRedactSelection else { return }
+        guard let session = selectedSession, library.canRedact(session) else { return }
         Task {
             do {
                 redactRequest = RedactRequest(session: session, plan: try await library.redactionPlan(for: session))
@@ -575,80 +568,326 @@ struct SessionsView: View {
     /// Opens the confirmation sheet at once; it plans the sessions while showing a spinner.
     /// Live sessions and ones still being archived or moved are left out with a note.
     private func requestDelete(_ sessions: [Session]) {
-        let candidates = sessions.filter(canDelete)
+        let candidates = sessions.filter(library.canDelete)
         guard !candidates.isEmpty else { return }
         // The Trash keeps plaintext until it is emptied; flagged sessions default to the quarantine.
         let flagged = candidates.contains { !library.findings(for: $0).isEmpty }
-        var notes: [String] = []
-        let live = sessions.filter { $0.status == .live }.count
+        var notes = library.readOnlyNotes(for: sessions)
+        let live = sessions.filter { $0.status == .live && library.readOnlyAgents[$0.agent] == nil }.count
         if live > 0 { notes.append(Self.leftAlone(live, "live")) }
         let busy = sessions.filter { $0.status != .live && library.busySessions[$0.id] != nil }.count
         if busy > 0 { notes.append("\(busy) \(busy == 1 ? "session is" : "sessions are") still being archived or moved, and left alone.") }
-        deleteRequest = DeleteRequest(sessions: candidates, destination: flagged ? .quarantine : .trash, notes: notes)
+        deleteRequest = DeleteRequest(sessions: candidates, destination: flagged ? .quarantine : AppSettings.shared.settings.deleteDestination, notes: notes)
     }
 }
 
 /// What the rows are made of: rebuilt (and formatted) only when this changes.
 struct RowData: Equatable {
-    let sessions: [Session]
+    /// `SessionLibrary.revision`: comparing it stands in for comparing every session.
+    let revision: Int
     let findingCounts: [Session.ID: Int]
+    /// `SessionLibrary.tokenRevision`.
+    let tokenRevision: Int
+    /// Sessions a background action works on, shown in the Status column.
+    let busy: [Session.ID: String]
 }
 
-/// How the rows are shown: changing it filters and sorts the formatted rows again.
-struct RowView: Equatable {
-    let agentFilter: AgentKind?
-    let statusFilter: StatusFilter
-    let showsFlaggedOnly: Bool
-    let search: String
-    let sortOrder: [KeyPathComparator<SessionRow>]
+extension SessionLibrary {
+    func canDelete(_ session: Session) -> Bool {
+        session.status != .live && readOnlyAgents[session.agent] == nil && busySessions[session.id] == nil
+    }
 
-    func apply(to rows: [SessionRow]) -> [SessionRow] {
-        rows
-            .filter { row in
-                let session = row.session
-                return (agentFilter == nil || session.agent == agentFilter)
-                    && statusFilter.matches(session)
-                    && (!showsFlaggedOnly || row.secretCount > 0)
-                    && (search.isEmpty
-                        || row.title.localizedCaseInsensitiveContains(search)
-                        || row.project.localizedCaseInsensitiveContains(search))
-            }
-            .sorted(using: sortOrder)
+    /// Why Domovy only reads this session's agent, in one plain line; `nil` when it may change it.
+    func readOnlyNote(for session: Session) -> String? {
+        readOnlyAgents[session.agent].map { "\(session.agent.displayName) is read-only in Domovy for now: \($0)" }
+    }
+
+    /// "8 Antigravity sessions are left alone: …", one line per read-only agent in `sessions`.
+    func readOnlyNotes(for sessions: [Session]) -> [String] {
+        var order: [AgentKind] = []
+        var counts: [AgentKind: Int] = [:]
+        for session in sessions where readOnlyAgents[session.agent] != nil {
+            if counts[session.agent] == nil { order.append(session.agent) }
+            counts[session.agent, default: 0] += 1
+        }
+        return order.compactMap { agent in
+            guard let n = counts[agent], let reason = readOnlyAgents[agent] else { return nil }
+            return "\(n) \(agent.displayName) \(n == 1 ? "session is" : "sessions are") left alone: \(reason)"
+        }
+    }
+
+    /// The read-only line shared by every session in `sessions`, when all are of read-only agents.
+    func commonReadOnlyNote(for sessions: [Session]) -> String? {
+        guard !sessions.isEmpty, sessions.allSatisfy({ readOnlyAgents[$0.agent] != nil }) else { return nil }
+        let agents = Set(sessions.map(\.agent))
+        if agents.count == 1, let first = sessions.first { return readOnlyNote(for: first) }
+        return "These agents are read-only in Domovy for now: " + agents.map(\.displayName).sorted().joined(separator: ", ") + "."
+    }
+
+    func canArchive(_ session: Session) -> Bool {
+        session.status != .live && !session.isArchived && session.canArchive && readOnlyAgents[session.agent] == nil
+            && busySessions[session.id] == nil
+    }
+
+    func canRedact(_ session: Session) -> Bool {
+        session.status != .live && findings(for: session).contains(where: \.isRedactable)
     }
 }
 
-/// One sessions-table row with its text formatted up front: cells only read strings.
-struct SessionRow: Identifiable, Equatable {
-    let session: Session
-    let title: String
-    let agentLabel: String
-    let agentHelp: String
-    let project: String
-    let lastActive: Date
-    let relativeDate: String
-    let absoluteDate: String
-    let sizeBytes: Int64
-    let sizeText: String
-    let exactBytes: String
-    let statusSortKey: String
-    let secretCount: Int
+/// One retention banner per agent whose sweep is about to take sessions.
+private struct RetentionBanners: View {
+    let agentFilter: AgentKind?
+    @Binding var dismissed: Set<AgentKind>
+    let onArchiveAll: ([Session]) -> Void
+    let onReview: () -> Void
 
-    var id: Session.ID { session.id }
-    var memberCount: Int { session.memberCount }
+    @Environment(SessionLibrary.self) private var library
 
-    init(_ session: Session, secretCount: Int) {
-        self.session = session
-        title = session.displayTitle
-        agentLabel = session.agentLabel
-        agentHelp = session.desktopHelp ?? session.agent.displayName
-        project = session.sortProject
-        lastActive = session.lastActive
-        relativeDate = session.lastActive.formatted(.relative(presentation: .named))
-        absoluteDate = session.lastActive.formatted(date: .abbreviated, time: .shortened)
-        sizeBytes = session.sizeBytes
-        sizeText = session.sizeBytes.formatted(.byteCount(style: .file))
-        exactBytes = "\(session.sizeBytes.formatted()) bytes"
-        statusSortKey = session.status.rawValue
-        self.secretCount = secretCount
+    var body: some View {
+        let banners = library.expiringByAgent.filter { !dismissed.contains($0.rule.agent) && (agentFilter == nil || agentFilter == $0.rule.agent) }
+        ForEach(banners, id: \.rule.agent) { banner in
+            let archivable = banner.sessions.filter { !$0.isArchived }
+            RetentionBanner(
+                rule: banner.rule,
+                sessions: banner.sessions,
+                withinDays: library.expiringWithinDays(banner.sessions),
+                archivableCount: banner.rule.canArchive ? archivable.count : 0,
+                onArchiveAll: { onArchiveAll(archivable) },
+                onReview: onReview,
+                onDismiss: { dismissed.insert(banner.rule.agent) }
+            )
+        }
+    }
+}
+
+/// The inspector: one session, a summary of several, or nothing selected.
+private struct SelectionInspector: View {
+    let model: SessionsTableModel
+    let onArchive: () -> Void
+    let onDelete: () -> Void
+    let onRedact: () -> Void
+
+    @Environment(SessionLibrary.self) private var library
+
+    var body: some View {
+        if model.selection.count > 1 {
+            SelectionSummary(
+                sessions: model.selectedSessions,
+                canArchive: model.selectedSessions.contains(where: library.canArchive),
+                canDelete: model.selectedSessions.contains(where: library.canDelete),
+                readOnlyNotes: library.readOnlyNotes(for: model.selectedSessions),
+                onArchive: onArchive,
+                onDelete: onDelete
+            )
+            .inspectorColumnWidth(min: 320, ideal: 480, max: 900)
+        } else if let session = model.selectedSession {
+            SessionInspector(session: session, onArchive: onArchive, onDelete: onDelete, onRedact: onRedact)
+                .inspectorColumnWidth(min: 320, ideal: 480, max: 900)
+        } else {
+            ContentUnavailableView("No session selected", systemImage: "bubble.left.and.text.bubble.right", description: Text("Select a session to read it."))
+                .inspectorColumnWidth(min: 320, ideal: 480, max: 900)
+        }
+    }
+}
+
+// Toolbar items that follow the selection, each its own view so a selection change redraws
+// only them.
+
+private struct SecretsMenu: View {
+    let model: SessionsTableModel
+    let onRedact: () -> Void
+    let onPurge: () -> Void
+
+    @Environment(SessionLibrary.self) private var library
+
+    var body: some View {
+        let count = model.selection.count
+        Menu {
+            Button("Scan All Sessions") { library.scanSecrets(library.sessions) }
+            Button(count > 1 ? "Scan \(count) Selected Sessions" : "Scan Selected Session") {
+                library.scanSecrets(model.selectedSessions)
+            }
+            .disabled(count == 0)
+            Divider()
+            Button("Redact Selected Session\u{2026}", action: onRedact)
+                .disabled(!(model.selectedSession.map(library.canRedact) ?? false))
+                .help("Select one idle session with findings from the secret scan")
+            Button("Purge Originals\u{2026}", action: onPurge)
+        } label: {
+            Label("Secrets", systemImage: library.flaggedSessionCount > 0 ? "key.fill" : "key")
+        }
+        .help("Scan transcripts for API keys, tokens and passwords (\u{21E7}\u{2318}S)")
+    }
+}
+
+private struct ArchiveButton: View {
+    let model: SessionsTableModel
+    let action: () -> Void
+
+    @Environment(SessionLibrary.self) private var library
+
+    var body: some View {
+        // ⌥⌘A lives on Session > Archive…, which works with the toolbar hidden too.
+        Button("Archive…", systemImage: "archivebox", action: action)
+            .disabled(!model.selectedSessions.contains(where: library.canArchive))
+            .help(help)
+    }
+
+    private var help: String {
+        if let note = library.commonReadOnlyNote(for: model.selectedSessions) { return note }
+        if model.selection.count > 1 {
+            let n = model.selectedSessions.filter(library.canArchive).count
+            return n == 0
+                ? "None of the selected sessions can be archived: they are live, already archived or read-only."
+                : "Compress \(n) of the \(model.selection.count) selected sessions on disk; the others are left alone (⌥⌘A)"
+        }
+        guard let session = model.selectedSession else { return "Select a session to archive it" }
+        if session.status == .live { return "This session is live. Quit the \(session.agent.displayName) session using it first." }
+        if session.isArchived { return "This session is already archived." }
+        return "Compress this session on disk; \(session.agent.displayName) can still resume it (⌥⌘A)"
+    }
+}
+
+private struct DeleteButton: View {
+    let model: SessionsTableModel
+    let action: () -> Void
+
+    @Environment(SessionLibrary.self) private var library
+
+    var body: some View {
+        // ⌘⌫ lives on Session > Move to Trash….
+        Button("Delete…", systemImage: "trash", action: action)
+            .disabled(!model.selectedSessions.contains(where: library.canDelete))
+            .help(help)
+    }
+
+    private var help: String {
+        if let note = library.commonReadOnlyNote(for: model.selectedSessions) { return note }
+        if model.selection.count > 1 {
+            let n = model.selectedSessions.filter(library.canDelete).count
+            return n == 0 ? "None of the selected sessions can be deleted: they are live or still being changed." : "Shows what \(n) selected \(n == 1 ? "session moves" : "sessions move") and where before anything changes; the others are left alone (⌘⌫)"
+        }
+        guard let session = model.selectedSession else { return "Select a session to delete it" }
+        if session.status == .live { return "This session is live. Quit the \(session.agent.displayName) session using it first." }
+        return "Shows every file that moves to the Trash or quarantine before anything changes. You can undo this. (⌘⌫)"
+    }
+}
+
+private struct GetInfoButton: View {
+    let model: SessionsTableModel
+    let action: () -> Void
+
+    var body: some View {
+        // ⌘I lives on Session > Get Info.
+        Button("Get Info", systemImage: "info.circle", action: action)
+            .disabled(model.primarySession == nil)
+            .help("Everything Domovy knows about this session (\u{2318}I)")
+    }
+}
+
+#if DEBUG
+private struct PerfHook: View {
+    let handle: (PerfDriver.SessionsCommand) -> Void
+
+    var body: some View {
+        Color.clear
+            .onChange(of: PerfDriver.shared.sessionsCommand) { _, command in if let command { handle(command) } }
+    }
+}
+
+// Perf harness hook (App/PerfHarness.swift): lives here to reach the private state.
+extension SessionsView {
+    func perfHandle(_ command: PerfDriver.SessionsCommand) {
+        switch command.kind {
+        case .select(let ids):
+            model.selection = Set(ids)
+        case .sort(let column, let ascending):
+            let order: SortOrder = ascending ? .forward : .reverse
+            switch column {
+            case "title": sortOrder = [KeyPathComparator(\SessionRow.title, order: order)]
+            case "agent": sortOrder = [KeyPathComparator(\SessionRow.agentLabel, order: order)]
+            case "project": sortOrder = [KeyPathComparator(\SessionRow.project, order: order)]
+            case "lastActive": sortOrder = [KeyPathComparator(\SessionRow.lastActive, order: order)]
+            case "size": sortOrder = [KeyPathComparator(\SessionRow.sizeBytes, order: order)]
+            default: sortOrder = [KeyPathComparator(\SessionRow.statusSortKey, order: order)]
+            }
+        case .openDelete(let ids):
+            requestDelete(allRows.filter { ids.contains($0.id) }.map(\.session))
+        case .openArchive(let ids):
+            let sessions = allRows.filter { ids.contains($0.id) }.map(\.session)
+            if sessions.count == 1 { requestArchive(sessions) } else { requestArchiveBatch(sessions) }
+        case .openInfo:
+            infoSession = primarySession
+        case .dismissSheets:
+            deleteRequest = nil
+            archiveRequest = nil
+            infoSession = nil
+        }
+    }
+}
+#endif
+
+/// Every filter narrowing the table, each with its own remove button, so a search set by
+/// "Show Sessions in This Project" or a popover filter never traps the list. Escape clears all.
+private struct ActiveFiltersBar: View {
+    let search: String
+    let statusFilter: StatusFilter
+    let showsFlaggedOnly: Bool
+    let onClearSearch: () -> Void
+    let onClearStatus: () -> Void
+    let onClearFlagged: () -> Void
+    let onClearAll: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Showing only")
+                .foregroundStyle(.secondary)
+            if !search.isEmpty {
+                FilterChip(label: "\u{201C}\(search)\u{201D}", symbol: "magnifyingglass", onRemove: onClearSearch)
+                SearchScopeControl()
+            }
+            if statusFilter != .all {
+                FilterChip(label: statusFilter.rawValue, symbol: "line.3.horizontal.decrease", onRemove: onClearStatus)
+            }
+            if showsFlaggedOnly {
+                FilterChip(label: "Flagged", symbol: "key", onRemove: onClearFlagged)
+            }
+            Spacer()
+            Button("Clear Filters", action: onClearAll)
+                .buttonStyle(.link)
+                .help("Show every session again (Escape)")
+        }
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+}
+
+private struct FilterChip: View {
+    let label: String
+    let symbol: String
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text(label)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button("Remove filter", systemImage: "xmark.circle.fill", action: onRemove)
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Remove this filter")
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 4)
+        .padding(.vertical, 2)
+        .background(.quaternary, in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Filter: \(label)")
+        .accessibilityAction(named: "Remove Filter", onRemove)
     }
 }

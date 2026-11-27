@@ -36,7 +36,7 @@ struct SecretScanBanner: View {
                         .fontWeight(.semibold)
                     Text(findings > 0
                          ? "Previews are masked. Redact a session from the inspector, or delete it to the Domovy quarantine."
-                         : "Nothing that looks like a key, token or password. Codex .zst rollouts cannot be read yet.")
+                         : "Nothing that looks like a key, token or password.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }

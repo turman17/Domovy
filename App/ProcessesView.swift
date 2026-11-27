@@ -107,7 +107,7 @@ struct ProcessesView: View {
             }
             .width(min: 90, ideal: 130)
             TableColumn("") { item in
-                ProcessActionsCell(row: item.row, isTopLevel: item.depth == 0, onAction: request)
+                ProcessActionsCell(row: item.row, isTopLevel: item.depth == 0 || item.row.isTreeRoot, onAction: request)
             }
             .width(min: 90, ideal: 110)
         }
@@ -235,6 +235,8 @@ private struct ProcessNameCell: View {
         switch row.content {
         case .orphans:
             Image(systemName: "exclamationmark.circle").foregroundStyle(.tint).accessibilityHidden(true)
+        case .herdrWorkspace:
+            Image(systemName: "rectangle.split.2x1").foregroundStyle(.secondary).accessibilityHidden(true)
         case .process(let node):
             if node.kind == .agent, let agent = node.agent {
                 AgentGlyph(agent: agent)
@@ -315,6 +317,8 @@ private struct ProcessActionsCell: View {
             switch row.content {
             case .orphans:
                 Button("Quit All\u{2026}", systemImage: "xmark") { onAction(.quit, (row.children ?? []).compactMap(\.node?.pid)) }
+            case .herdrWorkspace:
+                EmptyView()
             case .process(let node):
                 if node.isFrozen {
                     Button("Resume", systemImage: "play") { onAction(.resume, [node.pid]) }

@@ -19,15 +19,20 @@ struct SidebarView: View {
                     .badge(processes.orphanCount > 0 ? Text("\(processes.orphanCount) orphaned") : nil)
                     .tag(SidebarSelection.section(.processes))
             }
-            Section("Agents") {
-                ForEach(library.agentsPresent, id: \.self) { agent in
-                    Label {
-                        Text(agent.displayName)
-                    } icon: {
-                        AgentGlyph(agent: agent)
+            if !library.agentsPresent.isEmpty {
+                Section("Agents") {
+                    ForEach(library.agentsPresent, id: \.self) { agent in
+                        Label {
+                            HStack(spacing: 4) {
+                                Text(agent.displayName)
+                                if agent.isExperimental { ExperimentalBadge() }
+                            }
+                        } icon: {
+                            AgentGlyph(agent: agent)
+                        }
+                        .badge(library.count(for: agent))
+                        .tag(SidebarSelection.agent(agent))
                     }
-                    .badge(library.count(for: agent))
-                    .tag(SidebarSelection.agent(agent))
                 }
             }
         }
@@ -48,6 +53,7 @@ struct SidebarView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .accessibilityElement(children: .combine)
+        .tourAnchor(.sidebarFooter)
     }
 }
 

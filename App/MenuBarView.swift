@@ -6,6 +6,8 @@ struct MenuBarView: View {
     @Environment(SessionLibrary.self) private var library
     @Environment(ProcessMonitor.self) private var processes
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
+    private var settings: DomovySettings { AppSettings.shared.settings }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -17,13 +19,17 @@ struct MenuBarView: View {
                 Text("used by AI agents on this Mac")
                     .foregroundStyle(.secondary)
             }
-            breakdown
+            .accessibilityElement(children: .combine)
+            if settings.popoverShowsBreakdown { breakdown }
             Divider()
-            if library.needsAttention || !library.liveSessions.isEmpty || processes.needsAttention {
-                attention
-            } else {
-                allTidy
+            if settings.popoverShowsAttention {
+                if library.needsAttention || !library.liveSessions.isEmpty || processes.needsAttention {
+                    attention
+                } else {
+                    allTidy
+                }
             }
+            if settings.popoverShowsRules { RulesMenuBarRow { openRulesSettings() } }
             Divider()
             HStack {
                 Button("Open Domovy") { open(filter: nil) }
@@ -34,6 +40,12 @@ struct MenuBarView: View {
                     .foregroundStyle(.tertiary)
                     .accessibilityHidden(true)
                 Spacer()
+                SettingsLink {
+                    Text("Settings\u{2026}")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
+                .simultaneousGesture(TapGesture().onEnded { NSApp.activate() })
                 Button("Quit") { NSApp.terminate(nil) }
                     .buttonStyle(.plain)
                     .foregroundStyle(.tint)
@@ -42,6 +54,7 @@ struct MenuBarView: View {
         .padding(16)
         .frame(width: 360)
         .task { await processes.refreshIfStale() }
+        .onAppear { if MainWindow.openAction == nil { MainWindow.openAction = openWindow } }
     }
 
     private var header: some View {
@@ -136,7 +149,7 @@ struct MenuBarView: View {
                     open(section: .disk)
                 }
             }
-                        if library.hasLargeSafeFootprint {
+            if library.hasLargeSafeFootprint {
                 AttentionRow(
                     symbol: "checkmark.circle",
                     title: "\(library.safeFootprintBytes.formatted(.byteCount(style: .file))) safe to remove",
@@ -154,7 +167,7 @@ struct MenuBarView: View {
                 .accessibilityHidden(true)
                 .padding(.bottom, 4)
             Text("All tidy").font(.headline)
-            Text("No sessions expire this week and nothing is leaking. The house is in order.")
+            Text("No sessions expire in the next \(settings.expiringWindowDays == 1 ? "day" : "\(settings.expiringWindowDays) days") and no agent processes are left behind. The house is in order.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -167,6 +180,13 @@ struct MenuBarView: View {
     private func open(section: SidebarItem) {
         library.requestedSection = section
         openWindow(id: "main")
+        NSApp.activate()
+    }
+
+    /// Rules live in Settings > Cleanup Rules.
+    private func openRulesSettings() {
+        AppSettings.shared.requestedPane = .rules
+        openSettings()
         NSApp.activate()
     }
 
@@ -191,6 +211,7 @@ private struct AttentionRow: View {
                     .foregroundStyle(.tint)
                     .frame(width: 18)
                     .padding(.top, 1)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .fixedSize(horizontal: false, vertical: true)
@@ -203,6 +224,7 @@ private struct AttentionRow: View {
                 Image(systemName: "chevron.right")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
             .padding(10)
             .contentShape(Rectangle())

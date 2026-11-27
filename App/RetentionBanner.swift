@@ -44,7 +44,7 @@ struct RetentionBanner: View {
                     .foregroundStyle(.secondary)
                 HStack(spacing: 8) {
                     if rule.canArchive, archivableCount > 0 {
-                        Button("Archive all \(archivableCount)", action: onArchiveAll)
+                        Button("Archive \(archivableCount) \(archivableCount == 1 ? "Session" : "Sessions")", action: onArchiveAll)
                             .buttonStyle(.borderedProminent)
                             .help("Compress the expiring sessions on disk. \(rule.agent.displayName) can still resume them.")
                     }

@@ -79,9 +79,15 @@ struct DeletePlanSheet: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Nothing to delete")
                         .font(.title3.weight(.semibold))
-                    Text(([failure] + (request.notes + dropped).map(Optional.some)).compactMap { $0 }.joined(separator: " "))
-                        .foregroundStyle(.secondary)
+                    ForEach(nothingToDoReasons, id: \.self) { reason in
+                        Text(reason)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     HStack {
+                        if !isBatch, let session = request.sessions.first {
+                            Button("Show in Finder", systemImage: "folder") { revealInFinder(session) }
+                        }
                         Spacer()
                         Button("OK") { dismiss() }
                             .keyboardShortcut(.defaultAction)
@@ -93,15 +99,32 @@ struct DeletePlanSheet: View {
         }
         .padding(20)
         .frame(width: 560)
-        .task(id: destination) { await plan() }
+        .task(id: destination) {
+            await plan()
+            #if DEBUG
+            PerfDriver.shared.planShown = true
+            #endif
+        }
     }
 
-    /// Plans every session in one go. In a batch, live sessions and ones that cannot be planned
-    /// drop out with a note; a single one stays so the sheet can say why.
+    /// Why the sheet has nothing to confirm: never empty.
+    private var nothingToDoReasons: [String] {
+        let reasons = ([failure].compactMap { $0 } + request.notes + dropped).filter { !$0.isEmpty }
+        return reasons.isEmpty ? ["Nothing in \(isBatch ? "these sessions" : "this session") can be deleted right now."] : reasons
+    }
+
+    /// Plans every session in one go. In a batch, live sessions, ones with nothing to change
+    /// and ones that cannot be planned drop out with a note saying why; a single one stays so
+    /// the sheet can say why.
     private func plan() async {
+        failure = nil
         let results = await library.deletePlans(for: request.sessions, destination: destination)
         if !isBatch, let result = results.first {
             switch result.result {
+            case .success(let plan) where plan.isEmpty && !plan.liveCheck.isLive:
+                // Nothing to change: the plan's own words say why.
+                failure = plan.remarks.isEmpty ? plan.summary : plan.remarks.joined(separator: " ")
+                plans = []
             case .success(let plan): plans = [plan]
             case .failure(let error):
                 failure = error.localizedDescription
@@ -110,13 +133,38 @@ struct DeletePlanSheet: View {
             return
         }
         let ok = results.compactMap(\.plan)
-        let live = ok.filter(\.liveCheck.isLive).count
-        let failed = results.count - ok.count
+        let live = ok.filter(\.liveCheck.isLive)
+        let empty = ok.filter { !$0.liveCheck.isLive && $0.isEmpty }
         var notes: [String] = []
-        if live > 0 { notes.append("\(live) live \(live == 1 ? "session is" : "sessions are") left alone.") }
-        if failed > 0 { notes.append("\(failed) \(failed == 1 ? "session" : "sessions") could not be planned and \(failed == 1 ? "is" : "are") left alone; delete \(failed == 1 ? "it" : "them") one at a time to see why.") }
+        if !live.isEmpty {
+            let n = live.count
+            let why = Array(NSOrderedSet(array: live.flatMap(\.liveCheck.reasons))).compactMap { $0 as? String }.prefix(2).joined(separator: " ")
+            notes.append("\(n) live \(n == 1 ? "session is" : "sessions are") left alone.\(why.isEmpty ? "" : " \(why)")")
+        }
+        // Grouped by what they say, so eight of one agent read as one line.
+        for (reason, n) in Self.counted(empty.map { $0.remarks.first ?? $0.summary }) {
+            notes.append("\(n) \(n == 1 ? "session has" : "sessions have") nothing to delete: \(reason)")
+        }
+        let errors = results.compactMap { result -> String? in
+            if case .failure(let error) = result.result { return error.localizedDescription }
+            return nil
+        }
+        for (reason, n) in Self.counted(errors) {
+            notes.append("\(n) \(n == 1 ? "session could" : "sessions could") not be planned and \(n == 1 ? "is" : "are") left alone: \(reason)")
+        }
         dropped = notes
         plans = ok.filter { !$0.liveCheck.isLive && !$0.isEmpty }
+    }
+
+    /// Distinct texts with how often each came up, in first-seen order.
+    private static func counted(_ texts: [String]) -> [(String, Int)] {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        for text in texts {
+            if counts[text] == nil { order.append(text) }
+            counts[text, default: 0] += 1
+        }
+        return order.map { ($0, counts[$0] ?? 0) }
     }
 
     private var content: some View {
@@ -244,11 +292,12 @@ private struct PlanChanges: View {
                 MoveRow(move: move, root: root)
             }
         }
-        if !plan.indexEdits.isEmpty || !plan.registryRemovals.isEmpty {
+        if !plan.indexEdits.isEmpty || !plan.registryRemovals.isEmpty || !plan.jsonRemovals.isEmpty {
             Section("Index entries · edited in place, backup kept") {
                 ForEach(plan.indexEdits, id: \.file) { edit in
                     ChangeRow(symbol: "list.bullet.rectangle", path: relativePath(edit.file, under: root), note: edit.note, size: "–")
                 }
+                JSONRemovalRows(removals: plan.jsonRemovals, root: root)
                 RegistryRemovalRows(removals: plan.registryRemovals)
             }
         }
@@ -295,12 +344,26 @@ private struct SessionChanges: View {
             ForEach(plan.indexEdits, id: \.file) { edit in
                 ChangeRow(symbol: "list.bullet.rectangle", path: relativePath(edit.file, under: root), note: edit.note + " · edited in place, backup kept", size: "–")
             }
+            JSONRemovalRows(removals: plan.jsonRemovals, root: root)
             RegistryRemovalRows(removals: plan.registryRemovals)
         } header: {
             Text(header)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .help(header)
+        }
+    }
+}
+
+/// Entries cut out of an app's JSON index (Antigravity's metadata cache).
+private struct JSONRemovalRows: View {
+    let removals: [JSONMemberRemoval]
+    let root: URL
+
+    var body: some View {
+        ForEach(removals, id: \.self) { removal in
+            ChangeRow(symbol: "list.bullet.rectangle", path: relativePath(removal.file, under: root),
+                      note: removal.note + " · edited in place, copy kept", size: removal.sizeBytes.formatted(.byteCount(style: .file)))
         }
     }
 }

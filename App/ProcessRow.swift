@@ -6,6 +6,8 @@ struct ProcessRow: Identifiable, Hashable {
     enum Content: Hashable {
         /// "Orphaned · agent is gone", with every orphan below it.
         case orphans(count: Int)
+        /// "Herdr · domovy", with the agents running in that workspace's panes below it.
+        case herdrWorkspace(label: String)
         case process(ProcessNode)
     }
 
@@ -14,6 +16,8 @@ struct ProcessRow: Identifiable, Hashable {
     /// Shown instead of the process name: "Codex · Add rate limiting".
     let title: String
     let children: [ProcessRow]?
+    /// An agent tree's root or an orphan: gets Freeze or Quit even below a workspace header.
+    var isTreeRoot = false
 
     var node: ProcessNode? {
         if case .process(let node) = content { return node }
@@ -23,14 +27,14 @@ struct ProcessRow: Identifiable, Hashable {
     /// Memory of the row and everything below it.
     var totalBytes: Int64 {
         switch content {
-        case .orphans: (children ?? []).reduce(0) { $0 + $1.totalBytes }
+        case .orphans, .herdrWorkspace: (children ?? []).reduce(0) { $0 + $1.totalBytes }
         case .process(let node): node.totalBytes
         }
     }
 
     var cpuPercent: Double? {
         switch content {
-        case .orphans:
+        case .orphans, .herdrWorkspace:
             let values = (children ?? []).compactMap(\.cpuPercent)
             return values.isEmpty ? nil : values.reduce(0, +)
         case .process(let node):
@@ -53,11 +57,27 @@ struct ProcessRow: Identifiable, Hashable {
         if !orphans.isEmpty {
             rows.append(ProcessRow(id: "orphans", content: .orphans(count: orphans.count), title: "Orphaned · their agent is gone", children: orphans.map { row($0) }))
         }
+        // Agents running in Herdr, one header per workspace, panes in order; then the rest.
+        var workspaces: [(label: String, rows: [ProcessRow])] = []
         for group in report.groups {
-            let title = groupTitle(group, sessionTitle: sessionTitle)
-            if matches(group.root, title: title) { rows.append(row(group.root, title: title)) }
+            var title = groupTitle(group, sessionTitle: sessionTitle)
+            if let pane = group.herdr { title += " · pane \(pane.paneID)" }
+            guard matches(group.root, title: title) else { continue }
+            var root = row(group.root, title: title)
+            root.isTreeRoot = true
+            if let pane = group.herdr {
+                if let index = workspaces.firstIndex(where: { $0.label == pane.workspaceLabel }) { workspaces[index].rows.append(root) }
+                else { workspaces.append((pane.workspaceLabel, [root])) }
+            } else {
+                rows.append(root)
+            }
         }
-        return rows
+        let headers = workspaces.sorted { $0.label < $1.label }.map { workspace in
+            ProcessRow(id: "herdr-\(workspace.label)", content: .herdrWorkspace(label: workspace.label), title: "Herdr · \(workspace.label)",
+                       children: workspace.rows.sorted { $0.title < $1.title })
+        }
+        let orphanHeader = rows.first?.id == "orphans" ? [rows.removeFirst()] : []
+        return orphanHeader + headers + rows
     }
 
     /// "Claude Code · Seed demo data", "Codex · 3 threads", or just the agent.

@@ -21,15 +21,21 @@ final class ProcessMonitor {
     private let controller: ProcessController
 
     init(home: URL, storeRoot: URL) {
-        watcher = ProcessWatcher(sessions: ProcessSessionResolver(home: home))
+        watcher = ProcessWatcher(sessions: ProcessSessionResolver(home: home),
+                                 herdr: HerdrClient.at(home: home, isCustomHome: AppEnvironment.isDevHome))
         controller = ProcessController(log: ProcessActionLog(storeRoot: storeRoot))
     }
 
     func refresh() async {
         let watcher = self.watcher
         let next = await watcher.refresh()
-        isUnavailable = next == nil
-        if let next { report = next }
+        // Observers are told about every assignment, equal or not: assign only what changed,
+        // so the sidebar and the menu bar do not redraw on every sample.
+        if isUnavailable != (next == nil) { isUnavailable = next == nil }
+        if let next, next.groups != report.groups || next.orphans != report.orphans {
+            report = next
+            if orphanCount != next.orphanCount { orphanCount = next.orphanCount }
+        }
         lastRefresh = Date()
     }
 
@@ -64,7 +70,8 @@ final class ProcessMonitor {
 
     // MARK: Menu bar
 
-    var orphanCount: Int { report.orphanCount }
+    /// Stored, so the sidebar badge only redraws when the count changes.
+    private(set) var orphanCount = 0
     var orphanBytes: Int64 { report.orphanBytes }
     /// Likely MCP servers whose memory keeps growing, largest first.
     var growingServers: [ProcessNode] {

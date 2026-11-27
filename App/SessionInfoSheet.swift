@@ -91,6 +91,18 @@ struct SessionInfoSheet: View {
             if session.memberCount > 1 {
                 InfoRow(label: "Chats", value: "\(session.memberCount) chats shown as one row")
             }
+            if let usage = library.tokenUsage[session.id]?.usage {
+                let t = usage.totals
+                InfoRow(label: "Tokens", value: "\(t.total.formatted()): input \(t.input.formatted()), output \(t.output.formatted()), cache read \(t.cacheRead.formatted()), cache write \(t.cacheWrite.formatted())")
+                if !usage.models.isEmpty {
+                    InfoRow(label: "Models", value: usage.models.joined(separator: ", "), monospaced: true)
+                }
+                if let cost = usage.cost {
+                    InfoRow(label: cost.source == .agent ? "Cost" : "Estimated cost", value: "\(cost.text) \u{2014} \(cost.explanation)")
+                }
+            } else if library.recordsTokens(session) {
+                InfoRow(label: "Tokens", value: library.tokenUsage[session.id] == .notRecorded ? "None recorded" : "Counting\u{2026}")
+            }
             if !findings.isEmpty {
                 InfoRow(label: "Secret scan", value: "\(findings.count) possible \(findings.count == 1 ? "secret" : "secrets")")
             }
@@ -197,16 +209,7 @@ func revealInFinder(_ session: Session) {
 
 /// The shell command that reopens the session in its agent, when the agent has one.
 func resumeCommand(for session: Session) -> String? {
-    let cd = session.projectPath.map { "cd \(shellQuoted($0)) && " } ?? ""
-    switch session.agent {
-    case .claudeCode: return cd + "claude --resume \(session.id)"
-    case .codex: return cd + "codex resume \(session.id)"
-    default: return nil
-    }
-}
-
-private func shellQuoted(_ text: String) -> String {
-    "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    try? ResumeCommand.resolve(for: session).get().shellLine
 }
 
 @MainActor

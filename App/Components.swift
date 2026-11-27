@@ -15,6 +15,30 @@ struct AgentGlyph: View {
         case .antigravity: "AG"
         case .openCode: "OC"
         case .copilot: "CP"
+        case .zed: "Ze"
+        case .vsCodeChat: "VS"
+        case .geminiCodeAssist: "GA"
+        case .qwen: "Qw"
+        case .kimi: "Ki"
+        case .rooCode: "Ro"
+        case .crush: "Cr"
+        case .cline: "Cl"
+        case .kilo: "Kl"
+        case .continueDev: "Co"
+        case .auggie: "Au"
+        case .factoryDroid: "FD"
+        case .aider: "Ai"
+        case .kiro: "Kr"
+        case .goose: "Go"
+        case .grok: "Gk"
+        case .amazonQ: "AQ"
+        case .windsurf: "Ws"
+        case .trae: "Tr"
+        case .warp: "Wp"
+        case .amp: "Am"
+        case .junie: "Ju"
+        case .iflow: "iF"
+        case .herdr: "He"
         case .ollama: "Ol"
         case .lmStudio: "LM"
         case .huggingFace: "HF"
@@ -76,6 +100,18 @@ struct SecretMarker: View {
     }
 }
 
+/// Small "Experimental" tag for an agent whose adapter is not yet verified on a real install.
+struct ExperimentalBadge: View {
+    var body: some View {
+        Image(systemName: "flask")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .help(AgentKind.experimentalNote)
+            .accessibilityLabel("Experimental")
+            .accessibilityHint(AgentKind.experimentalNote)
+    }
+}
+
 /// Proportional bar, one segment per agent. Accent shades, then gray for the rest.
 struct BreakdownBar: View {
     let segments: [(name: String, bytes: Int64)]
@@ -111,7 +147,8 @@ struct SizeText: View {
     let bytes: Int64
 
     var body: some View {
-        Text(bytes.formatted(.byteCount(style: .file)))
+        // The formatter says "Zero kB" for nothing; Finder-style "0 bytes" reads calmer.
+        Text(bytes == 0 ? "0 bytes" : bytes.formatted(.byteCount(style: .file)))
             .monospacedDigit()
             .help("\(bytes.formatted()) bytes")
     }
@@ -132,4 +169,27 @@ func relativePath(_ url: URL, under root: URL) -> String {
     let base = root.standardizedFileURL.path + "/"
     let path = url.standardizedFileURL.path
     return path.hasPrefix(base) ? String(path.dropFirst(base.count)) : path
+}
+
+/// Paces work that follows the selection or the search field, called at the start of a
+/// `.task(id:)`. The first change goes at once; changes that come quickly after one another
+/// (an arrow key held down, typing) wait until they rest, so only the last one is done.
+@MainActor
+final class LoadPace {
+    private var last: ContinuousClock.Instant?
+    private let delay: Duration
+
+    init(delay: Duration = .milliseconds(120)) {
+        self.delay = delay
+    }
+
+    /// False when the task was cancelled while waiting: the input moved on.
+    func wait() async -> Bool {
+        let now = ContinuousClock.now
+        defer { last = now }
+        if let last, now - last < .milliseconds(250) {
+            try? await Task.sleep(for: delay)
+        }
+        return !Task.isCancelled
+    }
 }

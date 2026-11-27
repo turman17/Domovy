@@ -24,6 +24,13 @@ enum StatusFilter: String, CaseIterable, Identifiable {
     }
 }
 
+/// The numbers the menu bar item can show next to its icon.
+struct MenuBarFigures: Equatable {
+    var totalBytes: Int64 = 0
+    var safeBytes: Int64 = 0
+    var liveSessions = 0
+}
+
 /// One Domovy action on the window's undo stack ("Undo Move to Trash", "Undo Archive").
 /// Also the UndoManager target, so the toast's Undo button can take it off the stack.
 final class UndoAction: Sendable {
@@ -52,8 +59,15 @@ struct Toast: Identifiable, Equatable {
 @Observable
 final class SessionLibrary {
     private(set) var sessions: [Session] = []
+    /// Herdr's workspaces, panes and agents at the last reload; empty when Herdr is not running.
+    var herdr: HerdrState = .empty
     /// Last measured footprints, kept while a rescan runs so the Disk screen never goes blank.
-    private(set) var footprints: [Footprint] = []
+    private(set) var footprints: [Footprint] = [] {
+        didSet { updateMenuBarFigures() }
+    }
+    /// What the menu bar item may show, replaced only when a number changes, so the item does
+    /// not redraw on every reload.
+    private(set) var menuBarFigures = MenuBarFigures()
     private(set) var isLoading = false
     private(set) var errorMessage: String?
     private(set) var lastScan: Date?
@@ -96,32 +110,48 @@ final class SessionLibrary {
     /// Copies Domovy kept before `ollama rm` and friends deleted the originals, until purged.
     var keptCopyBytes: Int64 = 0
 
+    /// Claude Code with Claude Desktop's list, for the orphan report; listed only when shown.
     let claudeCode: ClaudeCodeAdapter
     let codex: CodexAdapter
-    /// Every adapter, in sidebar order. Agents not installed at this home are skipped on scan.
-    let adapters: [any AgentAdapter]
+    /// Every adapter, in sidebar order, without the agents hidden in Settings. Agents not
+    /// installed at this home are skipped on scan.
+    private(set) var adapters: [any AgentAdapter]
     /// Every agent the Disk screen measures: the adapters plus Claude Desktop.
-    let footprintProviders: [any FootprintProvider]
+    private(set) var footprintProviders: [any FootprintProvider]
+    /// The settings the adapters were built with.
+    private var adapterSettings: AdapterSettings
+    /// Called after the adapters were rebuilt (the rules runner keeps its own copy).
+    @ObservationIgnored var onAdaptersChanged: (() -> Void)?
+    private let isCustomHome: Bool
+    private let models: ModelStores
     let executor: Executor
     /// The Disk screen's guided cleanups.
     let cleanupPlanner: CleanupPlanner
     let home: URL
+    /// Full-text search inside transcripts, with its local index.
+    let transcriptSearch: TranscriptSearch
+    /// Token usage read from transcripts, cached in Domovy's folder (SessionLibrary+Tokens).
+    let tokenStore: TokenUsageStore
+    var tokenUsage: [Session.ID: TokenUsageResult] = [:]
+    /// Bumped when `tokenUsage` changes, so rows rebuild without comparing every entry.
+    var tokenRevision = 0
+    var tokenTask: Task<Void, Never>?
     let logger = Logger(subsystem: "io.github.turman17.Domovy", category: "SessionLibrary")
 
     init(home: URL, storeRoot: URL, isCustomHome: Bool) {
         self.home = home
-        claudeCode = ClaudeCodeAdapter(home: home)
+        transcriptSearch = TranscriptSearch(storeRoot: storeRoot)
+        tokenStore = TokenUsageStore(storeRoot: storeRoot)
+        self.isCustomHome = isCustomHome
+        let settings = AppSettings.shared.settings
+        claudeCode = ClaudeCodeAdapter(home: home, expiringWindowDays: settings.expiringWindowDays)
         codex = CodexAdapter(home: home, cli: CodexCLI.choice(home: home, isCustomHome: isCustomHome))
-        adapters = [
-            claudeCode, codex,
-            GeminiAdapter(home: home),
-            AntigravityAdapter(home: home),
-            OpenCodeAdapter(home: home, cli: OpenCodeCLI.choice(home: home, isCustomHome: isCustomHome)),
-            CopilotAdapter(home: home),
-            CursorAdapter(home: home),
-        ]
+        adapterSettings = AdapterSettings(settings)
+        let adapters = DomovyContext.standardAdapters(home: home, isCustomHome: isCustomHome, settings: settings)
+        self.adapters = adapters
         let models = ModelStores.at(home: home, isCustomHome: isCustomHome)
-        footprintProviders = adapters + FootprintScanner.measuredOnly(home: home) + FootprintScanner.modelStores(models)
+        self.models = models
+        footprintProviders = DomovyContext.footprintProviders(adapters: adapters, home: home, models: models, settings: settings)
         executor = Executor(storeRoot: storeRoot)
         // A custom home (.devhome) runs only the stubs in <home>/bin, never the real ollama or hf.
         cleanupPlanner = CleanupPlanner(
@@ -132,6 +162,33 @@ final class SessionLibrary {
             huggingFaceCLI: ToolChoice.at(home: home, isCustomHome: isCustomHome, name: "hf", override: "DOMOVY_HF_CLI"),
             launchdEnvironment: LaunchdEnvironment.reader(isCustomHome: isCustomHome)
         )
+        transcriptSearch.isAllowed = settings.transcriptIndex
+    }
+
+    /// The parts of the settings the adapters are built from.
+    private struct AdapterSettings: Equatable {
+        let hidden: Set<AgentKind>
+        let expiringWindowDays: Int
+        let aiderSearchFolders: [String]
+
+        init(_ settings: DomovySettings) {
+            hidden = settings.hiddenAgents
+            expiringWindowDays = settings.expiringWindowDays
+            aiderSearchFolders = settings.aiderSearchFolders
+        }
+    }
+
+    /// Rebuilds the adapters and rescans when hidden agents, the expiring window or Aider's
+    /// folders changed; does nothing otherwise, so callers may call it on every change.
+    func apply(_ settings: DomovySettings) {
+        transcriptSearch.isAllowed = settings.transcriptIndex
+        let next = AdapterSettings(settings)
+        guard next != adapterSettings else { return }
+        adapterSettings = next
+        adapters = DomovyContext.standardAdapters(home: home, isCustomHome: isCustomHome, settings: settings)
+        footprintProviders = DomovyContext.footprintProviders(adapters: adapters, home: home, models: models, settings: settings)
+        onAdaptersChanged?()
+        Task { await reload() }
     }
 
     func adapter(for agent: AgentKind) throws -> any AgentAdapter {
@@ -149,9 +206,19 @@ final class SessionLibrary {
     var totalSessionBytes: Int64 { sessions.reduce(0) { $0 + $1.sizeBytes } }
     var totalFootprintBytes: Int64 { footprints.reduce(0) { $0 + $1.totalBytes } }
     var safeFootprintBytes: Int64 { footprints.reduce(0) { $0 + $1.bytes(.safe) } }
-    var expiringSessions: [Session] { sessions.filter { $0.status == .expiring } }
-    var liveSessions: [Session] { sessions.filter { $0.status == .live } }
-    var needsAttention: Bool { !expiringSessions.isEmpty || hasDiskWarnings }
+    /// Derived from `sessions` once per reload, so views reading them on every update (the
+    /// sidebar, banners, the menu bar) do not refilter every session each time.
+    private(set) var liveSessions: [Session] = []
+    /// Expiring sessions per agent with a known rule, in sidebar order.
+    private(set) var expiringByAgent: [(rule: RetentionRule, sessions: [Session])] = []
+    /// Agents that have at least one session, in declaration order.
+    private(set) var agentsPresent: [AgentKind] = []
+    private var sessionCounts: [AgentKind: Int] = [:]
+    private var hasExpiringSessions = false
+    /// Bumped whenever `sessions` is replaced, so views can key on it instead of comparing
+    /// every session.
+    private(set) var revision = 0
+    var needsAttention: Bool { hasExpiringSessions || hasDiskWarnings }
 
     /// Below this, disk use is not worth a warning in the menu bar.
     static let diskWarningBytes: Int64 = 500_000_000
@@ -162,13 +229,8 @@ final class SessionLibrary {
     var hasLargeSafeFootprint: Bool { safeFootprintBytes > Self.diskWarningBytes }
     var hasDiskWarnings: Bool { largeVMBundleBytes != nil || hasLargeSafeFootprint || hasLargeModelFootprint }
 
-    /// Agents that have at least one session, in declaration order.
-    var agentsPresent: [AgentKind] {
-        AgentKind.allCases.filter { kind in sessions.contains { $0.agent == kind } }
-    }
-
     func count(for agent: AgentKind) -> Int {
-        sessions.filter { $0.agent == agent }.count
+        sessionCounts[agent] ?? 0
     }
 
     /// Disk use per agent, largest first, for breakdown bars.
@@ -183,13 +245,31 @@ final class SessionLibrary {
         return max(0, Int(ceil(latest.timeIntervalSinceNow / 86_400)))
     }
 
-    /// Expiring sessions per agent with a known rule, in sidebar order.
-    var expiringByAgent: [(rule: RetentionRule, sessions: [Session])] {
-        AgentKind.allCases.compactMap { agent in
-            let expiring = expiringSessions.filter { $0.agent == agent }
-            guard !expiring.isEmpty, let rule = retentionRules[agent] else { return nil }
-            return (rule, expiring)
+    /// Recomputes the stored summaries of `sessions` and `retentionRules`.
+    private func updateDerived() {
+        var counts: [AgentKind: Int] = [:]
+        var expiring: [AgentKind: [Session]] = [:]
+        var live: [Session] = []
+        for session in sessions {
+            counts[session.agent, default: 0] += 1
+            if session.status == .expiring { expiring[session.agent, default: []].append(session) }
+            if session.status == .live { live.append(session) }
         }
+        sessionCounts = counts
+        liveSessions = live
+        updateMenuBarFigures()
+        hasExpiringSessions = !expiring.isEmpty
+        agentsPresent = AgentKind.allCases.filter { counts[$0] != nil }
+        expiringByAgent = AgentKind.allCases.compactMap { agent in
+            guard let sessions = expiring[agent], let rule = retentionRules[agent] else { return nil }
+            return (rule, sessions)
+        }
+        revision += 1
+    }
+
+    private func updateMenuBarFigures() {
+        let next = MenuBarFigures(totalBytes: totalFootprintBytes, safeBytes: safeFootprintBytes, liveSessions: liveSessions.count)
+        if next != menuBarFigures { menuBarFigures = next }
     }
 
     // MARK: Loading
@@ -204,17 +284,15 @@ final class SessionLibrary {
         // Disk sizes, orphans, kept copies and every agent's sessions are read in parallel,
         // off the main actor. Sizes are published as soon as they are measured: the menu bar
         // shows them without waiting for the session scan.
-        let providers = footprintProviders
-        let measuring = Task.detached { await FootprintScanner.scan(providers) }
-        let claudeCode = self.claudeCode
-        let orphans = Task.detached { await claudeCode.orphanReport() }
-        let executor = self.executor
-        let kept = Task.detached { (try? executor.purgePlan([.toolCopy]).totalBytes) ?? 0 }
-        let adapters = self.adapters
+        //
+        // Aider has no index and looks in the project folders of the other agents' sessions:
+        // it gets them from this scan instead of listing every agent a second time.
+        let aider = adapters.compactMap { $0 as? AiderAdapter }
+        let others = adapters.filter { !($0 is AiderAdapter) }
         // One agent failing must not hide the others.
-        let scanning = Task.detached {
+        let scanningOthers = Task.detached {
             await withTaskGroup(of: AgentScan.self) { group in
-                for adapter in adapters {
+                for adapter in others {
                     group.addTask { await AgentScan.run(adapter) }
                 }
                 var results: [AgentScan] = []
@@ -222,10 +300,34 @@ final class SessionLibrary {
                 return results
             }
         }
+        let projectPaths = Task.detached { await scanningOthers.value.flatMap { $0.sessions.compactMap(\.projectPath) } }
+        for adapter in aider { adapter.useKnownProjects(projectPaths) }
+        let scanning = Task.detached {
+            var results = await scanningOthers.value
+            for adapter in aider { results.append(await AgentScan.run(adapter)) }
+            return results
+        }
+        // Aider's footprint waits for those paths, so it is measured after the others' sizes
+        // are published.
+        let providers = footprintProviders
+        let measuring = Task.detached { await FootprintScanner.scan(providers.filter { !($0 is AiderAdapter) }) }
+        let measuringAider = Task.detached { await FootprintScanner.scan(aider) }
+        let claudeCode = adapters.contains { $0.kind == .claudeCode } ? self.claudeCode : nil
+        let orphans = Task.detached { await claudeCode?.orphanReport() ?? .empty }
+        let executor = self.executor
+        let kept = Task.detached { (try? executor.purgePlan([.toolCopy]).totalBytes) ?? 0 }
+        let herdrState = Task.detached { [herdrClient] in herdrClient.state() }
         let measured = await measuring.value
         footprints = measured.footprints
         logger.info("Disk sizes ready after \(ContinuousClock.now - started, privacy: .public)")
         let scanned = await scanning.value
+        herdr = await herdrState.value ?? .empty
+        let measuredAider = await measuringAider.value
+        if !measuredAider.footprints.isEmpty {
+            let order = providers.map(\.kind)
+            footprints = (measured.footprints + measuredAider.footprints)
+                .sorted { (order.firstIndex(of: $0.agent) ?? .max) < (order.firstIndex(of: $1.agent) ?? .max) }
+        }
         var found: [Session] = []
         var failures: [String] = []
         var readOnly: [AgentKind: String] = [:]
@@ -239,7 +341,7 @@ final class SessionLibrary {
         }
         orphanReport = await orphans.value
         keptCopyBytes = await kept.value
-        failures += measured.failures
+        failures += measured.failures + measuredAider.failures
         sessions = found.sorted { $0.lastActive > $1.lastActive }
         readOnlyAgents = readOnly
         var rules: [AgentKind: RetentionRule] = [:]
@@ -247,6 +349,9 @@ final class SessionLibrary {
             if let rule = reporter.retentionRule() { rules[reporter.kind] = rule }
         }
         retentionRules = rules
+        updateDerived()
+        transcriptSearch.sessionsChanged(sessions, adapters: adapters)
+        refreshTokens()
         errorMessage = failures.isEmpty ? nil : failures.joined(separator: " ")
         lastScan = Date()
     }
@@ -266,15 +371,16 @@ final class SessionLibrary {
             do {
                 scan.sessions = try await adapter.sessions()
             } catch {
-                scan.failure = error.localizedDescription
+                scan.failure = FullDiskAccess.explain(error, agent: adapter.kind)
             }
             return scan
         }
     }
 
-    /// The conversation for the preview, with the values of scan findings masked.
-    func transcript(of session: Session) async throws -> Transcript {
-        try await adapter(for: session.agent).transcript(of: session, limit: 200, masking: findings(for: session))
+    /// The newest `limit` messages before `cursor` (`nil`: the end) for the preview, with the
+    /// values of scan findings masked.
+    func transcriptPage(of session: Session, limit: Int = 200, before cursor: TranscriptCursor?) async throws -> Transcript {
+        try await adapter(for: session.agent).transcriptPage(of: session, limit: limit, before: cursor, masking: findings(for: session))
     }
 
     func artifacts(of session: Session) async throws -> [Artifact] {
@@ -284,7 +390,8 @@ final class SessionLibrary {
     // MARK: Plans
 
     func deletePlan(for session: Session, destination: Destination) async throws -> Plan {
-        try await adapter(for: session.agent).deletePlan(for: session, destination: destination)
+        let plan = try await adapter(for: session.agent).deletePlan(for: session, destination: destination)
+        return await currentHerdr().markingLive(plan, for: session)
     }
 
     /// Delete plans for a batch, in order, each agent asked once for all of its sessions.
@@ -299,16 +406,33 @@ final class SessionLibrary {
                 for session in group { results[session.id] = PlannedSession(session: session, result: .failure(error)) }
             }
         }
-        return sessions.compactMap { results[$0.id] }
+        let herdr = await currentHerdr()
+        return sessions.compactMap { session in
+            results[session.id].map { PlannedSession(session: session, result: $0.result.map { herdr.markingLive($0, for: session) }) }
+        }
     }
 
     /// One archive plan per session; sessions with nothing to do are left out. A batch also
-    /// leaves out blocked plans; a single blocked plan stays so the sheet can say why.
+    /// leaves out blocked plans; a single plan, blocked or empty, stays so the sheet can say why.
+    /// Each agent is asked once for all of its sessions.
     func archivePlans(for sessions: [Session]) async throws -> [Plan] {
+        let candidates = sessions.filter { $0.status != .live }
+        var results: [Session.ID: Result<Plan, any Error>] = [:]
+        for (agent, group) in Dictionary(grouping: candidates, by: \.agent) {
+            do {
+                for planned in try await adapter(for: agent).archivePlans(for: group) {
+                    results[planned.session.id] = planned.result
+                }
+            } catch {
+                for session in group { results[session.id] = .failure(error) }
+            }
+        }
         var plans: [Plan] = []
-        for session in sessions where session.status != .live {
-            let plan = try await adapter(for: session.agent).archivePlan(for: session)
-            if !plan.isEmpty, sessions.count == 1 || !plan.liveCheck.isLive { plans.append(plan) }
+        let herdr = await currentHerdr()
+        for session in candidates {
+            guard let found = try results[session.id]?.get() else { continue }
+            let plan = herdr.markingLive(found, for: session)
+            if sessions.count == 1 || (!plan.isEmpty && !plan.liveCheck.isLive) { plans.append(plan) }
         }
         return plans
     }

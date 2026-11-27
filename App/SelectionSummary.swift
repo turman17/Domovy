@@ -7,6 +7,8 @@ struct SelectionSummary: View {
     let sessions: [Session]
     let canArchive: Bool
     let canDelete: Bool
+    /// "8 Antigravity sessions are left alone: …", one per read-only agent.
+    let readOnlyNotes: [String]
     let onArchive: () -> Void
     let onDelete: () -> Void
 
@@ -48,8 +50,13 @@ struct SelectionSummary: View {
                         }
                         .accessibilityElement(children: .combine)
                     }
-                    if liveCount > 0 || archivedCount > 0 {
+                    if liveCount > 0 || archivedCount > 0 || !readOnlyNotes.isEmpty {
                         Divider()
+                    }
+                    ForEach(readOnlyNotes, id: \.self) { note in
+                        Label(note, systemImage: "lock")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if liveCount > 0 {
                         Label(
@@ -70,9 +77,11 @@ struct SelectionSummary: View {
             HStack {
                 Button("Archive\u{2026}", systemImage: "archivebox", action: onArchive)
                     .disabled(!canArchive)
+                    .help(canArchive ? "" : readOnlyNotes.first ?? "None of these sessions can be archived.")
                 Spacer()
                 Button("Move to Trash\u{2026}", systemImage: "trash", action: onDelete)
                     .disabled(!canDelete)
+                    .help(canDelete ? "" : readOnlyNotes.first ?? "None of these sessions can be deleted.")
             }
             .padding(16)
         }

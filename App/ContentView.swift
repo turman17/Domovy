@@ -17,6 +17,16 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
     }
 }
 
+extension SidebarItem {
+    init(_ section: DomovySettings.LaunchSection) {
+        switch section {
+        case .sessions: self = .sessions
+        case .disk: self = .disk
+        case .processes: self = .processes
+        }
+    }
+}
+
 enum SidebarSelection: Hashable {
     case section(SidebarItem)
     case agent(AgentKind)
@@ -25,6 +35,7 @@ enum SidebarSelection: Hashable {
 struct ContentView: View {
     @Environment(SessionLibrary.self) private var library
     @Environment(\.undoManager) private var undoManager
+    @Environment(\.openWindow) private var openWindow
     @State private var selection: SidebarSelection? = AppEnvironment.startSection
     @State private var search = ""
 
@@ -45,7 +56,7 @@ struct ContentView: View {
             SidebarView(selection: $selection)
         } detail: {
             if showsSessions {
-                SessionsView(agentFilter: agentFilter, search: search)
+                SessionsView(agentFilter: agentFilter, search: search, clearSearch: { search = "" })
             } else if selection == .section(.disk) {
                 DiskView(onOpenSessions: { selection = .agent($0) })
             } else if selection == .section(.processes) {
@@ -55,15 +66,22 @@ struct ContentView: View {
         .searchable(text: $search, placement: .toolbar, prompt: "Search")
         .onAppear {
             library.undoManager = undoManager
+            MainWindow.openAction = openWindow
             openRequestedSection()
         }
         .onChange(of: library.requestedSection) { _, _ in openRequestedSection() }
+        // A search belongs to the list it was typed in: another sidebar item starts unfiltered.
+        .onChange(of: selection) { search = "" }
         .onChange(of: library.requestedSearch) { _, requested in
             guard let requested else { return }
             search = requested
             library.requestedSearch = nil
         }
         .onChange(of: undoManager) { _, manager in library.undoManager = manager }
+        #if DEBUG
+        .onChange(of: PerfDriver.shared.sidebarRequest) { _, request in if let request { selection = request.selection } }
+        .onChange(of: PerfDriver.shared.searchRequest) { _, request in if let request { search = request.text } }
+        #endif
     }
 
     /// The menu bar popover asks for a section ("Open Disk").

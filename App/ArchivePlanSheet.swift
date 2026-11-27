@@ -59,6 +59,10 @@ struct ArchivePlanSheet: View {
         if commandCount > 0 {
             parts.append("Runs codex archive for \(commandCount) Codex \(commandCount == 1 ? "session" : "sessions"), then checks the result.")
         }
+        let relocated = planned.filter { !$0.relocations.isEmpty }.count
+        if relocated > 0 {
+            parts.append("Moves \(relocated) \(relocated == 1 ? "session" : "sessions") into the agent's own archive folder, where it lists them as archived.")
+        }
         return (parts + ["You can undo this."]).joined(separator: " ")
     }
 
@@ -79,7 +83,11 @@ struct ArchivePlanSheet: View {
                         .font(.title3.weight(.semibold))
                     Text(failure ?? nothingText)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     HStack {
+                        if request.sessions.count == 1, let session = request.sessions.first {
+                            Button("Show in Finder", systemImage: "folder") { revealInFinder(session) }
+                        }
                         Spacer()
                         Button("OK") { dismiss() }
                             .keyboardShortcut(.defaultAction)
@@ -93,11 +101,21 @@ struct ArchivePlanSheet: View {
         .frame(width: 560)
         .task {
             do {
-                plans = try await library.archivePlans(for: request.sessions)
+                let result = try await library.archivePlans(for: request.sessions)
+                if result.count == 1, let plan = result.first, plan.isEmpty, !plan.liveCheck.isLive {
+                    // Nothing to change: the plan's own words say why.
+                    failure = ([plan.remarks.isEmpty ? plan.summary : plan.remarks.joined(separator: " ")] + request.notes).joined(separator: " ")
+                    plans = []
+                } else {
+                    plans = result
+                }
             } catch {
                 failure = error.localizedDescription
                 plans = []
             }
+            #if DEBUG
+            PerfDriver.shared.planShown = true
+            #endif
         }
     }
 
@@ -145,6 +163,18 @@ struct ArchivePlanSheet: View {
         List {
             ForEach(planned) { plan in
                 CommandsSection(commands: plan.commands)
+                if !plan.relocations.isEmpty {
+                    Section("\(plan.agent.displayName) · moved to its archive folder") {
+                        ForEach(plan.relocations, id: \.source) { item in
+                            ChangeRow(
+                                symbol: "archivebox",
+                                path: relativePath(item.source, under: library.root(for: plan.agent)),
+                                note: "\(item.note) \u{2192} \(item.target.deletingLastPathComponent().lastPathComponent)/",
+                                size: item.sizeBytes.formatted(.byteCount(style: .file))
+                            )
+                        }
+                    }
+                }
                 if !plan.compressions.isEmpty {
                     Section(sectionTitle(plan)) {
                         ForEach(plan.compressions, id: \.file) { item in

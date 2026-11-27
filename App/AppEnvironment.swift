@@ -19,8 +19,10 @@ enum AppEnvironment {
         home.appendingPathComponent("Library/Application Support/Domovy", isDirectory: true)
     }
 
-    /// Debug only: `DOMOVY_START_SECTION=disk` opens the window on that section, so a window
-    /// capture can show it without clicking.
+    /// The section Settings > General opens at launch. Debug only: `DOMOVY_START_SECTION=disk`
+    /// opens the window on that section, so a window capture can show it without clicking.
+    /// Rules are a Settings pane: `DOMOVY_OPEN_SETTINGS=rules` (see `startSettingsPane`).
+    @MainActor
     static var startSection: SidebarSelection {
         #if DEBUG
         if let raw = ProcessInfo.processInfo.environment["DOMOVY_START_SECTION"],
@@ -28,7 +30,16 @@ enum AppEnvironment {
             return .section(item)
         }
         #endif
-        return .section(.sessions)
+        return .section(SidebarItem(AppSettings.shared.settings.launchSection))
+    }
+
+    /// Debug only: `DOMOVY_OPEN_SETTINGS=rules` (any pane's name, like `safety`) opens Settings
+    /// on that pane at launch; `1` opens it on General.
+    static var startSettingsPane: SettingsCategory? {
+        #if DEBUG
+        if let raw = ProcessInfo.processInfo.environment["DOMOVY_OPEN_SETTINGS"] { return SettingsCategory(rawValue: raw.lowercased()) }
+        #endif
+        return nil
     }
 
     /// Debug only: `DOMOVY_DISK_ANCHOR=local-models` scrolls the Disk screen there at launch.
@@ -86,7 +97,24 @@ enum AppEnvironment {
         #endif
     }
 
-    static var isDevHome: Bool {
-        ProcessInfo.processInfo.environment["DOMOVY_ROOT"]?.isEmpty == false
+    /// Debug only: `DOMOVY_PERF=1` runs the self-driving timing harness (App/PerfHarness.swift).
+    static var perfEnabled: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["DOMOVY_PERF"] == "1"
+        #else
+        return false
+        #endif
+    }
+
+    /// Read once: the toolbar asks on every update.
+    static let isDevHome = ProcessInfo.processInfo.environment["DOMOVY_ROOT"]?.isEmpty == false
+    /// Debug builds: `DOMOVY_SCREENSHOT=1` hides dev-only chrome (the "Dev home" badge) for
+    /// release screenshots.
+    static var isScreenshot: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["DOMOVY_SCREENSHOT"] == "1"
+        #else
+        false
+        #endif
     }
 }

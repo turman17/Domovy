@@ -14,6 +14,9 @@ struct DiskView: View {
     @State private var cleanupRequest: CleanupRequest?
     @State private var modelRequest: ModelRemovalRequest?
     @State private var purgeRequest: PurgeRequest?
+    @State private var leftoverRequest: LeftoverRequest?
+    /// Agent worktrees and build output in the sessions' projects, scanned after every reload.
+    @State private var leftovers: LeftoverReport = .empty
     @State private var errorMessage: String?
     /// Local models ticked for "Remove Selected…", by `LocalModel.id`.
     @State private var selectedModels: Set<String> = []
@@ -23,6 +26,9 @@ struct DiskView: View {
     private var ordered: [Footprint] {
         library.footprints.sorted { $0.totalBytes > $1.totalBytes }
     }
+
+    /// Lit by the tour's Disk step.
+    private var safestAgent: AgentKind? { TourHost.safestAgent(library) }
 
     private var selection: ModelSelection {
         ModelSelection(selected: $selectedModels, unusedDays: unusedDays, onRemove: { requestModelRemoval([$0]) })
@@ -48,9 +54,16 @@ struct DiskView: View {
                         if !library.orphanReport.isEmpty {
                             OrphansSection(report: library.orphanReport, onCleanUp: requestCleanUp)
                         }
+                        if !leftovers.isEmpty {
+                            LeftoversSection(report: leftovers) { selection, includingWork in
+                                leftoverRequest = LeftoverRequest(report: leftovers, selection: selection, includingWork: includingWork)
+                            }
+                            .id(LeftoversSection.anchor)
+                        }
                         ForEach(ordered.filter { !$0.agent.isModelStore }, id: \.agent) { footprint in
                             AgentFootprintSection(footprint: footprint, onOpenSessions: onOpenSessions, onCleanUp: { requestCleanUp(.orphans) }, onGuidedCleanup: requestCleanup)
                                 .id(footprint.agent.rawValue) // DOMOVY_DISK_ANCHOR=gemini
+                                .tourAnchor(footprint.agent == safestAgent ? .diskSafest : nil)
                         }
                         if !library.modelFootprints.isEmpty {
                             LocalModelsHeader(unusedDays: $unusedDays, selected: $selectedModels, onRemoveSelected: removeSelected, onPurgeCopies: requestPurge)
@@ -88,6 +101,19 @@ struct DiskView: View {
         .sheet(item: $purgeRequest) { request in
             PurgeSheet(plan: request.plan)
         }
+        .sheet(item: $leftoverRequest) { request in
+            LeftoverPlanSheet(request: request)
+        }
+        .task(id: library.isLoading ? -1 : library.revision) {
+            // Runs git read-only per repository, once a scan has settled; a reload (also after a
+            // cleanup) scans again.
+            guard !library.isLoading, library.revision > 0 else { return }
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            let report = await library.leftoverReport()
+            guard !Task.isCancelled else { return }
+            leftovers = report
+        }
         .onChange(of: library.footprints) { _, _ in
             // Models removed since are no longer selectable.
             selectedModels.formIntersection(library.localModels.map(\.id))
@@ -124,7 +150,7 @@ struct DiskView: View {
     private func requestCleanup(_ id: CleanupID) {
         Task {
             do {
-                cleanupRequest = CleanupRequest(cleanup: try await library.cleanupPlan(id, destination: .trash))
+                cleanupRequest = CleanupRequest(cleanup: try await library.cleanupPlan(id, destination: AppSettings.shared.settings.deleteDestination))
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -151,7 +177,7 @@ struct DiskView: View {
         guard !models.isEmpty else { return }
         Task {
             do {
-                modelRequest = ModelRemovalRequest(removal: try await library.modelRemovalPlan(models, destination: .trash))
+                modelRequest = ModelRemovalRequest(removal: try await library.modelRemovalPlan(models, destination: AppSettings.shared.settings.deleteDestination))
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -162,7 +188,7 @@ struct DiskView: View {
     private func requestCleanUp(_ scope: OrphanScope) {
         Task {
             do {
-                let plan = try await library.orphanPlan(scope, destination: .trash)
+                let plan = try await library.orphanPlan(scope, destination: AppSettings.shared.settings.deleteDestination)
                 guard !plan.isEmpty else {
                     errorMessage = plan.remarks.first ?? "Nothing to clean up: \(scope == .orphans ? library.orphanReport.orphanSummary : library.orphanReport.duplicateSummary)"
                     return
@@ -219,7 +245,9 @@ struct DiskView: View {
             ContentUnavailableView(
                 "No agent folders found",
                 systemImage: "internaldrive",
-                description: Text("Domovy looked for Claude Code, Claude Desktop, Codex, Cursor and local model stores and found none. The house is in order.")
+                description: Text(AppSettings.shared.settings.hiddenAgents.isEmpty
+                    ? "Domovy looked for the folders of every agent it knows, and for local model stores, and found none. The house is in order."
+                    : "Some agents are hidden in Settings > Agents. Domovy found no folders from the others.")
             )
         }
     }
