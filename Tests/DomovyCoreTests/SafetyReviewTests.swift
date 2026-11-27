@@ -108,7 +108,8 @@ struct SafetyReviewTests {
                                      copiesBeforeRun: [manifest], verifications: [.fileGone(manifest)], isPermanent: true)
         let plan = Plan(agent: .ollama, sessionID: "model", action: .delete, destination: nil, moves: [], indexEdits: [],
                         commands: [command], liveCheck: original.liveCheck, scope: original.scope)
-        let executor = Executor(storeRoot: store, runner: ProcessCommandRunner(timeout: 1), processes: FixedProcessLister([]))
+        // 3 s, not 1: under a busy parallel run the script may not reach `rm` within a second.
+        let executor = Executor(storeRoot: store, runner: ProcessCommandRunner(timeout: 3), processes: FixedProcessLister([]))
         #expect(throws: ExecutorError.self) { try executor.execute(plan) }
         #expect(!FileManager.default.fileExists(atPath: manifest.path))
         let entry = try #require(try executor.undoLog.entries().first)

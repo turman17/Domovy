@@ -68,3 +68,59 @@ extension Executor {
         }
     }
 }
+
+/// Moves within the agent's own folder (an archive the agent understands, such as Qwen Code's
+/// `chats/archive/`). Each is a rename on one volume, which keeps modification times; one that
+/// would cross volumes or land on an existing item is refused before anything moves.
+extension Executor {
+    func relocate(_ relocations: [FileRelocation], entry: inout UndoEntry) throws {
+        let present = relocations.filter { FileSystem.exists($0.source) }
+        for item in present {
+            if FileSystem.exists(item.target) {
+                throw ExecutorError.moveFailed(item.source, reason: "\(item.target.lastPathComponent) already exists in \(item.target.deletingLastPathComponent().lastPathComponent)/", movedSoFar: 0, total: present.count)
+            }
+        }
+        for item in present {
+            do {
+                let folder = item.target.deletingLastPathComponent()
+                try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+                guard Self.isSameVolume(item.source, folder) else {
+                    throw CocoaError(.fileWriteVolumeReadOnly, userInfo: [NSLocalizedDescriptionKey: "the target folder is on another volume"])
+                }
+                try fileManager.moveItem(at: item.source, to: item.target)
+                entry.relocated.append(.init(original: item.source, current: item.target))
+                try undoLog.write(entry)
+            } catch {
+                entry.failure = error.localizedDescription
+                try undoLog.write(entry)
+                throw ExecutorError.moveFailed(item.source, reason: error.localizedDescription, movedSoFar: entry.relocated.count, total: present.count)
+            }
+        }
+    }
+
+    /// Moves relocated items back, last first. One the agent moved back or removed itself is
+    /// left as it is; one whose original place is taken again stops the undo.
+    func restoreRelocated(_ entry: inout UndoEntry) throws {
+        var remaining = entry.relocated
+        for item in entry.relocated.reversed() {
+            if FileSystem.exists(item.current) {
+                guard !FileSystem.exists(item.original) else {
+                    entry.relocated = remaining
+                    try undoLog.write(entry)
+                    throw ExecutorError.restoreFailed(item.original, reason: "something else now exists at its original place")
+                }
+                do {
+                    try fileManager.moveItem(at: item.current, to: item.original)
+                } catch {
+                    entry.relocated = remaining
+                    try undoLog.write(entry)
+                    throw ExecutorError.restoreFailed(item.original, reason: error.localizedDescription)
+                }
+            } else {
+                Log.executor.info("Left \(item.original.path, privacy: .private) as is: it is no longer where the archive put it")
+            }
+            remaining.removeAll { $0 == item }
+        }
+        entry.relocated = []
+    }
+}

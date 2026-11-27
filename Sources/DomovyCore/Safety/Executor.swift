@@ -98,6 +98,8 @@ public struct Executor: Sendable {
     /// Called between reading a shared index file and swapping in its new version; tests
     /// append a line here, the way a running agent would.
     var indexRewriteHook: IndexFileRewrite.Hook?
+    /// The open-file snapshot the checks of a batch share; tests shorten or lengthen its age.
+    var openFiles = OpenFileSnapshots()
     var fileManager: FileManager { .default }
 
     public var quarantineDirectory: URL { storeRoot.appendingPathComponent("Quarantine", isDirectory: true) }
@@ -140,7 +142,8 @@ public struct Executor: Sendable {
         return try plans.map { try execute($0, batchID: batch) }
     }
 
-    private func execute(_ plan: Plan, batchID: UUID?) throws -> UndoEntry {
+    /// One plan as a member of `batchID`. Internal so a rules run can group plans it executes one by one.
+    func execute(_ plan: Plan, batchID: UUID?) throws -> UndoEntry {
         guard !plan.liveCheck.isLive else { throw ExecutorError.sessionIsLive(reasons: plan.liveCheck.reasons) }
         guard !plan.isEmpty else { throw ExecutorError.nothingToDo }
         if plan.needsAcknowledgement, let text = plan.acknowledgement { throw ExecutorError.needsAcknowledgement(text) }
@@ -150,7 +153,8 @@ public struct Executor: Sendable {
         guard blocking.isEmpty else { throw ExecutorError.appRunning(reasons: blocking) }
         // An agent may have opened the session since the plan. Files rewritten in place are
         // checked again one by one, right before each swap.
-        try requireNotOpen(plan.moves.map(\.source) + plan.registryRemovals.map(\.file))
+        try requireNotOpen(plan.moves.map(\.source) + plan.registryRemovals.map(\.file) + plan.jsonRemovals.map(\.file)
+            + plan.relocations.map(\.source))
 
         var entry = UndoEntry(
             id: UUID(),
@@ -179,6 +183,10 @@ public struct Executor: Sendable {
         for edit in plan.databaseEdits where !edit.isEmpty {
             try editDatabase(edit, entry: &entry)
         }
+        for removal in plan.jsonRemovals {
+            try removeJSONMember(removal, entry: &entry)
+        }
+        try relocate(plan.relocations, entry: &entry)
         if plan.action == .archive { return try compress(plan, entry: entry) }
         if plan.action == .redact { return try redact(plan, entry: entry) }
         Log.executor.info("Executing plan \(plan.id, privacy: .public) for session \(plan.sessionID, privacy: .public): \(plan.moves.count) moves, \(plan.indexEdits.count) index edits, \(plan.registryRemovals.count) registry entries")
@@ -439,6 +447,8 @@ public struct Executor: Sendable {
         }
         entry.moved = []
 
+        try restoreRelocated(&entry)
+
         // Decompress archived files. A file the agent rewrote or removed since is left as is.
         var stillCompressed = entry.compressed
         for item in entry.compressed {
@@ -471,9 +481,29 @@ public struct Executor: Sendable {
 
         entry.undoneAt = now()
         try undoLog.write(entry)
+        carrySnapshots(found.snapshots, of: entry)
         let folder = quarantineDirectory.appendingPathComponent(entry.id.uuidString, isDirectory: true)
         if FileSystem.exists(folder), FileSystem.children(of: folder).isEmpty { try? fileManager.removeItem(at: folder) }
         return entry
+    }
+
+    /// Several plans of a batch edit the same database one after the other (Antigravity's
+    /// summaries, Cursor's state.vscdb). Undoing the later one puts back the file as the earlier
+    /// one left it, as a new file: the earlier entry learns that this new file is "as it left
+    /// it", so its own undo still works. Only files whose fingerprint matched exactly are carried.
+    private func carrySnapshots(_ restored: [UndoEntry.SnapshotItem], of entry: UndoEntry) {
+        guard let batch = entry.batchID, !restored.isEmpty, let peers = try? undoLog.entries() else { return }
+        for var peer in peers where peer.batchID == batch && peer.id != entry.id && peer.isUndoable {
+            var changed = false
+            for index in peer.snapshots.indices {
+                let item = peer.snapshots[index]
+                guard let after = item.after,
+                      restored.contains(where: { $0.original == item.original && $0.before == after && $0.copy != nil }) else { continue }
+                peer.snapshots[index].after = FileFingerprint(of: item.original)
+                changed = true
+            }
+            if changed { try? undoLog.write(peer) }
+        }
     }
 
     private func restore(_ item: UndoEntry.MovedItem) throws {

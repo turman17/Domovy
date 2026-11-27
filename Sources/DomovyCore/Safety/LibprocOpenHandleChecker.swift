@@ -22,6 +22,11 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
     private var mappedSnapshot: [OpenHandleHolder]?
     private var mappedSnapshotTakenAt: Date = .distantPast
 
+    /// One checker for every adapter made with `init(home:)`, so a scan of all agents (they run
+    /// side by side) takes one snapshot instead of one per agent. Listing and planning only:
+    /// the executor takes its own (`OpenFileSnapshots`).
+    public static let shared = LibprocOpenHandleChecker()
+
     /// - Parameter cacheLifetime: how long one process snapshot answers repeated calls.
     public init(cacheLifetime: TimeInterval = 1) {
         self.cacheLifetime = cacheLifetime
@@ -59,10 +64,15 @@ public actor LibprocOpenHandleChecker: OpenHandleChecker {
     /// cache; `nil` when that could not be checked. For the executor, right before it writes.
     static func currentHolders(of urls: [URL]) -> [OpenHandleHolder]? {
         guard !urls.isEmpty else { return [] }
+        return currentSnapshot().map { matchOpenPaths($0, against: urls) }
+    }
+
+    /// Every open and every mapped regular file of the processes we may inspect, each holder
+    /// once, without the cache; `nil` when either could not be read.
+    static func currentSnapshot() -> [OpenHandleHolder]? {
         guard let snapshot = takeSnapshot(), let mapped = takeMappedSnapshot() else { return nil }
-        var matches = matchOpenPaths(snapshot, against: urls)
-        for holder in matchOpenPaths(mapped, against: urls) where !matches.contains(holder) { matches.append(holder) }
-        return matches
+        var seen = Set(snapshot)
+        return snapshot + mapped.filter { seen.insert($0).inserted }
     }
 
     // MARK: libproc

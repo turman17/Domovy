@@ -89,6 +89,10 @@ public protocol RunningProcessLister: Sendable {
     /// Every process holding one of `urls` (or something below them) open, mapped files
     /// included: empty when none does, `nil` when that could not be checked.
     func holders(of urls: [URL]) -> [OpenHandleHolder]?
+    /// Every regular file any inspectable process holds open or has mapped, right now: what
+    /// `holders(of:)` matches against, for the executor to share between the checks of a batch
+    /// (`OpenFileSnapshots`). `nil` when that could not be read.
+    func openFileSnapshot() -> [OpenHandleHolder]?
 }
 
 extension RunningProcessLister {
@@ -155,6 +159,10 @@ public struct LibprocProcessLister: RunningProcessLister {
     public func holders(of urls: [URL]) -> [OpenHandleHolder]? {
         LibprocOpenHandleChecker.currentHolders(of: urls)
     }
+
+    public func openFileSnapshot() -> [OpenHandleHolder]? {
+        LibprocOpenHandleChecker.currentSnapshot()
+    }
 }
 
 /// Fixed answers, for tests and previews.
@@ -184,10 +192,13 @@ public struct FixedProcessLister: RunningProcessLister {
 
     /// Unsure when any pid cannot be read.
     public func holders(of urls: [URL]) -> [OpenHandleHolder]? {
+        openFileSnapshot().map { matchOpenPaths($0, against: urls) }
+    }
+
+    public func openFileSnapshot() -> [OpenHandleHolder]? {
         guard unreadable.isEmpty else { return nil }
-        let all = openFiles.sorted { $0.key < $1.key }.flatMap { pid, paths in
+        return openFiles.sorted { $0.key < $1.key }.flatMap { pid, paths in
             paths.map { OpenHandleHolder(pid: pid, processName: processes?.first { $0.pid == pid }?.name ?? "pid \(pid)", path: $0) }
         }
-        return matchOpenPaths(all, against: urls)
     }
 }

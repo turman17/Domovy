@@ -123,6 +123,8 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
     public var snapshots: [SnapshotItem] = []
     /// The folders the plan was allowed to change; undo puts nothing back outside them.
     public var scope: [URL] = []
+    /// Files an archive moved within the agent's folder (`current` is inside it too).
+    public var relocated: [MovedItem] = []
 
     public var isUndone: Bool { undoneAt != nil }
     /// Still pending and its files are still there to put back.
@@ -130,7 +132,7 @@ public struct UndoEntry: Identifiable, Codable, Sendable {
     /// Undoable and something did change, e.g. what a plan that stopped half way already did.
     public var hasChangesToUndo: Bool {
         isUndoable && !(moved.isEmpty && indexRestores.isEmpty && compressed.isEmpty && undoCommands.isEmpty
-            && redacted.isEmpty && registryRestores.isEmpty && snapshots.isEmpty)
+            && redacted.isEmpty && registryRestores.isEmpty && snapshots.isEmpty && relocated.isEmpty)
     }
 }
 
@@ -138,7 +140,7 @@ extension UndoEntry {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, planID, batchID, action, agent, sessionID, destination
         case moved, indexRestores, compressed, undoCommands, mustNotBeRunning, leftovers, undoneAt, failure
-        case redacted, secretFindingCount, originalsPurgedAt, registryRestores, irreversible, notes, snapshots, scope
+        case redacted, secretFindingCount, originalsPurgedAt, registryRestores, irreversible, notes, snapshots, scope, relocated
     }
 
     /// Entries written by older versions lack the newer fields; they decode with empty defaults.
@@ -170,6 +172,7 @@ extension UndoEntry {
         notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
         snapshots = try c.decodeIfPresent([SnapshotItem].self, forKey: .snapshots) ?? []
         scope = try c.decodeIfPresent([URL].self, forKey: .scope) ?? []
+        relocated = try c.decodeIfPresent([MovedItem].self, forKey: .relocated) ?? []
     }
 }
 

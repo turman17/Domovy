@@ -70,6 +70,52 @@ public struct RegistryRemoval: Hashable, Codable, Sendable {
     }
 }
 
+/// One member cut out of an object inside an app's JSON file, such as one conversation of
+/// Antigravity's `cache/conversation_metadata.json` (`{"conversations": {"<id>": …}}`). Every
+/// other byte stays. The executor clones the file first and keeps its modification time; undo
+/// puts the clone back only while the file is exactly as the edit left it.
+public struct JSONMemberRemoval: Hashable, Codable, Sendable {
+    public let file: URL
+    /// The member of the top-level object that holds the object to cut from.
+    public let field: String
+    /// The key of the member to cut, compared ignoring case.
+    public let key: String
+    public let sizeBytes: Int64
+    public let note: String
+    /// Set to cut entries of a JSON list instead: the entries whose `idField` is `key`, of the
+    /// array under `field` (empty: the top-level array, like Continue's `sessions.json`).
+    public let idField: String?
+
+    public init(file: URL, field: String, key: String, sizeBytes: Int64, note: String, idField: String? = nil) {
+        self.file = file
+        self.field = field
+        self.key = key
+        self.sizeBytes = sizeBytes
+        self.note = note
+        self.idField = idField
+    }
+}
+
+/// A file or folder that moves to another place inside the agent's own folder, the way the
+/// agent archives a session itself (Qwen Code's `chats/archive/`). A rename on one volume, so
+/// modification times stay; undo moves it back. Nothing leaves the agent's folder.
+public struct FileRelocation: Hashable, Codable, Sendable {
+    public let source: URL
+    /// Where it goes. The executor refuses when something is already there.
+    public let target: URL
+    public let kind: Artifact.Kind
+    public let sizeBytes: Int64
+    public let note: String
+
+    public init(source: URL, target: URL, kind: Artifact.Kind, sizeBytes: Int64, note: String) {
+        self.source = source
+        self.target = target
+        self.kind = kind
+        self.sizeBytes = sizeBytes
+        self.note = note
+    }
+}
+
 /// One file that an archive rewrites in place with APFS transparent compression.
 /// The agent reads it exactly as before; only the on-disk size changes.
 public struct FileCompression: Hashable, Codable, Sendable {
@@ -113,11 +159,16 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     /// Index files removed whole (Claude Desktop registry entries).
     public let registryRemovals: [RegistryRemoval]
     public let compressions: [FileCompression]
+    /// Files moved within the agent's folder (an archive the agent itself understands).
+    public let relocations: [FileRelocation]
     /// The agent's own commands, run before any move or edit (e.g. `codex delete`).
     public let commands: [PlannedCommand]
     /// Rows Domovy deletes from an app's database itself, after the commands and before any
     /// move (Cursor's `state.vscdb`, which has no command for one chat).
     public let databaseEdits: [DatabaseEdit]
+    /// Members Domovy cuts out of an app's JSON index (Antigravity's metadata cache), after the
+    /// database edits and before any move.
+    public let jsonRemovals: [JSONMemberRemoval]
     /// Files a redaction rewrites, with every value it replaces.
     public let redactions: [FileRedaction]
     /// Findings a redaction leaves alone, each with the reason.
@@ -136,7 +187,7 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     public var isAcknowledged = false
     /// Apps that must not run while this plan executes; the executor checks again right before.
     public let mustNotBeRunning: [ProcessMatcher]
-    public let liveCheck: LiveCheckResult
+    public var liveCheck: LiveCheckResult
     /// The folders this plan may change: the adapter's root (or roots). The executor refuses any
     /// path outside them, so an id read from the agent's data can never point a move elsewhere.
     public let scope: [URL]
@@ -152,8 +203,10 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         indexEdits: [IndexEdit],
         registryRemovals: [RegistryRemoval] = [],
         compressions: [FileCompression] = [],
+        relocations: [FileRelocation] = [],
         commands: [PlannedCommand] = [],
         databaseEdits: [DatabaseEdit] = [],
+        jsonRemovals: [JSONMemberRemoval] = [],
         redactions: [FileRedaction] = [],
         skippedSecrets: [SkippedSecret] = [],
         remarks: [String] = [],
@@ -172,8 +225,10 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         self.indexEdits = indexEdits
         self.registryRemovals = registryRemovals
         self.compressions = compressions
+        self.relocations = relocations
         self.commands = commands
         self.databaseEdits = databaseEdits
+        self.jsonRemovals = jsonRemovals
         self.redactions = redactions
         self.skippedSecrets = skippedSecrets
         self.remarks = remarks
@@ -187,7 +242,8 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         moves.reduce(0) { $0 + $1.sizeBytes } + indexEdits.reduce(0) { $0 + $1.removedBytes }
             + registryRemovals.reduce(0) { $0 + $1.sizeBytes }
             + compressions.reduce(0) { $0 + $1.sizeBytes } + commands.reduce(0) { $0 + $1.sizeBytes }
-            + databaseEdits.reduce(0) { $0 + $1.sizeBytes }
+            + databaseEdits.reduce(0) { $0 + $1.sizeBytes } + jsonRemovals.reduce(0) { $0 + $1.sizeBytes }
+            + relocations.reduce(0) { $0 + $1.sizeBytes }
     }
 
     /// Estimated on-disk bytes of the compressed files after an archive.
@@ -207,8 +263,8 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
     }
 
     public var isEmpty: Bool {
-        moves.isEmpty && indexEdits.isEmpty && registryRemovals.isEmpty && compressions.isEmpty && commands.isEmpty && redactions.isEmpty
-            && databaseEdits.allSatisfy(\.isEmpty)
+        moves.isEmpty && indexEdits.isEmpty && registryRemovals.isEmpty && compressions.isEmpty && relocations.isEmpty && commands.isEmpty && redactions.isEmpty
+            && databaseEdits.allSatisfy(\.isEmpty) && jsonRemovals.isEmpty
     }
 
     /// Values a redaction replaces, across all files.
@@ -232,6 +288,12 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
             return commandText + " You can undo this."
         }
         if action == .redact { return redactionSummary }
+        if action == .archive, !relocations.isEmpty {
+            let n = relocations.count
+            let bytes = formatter.string(fromByteCount: relocations.reduce(0) { $0 + $1.sizeBytes })
+            let folder = relocations[0].target.deletingLastPathComponent().lastPathComponent
+            return "Moves \(n) \(n == 1 ? "file" : "files") (\(bytes)) into \(folder)/, where \(agent.displayName) lists the session as archived. Nothing is deleted. You can undo this."
+        }
         if action == .archive {
             guard !compressions.isEmpty else {
                 return remarks.first ?? "Nothing to compress: the files of this session are already compressed or too small to gain from it."
@@ -256,8 +318,16 @@ public struct Plan: Identifiable, Hashable, Codable, Sendable {
         }
         for edit in databaseEdits where !edit.isEmpty {
             let n = edit.rowCount
+            guard n > 0 else {
+                let bytes = edit.sizeBytes > 0 ? " (\(formatter.string(fromByteCount: edit.sizeBytes)))" : ""
+                parts.append("takes it out of \(edit.database.lastPathComponent)\(bytes), keeping a copy of the whole database first")
+                continue
+            }
             let list = edit.listRemovals.isEmpty ? "" : " and takes it off \(agent.displayName)'s chat list"
             parts.append("deletes \(n) \(n == 1 ? "row" : "rows") (\(formatter.string(fromByteCount: edit.sizeBytes))) from \(edit.database.lastPathComponent)\(list), keeping a copy of the whole database first")
+        }
+        for removal in jsonRemovals {
+            parts.append("takes it out of \(removal.file.lastPathComponent), keeping a copy first")
         }
         guard !parts.isEmpty || !commands.isEmpty else { return remarks.first ?? "Nothing to do." }
         let rest = parts.isEmpty ? "" : parts.joined(separator: " and ") + ". "

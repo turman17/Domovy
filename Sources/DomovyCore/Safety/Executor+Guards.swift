@@ -5,7 +5,8 @@ extension Plan {
     /// Every file or folder the plan moves, rewrites, edits or lets a command delete or rewrite.
     var changedFiles: [URL] {
         moves.map(\.source) + indexEdits.map(\.file) + registryRemovals.map(\.file) + compressions.map(\.file)
-            + redactions.map(\.file) + databaseEdits.flatMap { [$0.database] + $0.files }
+            + relocations.flatMap { [$0.source, $0.target] }
+            + redactions.map(\.file) + databaseEdits.flatMap { [$0.database] + $0.files } + jsonRemovals.map(\.file)
             + commands.flatMap { $0.copiesBeforeRun + $0.snapshotsBeforeRun + $0.indexLinesBeforeRun.map(\.file) }
     }
 }
@@ -34,9 +35,11 @@ extension Executor {
         }
         let backups = entry.indexRestores.map(\.backup) + entry.registryRestores.map(\.backup) + entry.snapshots.compactMap(\.copy)
         if let stray = backups.first(where: { !Self.isInside($0, [storeRoot]) }) { throw ExecutorError.outsideScope(stray) }
+        // A relocation stays inside the agent's folder, so it is never undone without a scope.
+        if entry.scope.isEmpty, let first = entry.relocated.first { throw ExecutorError.outsideScope(first.current) }
         guard !entry.scope.isEmpty else { return }
         let originals = entry.moved.map(\.original) + entry.indexRestores.map(\.file) + entry.registryRestores.map(\.file)
-            + entry.redacted.map(\.file) + entry.snapshots.map(\.original)
+            + entry.redacted.map(\.file) + entry.snapshots.map(\.original) + entry.relocated.flatMap { [$0.original, $0.current] }
         if let stray = originals.first(where: { !Self.isInside($0, entry.scope) }) { throw ExecutorError.outsideScope(stray) }
     }
 
@@ -55,9 +58,11 @@ extension Executor {
 
     /// Refuses while any other process holds one of `files` open; unsure counts as open
     /// (safety rule 2). Domovy's own handles are readers (a preview, a scan), not agents.
+    /// Answered from a process snapshot at most `OpenFileSnapshots.maxAge` old, shared by the
+    /// checks of a batch (see `OpenFileSnapshots` for why that is as safe as a fresh one).
     func requireNotOpen(_ files: [URL]) throws {
         guard !files.isEmpty else { return }
-        guard let holders = processes.holders(of: files) else {
+        guard let holders = openFiles.holders(of: files, from: processes) else {
             throw ExecutorError.filesOpen(reasons: ["Domovy could not check which processes have \(files[0].lastPathComponent) open, so it changes nothing."])
         }
         let me = getpid()
