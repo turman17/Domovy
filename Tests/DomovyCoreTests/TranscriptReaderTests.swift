@@ -50,4 +50,45 @@ struct TranscriptReaderTests {
         let missing = session.transcriptURL.deletingLastPathComponent().appendingPathComponent("nope.jsonl")
         #expect(throws: AdapterError.self) { try TranscriptReader().read(missing) }
     }
+
+    @Test("pages from the end: newest messages first, older pages until the start, same messages in order")
+    func pagesFromTheEnd() async throws {
+        let fixture = try FixtureHome()
+        let adapter = fixture.adapter()
+        let session = try await adapter.session(matching: IDs.idle)
+        let all = try await adapter.transcript(of: session, limit: 50).messages
+
+        let newest = try await adapter.transcriptPage(of: session, limit: 4, before: nil, masking: [])
+        #expect(newest.messages == Array(all.suffix(4)))
+        let cursor = try #require(newest.olderCursor)
+
+        let older = try await adapter.transcriptPage(of: session, limit: 4, before: cursor, masking: [])
+        #expect(older.messages == Array(all.prefix(all.count - 4)))
+        #expect(older.olderCursor == nil)
+
+        let whole = try await adapter.transcriptPage(of: session, limit: 50, before: nil, masking: [])
+        #expect(whole.messages == all)
+        #expect(whole.olderCursor == nil)
+    }
+
+    @Test("a large transcript opens at its last message, past the forward byte budget")
+    func largeTail() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("long.jsonl")
+        let filler = String(repeating: "x", count: 2_000)
+        var text = ""
+        for index in 0..<3_000 {
+            text += #"{"type":"user","uuid":"m\#(index)","message":{"role":"user","content":"\#(index) \#(filler)"}}"# + "\n"
+        }
+        try Data(text.utf8).write(to: file)
+
+        let newest = try TranscriptReader.readPage(file, limit: 200, before: nil)
+        #expect(newest.messages.count == 200)
+        #expect(newest.messages.last?.id == "m2999")
+        #expect(newest.messages.first?.id == "m2800")
+        let older = try TranscriptReader.readPage(file, limit: 200, before: try #require(newest.olderCursor))
+        #expect(older.messages.last?.id == "m2799")
+    }
 }

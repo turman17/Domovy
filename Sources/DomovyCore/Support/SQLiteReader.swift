@@ -64,6 +64,23 @@ final class SQLiteReader {
         query(sql, arguments) ?? []
     }
 
+    /// The first column of the first row as raw bytes, `nil` when there is no row, it is NULL,
+    /// or it is longer than `maxBytes`.
+    func blob(_ sql: String, _ arguments: [String] = [], maxBytes: Int) -> Data? {
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        for (index, argument) in arguments.enumerated() {
+            sqlite3_bind_text(statement, Int32(index + 1), argument, -1, transient)
+        }
+        guard sqlite3_step(statement) == SQLITE_ROW, sqlite3_column_type(statement, 0) != SQLITE_NULL else { return nil }
+        let count = Int(sqlite3_column_bytes(statement, 0))
+        guard count <= maxBytes else { return nil }
+        guard count > 0, let bytes = sqlite3_column_blob(statement, 0) else { return Data() }
+        return Data(bytes: bytes, count: count)
+    }
+
     private func query(_ sql: String, _ arguments: [String]) -> [[String?]]? {
         var statement: OpaquePointer?
         defer { sqlite3_finalize(statement) }

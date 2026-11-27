@@ -46,11 +46,15 @@ enum SQLiteWriter {
 
     private static func delete(_ rows: DatabaseEdit.Rows, in db: OpaquePointer) throws -> Int {
         let table = try identifier(rows.table)
-        if rows.isPrefix {
+        let column = try identifier(rows.column ?? "key")
+        if let encoding = rows.encoding, encoding != .text {
+            guard !rows.isPrefix, let value = keyValue(rows.key, encoding) else { throw Failure(reason: "a key Domovy cannot encode") }
+            try run(db, "DELETE FROM \"\(table)\" WHERE \"\(column)\" = ?1", [value])
+        } else if rows.isPrefix {
             guard let upper = upperBound(of: rows.key) else { throw Failure(reason: "a key prefix Domovy cannot bound") }
-            try run(db, "DELETE FROM \"\(table)\" WHERE key >= ?1 AND key < ?2", [.text(rows.key), .text(upper)])
+            try run(db, "DELETE FROM \"\(table)\" WHERE \"\(column)\" >= ?1 AND \"\(column)\" < ?2", [.text(rows.key), .text(upper)])
         } else {
-            try run(db, "DELETE FROM \"\(table)\" WHERE key = ?1", [.text(rows.key)])
+            try run(db, "DELETE FROM \"\(table)\" WHERE \"\(column)\" = ?1", [.text(rows.key)])
         }
         return Int(sqlite3_changes(db))
     }
@@ -71,7 +75,9 @@ enum SQLiteWriter {
         let data = sqlite3_column_blob(statement, 0).map { Data(bytes: $0, count: count) } ?? Data()
         sqlite3_finalize(statement)
         statement = nil
-        guard let cut = JSONListCut.removing(from: data, field: removal.listField, idField: removal.idField, id: removal.id) else {
+        let found = removal.memberPath.map { JSONListCut.removingMember(from: data, path: $0, key: removal.id) }
+            ?? JSONListCut.removing(from: data, field: removal.listField, idField: removal.idField, id: removal.id)
+        guard let cut = found else {
             throw Failure(reason: "its chat list has a shape Domovy does not know")
         }
         guard cut.removed > 0 else { return 0 }
@@ -88,11 +94,29 @@ enum SQLiteWriter {
         return String(prefix.unicodeScalars.dropLast()) + String(next)
     }
 
+    /// A hex BLOB key or an integer key as the value to bind.
+    private static func keyValue(_ key: String, _ encoding: DatabaseEdit.KeyEncoding) -> Value? {
+        switch encoding {
+        case .text: return .text(key)
+        case .integer: return Int64(key).map(Value.integer)
+        case .hexBlob:
+            let digits = Array(key.utf8)
+            guard !digits.isEmpty, digits.count.isMultiple(of: 2) else { return nil }
+            var bytes: [UInt8] = []
+            for index in stride(from: 0, to: digits.count, by: 2) {
+                guard let byte = UInt8(String(decoding: digits[index...index + 1], as: UTF8.self), radix: 16) else { return nil }
+                bytes.append(byte)
+            }
+            return .blob(Data(bytes))
+        }
+    }
+
     // MARK: Statements
 
     private enum Value {
         case text(String)
         case blob(Data)
+        case integer(Int64)
     }
 
     private static func exec(_ db: OpaquePointer, _ sql: String) throws {
@@ -115,6 +139,8 @@ enum SQLiteWriter {
                 sqlite3_bind_text(statement, Int32(index + 1), text, -1, transient)
             case .blob(let data):
                 _ = data.withUnsafeBytes { sqlite3_bind_blob(statement, Int32(index + 1), $0.baseAddress, Int32(data.count), transient) }
+            case .integer(let number):
+                sqlite3_bind_int64(statement, Int32(index + 1), number)
             }
         }
     }

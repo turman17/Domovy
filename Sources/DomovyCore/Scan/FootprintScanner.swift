@@ -12,7 +12,7 @@ public enum FootprintScanner {
 
     /// The measuring-only providers for agents without a session adapter yet.
     public static func measuredOnly(home: URL) -> [any FootprintProvider] {
-        [ClaudeDesktopFootprint(home: home)]
+        [ClaudeDesktopFootprint(home: home)] + MeasuredAgentFootprint.all(home: home) + [HerdrFootprint(home: home)]
     }
 
     /// The local model stores: Ollama, LM Studio, Hugging Face.
@@ -30,7 +30,7 @@ public enum FootprintScanner {
                         return (index, nil, nil)
                     } catch {
                         Log.adapter.error("Footprint of \(provider.kind.displayName, privacy: .public) failed: \(error.localizedDescription, privacy: .private)")
-                        return (index, nil, error.localizedDescription)
+                        return (index, nil, FullDiskAccess.explain(error, agent: provider.kind))
                     }
                 }
             }

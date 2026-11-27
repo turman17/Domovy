@@ -201,7 +201,7 @@ struct RedactionTests {
         #expect(try Data(contentsOf: url) == changed)
     }
 
-    @Test("Codex: plain rollouts are scanned and redacted, zstd rollouts skipped with a reason")
+    @Test("Codex: plain rollouts are scanned and redacted; zstd rollouts are scanned but never rewritten")
     func codex() async throws {
         let fixture = try CodexFixtureHome()
         let url = fixture.codexDirectory.appendingPathComponent(CodexFixtureHome.idleRollout)
@@ -215,12 +215,22 @@ struct RedactionTests {
         let sessions = try await adapter.sessions()
         let targets = await SecretScanner.targets(for: sessions, adapters: [adapter])
         let report = try await SecretScanner().scan(targets)
-        #expect(report.findings.map(\.ruleID) == ["openai-key"])
-        #expect(report.findings.first?.sessionID == CodexFixtureHome.IDs.idle)
-        #expect(report.skipped.contains { $0.sessionID == CodexFixtureHome.IDs.compressed && $0.reason.contains("zstd") })
+        let plain = report.findings.filter { $0.sessionID == CodexFixtureHome.IDs.idle }
+        #expect(plain.map(\.ruleID) == ["openai-key"])
+        let zstd = report.findings.filter { $0.sessionID == CodexFixtureHome.IDs.compressed }
+        #expect(zstd.map(\.ruleID) == ["aws-access-key"])
+        #expect(zstd.first?.line == 6) // a line of the decompressed rollout
+        #expect(zstd.first?.isRedactable == false)
+        // The bare placeholder `.zst` is not zstd: skipped with the decoder's reason.
+        #expect(report.skipped.contains { $0.sessionID == CodexFixtureHome.IDs.bare && $0.reason.contains("damaged") })
+
+        let compressedSession = try #require(sessions.first { $0.id == CodexFixtureHome.IDs.compressed })
+        let refused = try await RedactionPlanner.plan(for: compressedSession, findings: report.findings, adapter: adapter)
+        #expect(refused.redactionCount == 0)
+        #expect(refused.skippedSecrets.first?.reason == SecretScanner.compressedReason)
 
         let session = try #require(sessions.first { $0.id == CodexFixtureHome.IDs.idle })
-        let plan = try await RedactionPlanner.plan(for: session, findings: report.findings, adapter: adapter)
+        let plan = try await RedactionPlanner.plan(for: session, findings: plain, adapter: adapter)
         #expect(plan.redactionCount == 1)
         #expect(plan.remarks.contains { $0.contains("thread_history_1.sqlite") })
         _ = try fixture.executor().execute(plan)

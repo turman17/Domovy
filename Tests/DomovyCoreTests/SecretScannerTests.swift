@@ -85,7 +85,7 @@ struct SecretScannerTests {
         }
     }
 
-    @Test("zstd rollouts are skipped with a reason, binaries quietly, plain text is not redactable")
+    @Test("damaged zstd files are skipped with a reason, binaries quietly, plain text is not redactable")
     func fileKinds() async throws {
         let zst = try temporaryFile("rollout-x.jsonl.zst", "(\u{B5}/\u{FD} not readable")
         let png = try temporaryFile("ig_0001.png", "\u{0}\u{1}PNG \(SecretSamples.aws)")
@@ -93,7 +93,7 @@ struct SecretScannerTests {
         let s = session(zst)
         let report = try await SecretScanner().scan([SecretScanTarget(session: s, files: [zst, png, text])])
         #expect(report.skipped.count == 1)
-        #expect(report.skipped.first?.reason.contains("zstd") == true)
+        #expect(report.skipped.first?.reason.contains("damaged") == true)
         #expect(report.findings.count == 1)
         #expect(report.findings.first?.line == 2)
         #expect(report.findings.first?.isRedactable == false)
