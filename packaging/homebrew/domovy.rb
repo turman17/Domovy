@@ -9,7 +9,7 @@
 # .local/release/domovy.rb. The app carries the domo CLI, so there is no separate formula.
 cask "domovy" do
   version "1.0.0"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "f1ff4aa9ed74e85696f1fd2c6b547225e355f96753a697666ba908938587e32f"
 
   url "https://github.com/turman17/Domovy/releases/download/v#{version}/Domovy-v#{version}.zip"
   name "Domovy"
