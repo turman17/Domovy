@@ -13,8 +13,19 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
     ],
     targets: [
+        // Vendored zstd 1.5.7, decompression only (Codex `.jsonl.zst`, Zed threads). See VENDORED.md.
+        .target(
+            name: "CZstd",
+            path: "Sources/CZstd",
+            exclude: ["LICENSE", "VENDORED.md"],
+            cSettings: [
+                .define("ZSTD_DISABLE_ASM"),
+                .define("ZSTD_LEGACY_SUPPORT", to: "0"),
+            ]
+        ),
         .target(
             name: "DomovyCore",
+            dependencies: ["CZstd"],
             path: "Sources/DomovyCore"
         ),
         .executableTarget(
