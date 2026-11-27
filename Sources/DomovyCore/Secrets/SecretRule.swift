@@ -32,6 +32,17 @@ public struct SecretRule: Sendable, Hashable, Identifiable {
     let mask: Mask
     /// `false` when a match is only part of the secret (a PEM header without its body).
     let isComplete: Bool
+    /// Where a match can begin relative to a keyword, so the expression runs only there.
+    let start: MatchStart
+
+    /// Where a match begins relative to an occurrence of one of the rule's keywords. Every
+    /// match of the pattern must satisfy it; the matcher tests rely on that.
+    enum MatchStart: Sendable, Hashable {
+        /// Exactly `offset` bytes after the keyword starts (negative: before it).
+        case atKeyword(offset: Int)
+        /// At most `before` bytes before the keyword starts, and no longer than `maxLength`.
+        case nearKeyword(before: Int, maxLength: Int)
+    }
 
     public static func == (a: SecretRule, b: SecretRule) -> Bool { a.id == b.id }
     public func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -101,7 +112,8 @@ public struct SecretRule: Sendable, Hashable, Identifiable {
             id: "slack-webhook", name: "Slack webhook",
             keywords: ["hooks.slack.com"],
             pattern: #"(https://hooks\.slack\.com/services/[A-Za-z0-9_/-]{20,})"#,
-            valueGroup: 1, mask: .label("https://hooks.slack.com/services/\u{2026}")
+            valueGroup: 1, mask: .label("https://hooks.slack.com/services/\u{2026}"),
+            start: .atKeyword(offset: -8)
         ),
         SecretRule(
             id: "stripe-key", name: "Stripe secret key",
@@ -125,7 +137,11 @@ public struct SecretRule: Sendable, Hashable, Identifiable {
             id: "generic-secret", name: "Password or key assignment",
             keywords: ["pass", "secret", "api", "key", "token"],
             pattern: #"(?i)(?<![A-Za-z0-9_])([A-Za-z0-9_.-]{0,40}(?:password|passwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|access[_-]?token|private[_-]?key)[A-Za-z0-9_.-]{0,40})\\?["']?[ \t]{0,3}[:=][ \t]{0,3}\\?["']?([A-Za-z0-9_+/=!@#$%^&*.~-]{10,128})"#,
-            valueGroup: 2, keyGroup: 1, minEntropy: 3.2, requiresMixedValue: true, mask: .keyName
+            valueGroup: 2, keyGroup: 1, minEntropy: 3.2, requiresMixedValue: true, mask: .keyName,
+            // The key word starts at most 40 bytes into the match, and a keyword sits at most
+            // 8 bytes into the key word ("private_key"). Longest match: 40 + 12 + 40 key,
+            // 11 separator, 128 value = 231.
+            start: .nearKeyword(before: 48, maxLength: 240)
         ),
     ]
 
@@ -139,7 +155,8 @@ public struct SecretRule: Sendable, Hashable, Identifiable {
         minEntropy: Double = 0,
         requiresMixedValue: Bool = false,
         mask: Mask,
-        isComplete: Bool = true
+        isComplete: Bool = true,
+        start: MatchStart = .atKeyword(offset: 0)
     ) {
         self.id = id
         self.name = name
@@ -151,6 +168,7 @@ public struct SecretRule: Sendable, Hashable, Identifiable {
         self.requiresMixedValue = requiresMixedValue
         self.mask = mask
         self.isComplete = isComplete
+        self.start = start
     }
 
     /// What a redaction writes in place of the value.

@@ -13,15 +13,46 @@ public struct SecretScanner: Sendable {
 
     /// The files of each session worth reading: transcripts, set-aside copies and everything
     /// below the session's folders, plus the session's own lines of shared index files that
-    /// say which lines are whose (Claude Code's `history.jsonl`).
+    /// say which lines are whose (Claude Code's `history.jsonl`). Sessions are looked up a few
+    /// at a time; the result keeps their order.
     public static func targets(for sessions: [Session], adapters: [any AgentAdapter]) async -> [SecretScanTarget] {
-        var targets: [SecretScanTarget] = []
-        for session in sessions {
-            guard let adapter = adapters.first(where: { $0.kind == session.agent }),
-                  let artifacts = try? await adapter.artifacts(of: session) else { continue }
-            targets.append(SecretScanTarget(session: session, files: files(of: artifacts), indexLines: indexLines(of: artifacts)))
+        var found = [SecretScanTarget?](repeating: nil, count: sessions.count)
+        do {
+            try await inParallel(sessions.count) { index -> SecretScanTarget? in
+                let session = sessions[index]
+                guard let adapter = adapters.first(where: { $0.kind == session.agent }),
+                      let artifacts = try? await adapter.artifacts(of: session) else { return nil }
+                return SecretScanTarget(session: session, files: files(of: artifacts), indexLines: indexLines(of: artifacts))
+            } receive: { index, target in
+                found[index] = target
+            }
+        } catch {
+            // Nothing above throws: a session whose artifacts cannot be read is left out.
         }
-        return targets
+        return found.compactMap { $0 }
+    }
+
+    /// Runs `work` for `0..<count`, at most one task per processor at a time, and hands each
+    /// result to `receive` on the calling task as it finishes. The first error stops the rest.
+    static func inParallel<Result: Sendable>(
+        _ count: Int,
+        work: @escaping @Sendable (Int) async throws -> Result,
+        receive: (Int, Result) throws -> Void
+    ) async throws {
+        let limit = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        try await withThrowingTaskGroup(of: (Int, Result).self) { group in
+            var next = 0
+            func start() {
+                let index = next
+                group.addTask { (index, try await work(index)) }
+                next += 1
+            }
+            while next < min(count, limit) { start() }
+            while let (index, result) = try await group.next() {
+                try receive(index, result)
+                if next < count { start() }
+            }
+        }
     }
 
     static func indexLines(of artifacts: [Artifact]) -> [IndexLines] {
@@ -48,43 +79,68 @@ public struct SecretScanner: Sendable {
         return files
     }
 
-    /// Scans every target. Throws `CancellationError` when the task is cancelled.
+    /// Scans every target, several files at a time. Findings come out in the order of the
+    /// targets and their files, then the shared index files, whatever order the reads finish
+    /// in. Throws `CancellationError` when the task is cancelled.
     public func scan(
         _ targets: [SecretScanTarget],
         progress: @Sendable (SecretScanProgress) -> Void = { _ in }
     ) async throws -> SecretScanReport {
-        let matcher = SecretMatcher()
-        var report = SecretScanReport()
-        for (index, target) in targets.enumerated() {
-            for file in target.files {
-                try Task.checkCancellation()
-                switch try scanFile(file, session: target.session, matcher: matcher) {
-                case .scanned(let findings, let bytes):
-                    report.findings += findings
-                    report.filesScanned += 1
-                    report.bytesScanned += bytes
-                case .skipped(let reason):
-                    report.skipped.append(SkippedFile(sessionID: target.session.id, file: file, reason: reason))
-                case .ignored:
-                    break
-                }
-            }
-            report.sessionsScanned += 1
-            progress(SecretScanProgress(sessionsDone: index + 1, sessionsTotal: targets.count, findings: report.findings.count))
-            await Task.yield()
+        enum Job: Sendable {
+            case file(URL, target: Int)
+            /// One pass per shared index file, however many sessions have lines in it.
+            case index(URL, owners: [(IndexLines, Session)])
         }
-        // One pass per shared index file, however many sessions have lines in it.
+        var jobs: [Job] = []
+        for (index, target) in targets.enumerated() {
+            jobs += target.files.map { .file($0, target: index) }
+        }
         let shared = Dictionary(grouping: targets.flatMap { target in target.indexLines.map { ($0, target.session) } }, by: { $0.0.file })
-        for (file, owners) in shared.sorted(by: { $0.key.path < $1.key.path }) {
+        jobs += shared.sorted(by: { $0.key.path < $1.key.path }).map { .index($0.key, owners: $0.value) }
+
+        // A session counts as done once all its files are read.
+        var remaining = targets.map(\.files.count)
+        var sessionsDone = 0, findingsSoFar = 0
+        func sessionFinished() {
+            sessionsDone += 1
+            progress(SecretScanProgress(sessionsDone: sessionsDone, sessionsTotal: targets.count, findings: findingsSoFar))
+        }
+        for count in remaining where count == 0 { sessionFinished() }
+
+        var results = [FileResult?](repeating: nil, count: jobs.count)
+        let allJobs = jobs
+        try await Self.inParallel(jobs.count) { [self] index -> FileResult in
             try Task.checkCancellation()
-            switch try scanIndexFile(file, owners: owners, matcher: matcher) {
+            let matcher = SecretMatcher()
+            switch allJobs[index] {
+            case .file(let url, let target): return try scanFile(url, session: targets[target].session, matcher: matcher)
+            case .index(let url, let owners): return try scanIndexFile(url, owners: owners, matcher: matcher)
+            }
+        } receive: { index, result in
+            results[index] = result
+            if case .scanned(let findings, _) = result { findingsSoFar += findings.count }
+            if case .file(_, let target) = jobs[index] {
+                remaining[target] -= 1
+                if remaining[target] == 0 { sessionFinished() }
+            }
+        }
+
+        var report = SecretScanReport()
+        report.sessionsScanned = targets.count
+        for (job, result) in zip(jobs, results) {
+            switch result {
             case .scanned(let findings, let bytes):
                 report.findings += findings
                 report.filesScanned += 1
                 report.bytesScanned += bytes
             case .skipped(let reason):
-                for (_, session) in owners { report.skipped.append(SkippedFile(sessionID: session.id, file: file, reason: reason)) }
-            case .ignored:
+                switch job {
+                case .file(let file, let target):
+                    report.skipped.append(SkippedFile(sessionID: targets[target].session.id, file: file, reason: reason))
+                case .index(let file, let owners):
+                    for (_, session) in owners { report.skipped.append(SkippedFile(sessionID: session.id, file: file, reason: reason)) }
+                }
+            case .ignored, nil:
                 break
             }
         }
@@ -97,20 +153,22 @@ public struct SecretScanner: Sendable {
         try await scan(Self.targets(for: [session], adapters: [adapter]))
     }
 
-    enum FileResult {
+    enum FileResult: Sendable {
         case scanned([SecretFinding], bytes: Int64)
         case skipped(String)
         /// Binary content such as images; nothing to say about it.
         case ignored
     }
 
+    static let compressedReason = "It is in a zstd-compressed rollout, which Domovy reads but does not rewrite. Deleting the session removes it."
+
     static let binaryExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "pdf", "zip", "gz", "sqlite", "db", "img"]
 
     func scanFile(_ url: URL, session: Session, matcher: SecretMatcher) throws -> FileResult {
         let name = url.lastPathComponent
-        if name.hasSuffix(".zst") { return .skipped("It is compressed with zstd, which Domovy cannot read yet.") }
-        if Self.binaryExtensions.contains(url.pathExtension.lowercased()) { return .ignored }
-        if Self.looksBinary(url) { return .ignored }
+        let isZstd = name.hasSuffix(".zst")
+        if !isZstd, Self.binaryExtensions.contains(url.pathExtension.lowercased()) { return .ignored }
+        if !isZstd, Self.looksBinary(url) { return .ignored }
         let isJSONLines = name.hasSuffix(".jsonl") || name.contains(".jsonl.") || name.contains(".jsonl-")
 
         var stream: LineStream
@@ -125,7 +183,14 @@ public struct SecretScanner: Sendable {
         var seen = Set<Int64>()
         var bytes: Int64 = 0
         var checked = 0
-        while let line = try stream.next() {
+        while true {
+            let next: LineStream.Line?
+            do {
+                next = try stream.next()
+            } catch let error as ZstdError {
+                return .skipped(error.localizedDescription)
+            }
+            guard let line = next else { break }
             checked += 1
             if checked % 512 == 0, Task.isCancelled { throw CancellationError() }
             bytes = line.offset + Int64(line.bytes.count)
@@ -146,7 +211,9 @@ public struct SecretScanner: Sendable {
                     byteRange: start..<(line.offset + Int64(match.range.upperBound)),
                     lineOffset: line.offset,
                     lineLength: line.bytes.count,
-                    redaction: Self.redaction(for: match, in: lineBytes, isJSONLines: isJSONLines, isPartial: line.isPartial, validJSON: validJSON)
+                    redaction: isZstd
+                        ? .notRedactable(reason: Self.compressedReason)
+                        : Self.redaction(for: match, in: lineBytes, isJSONLines: isJSONLines, isPartial: line.isPartial, validJSON: validJSON)
                 ))
             }
         }
